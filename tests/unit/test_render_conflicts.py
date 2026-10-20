@@ -112,6 +112,7 @@ def test_estimates_are_kept_and_cleared_with_the_renders(svc):
     assert again == first and again["estimate_s"] == first["estimate_s"]
     svc.clear_renders()
     assert svc._field_planner._answers == {} and svc._field_planner._bodies == {}
+    assert svc._field_planner._plans == {}
 
 
 def test_other_pathways_and_methods_get_no_field(svc):

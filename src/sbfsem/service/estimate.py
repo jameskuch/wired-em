@@ -86,6 +86,7 @@ from ..geometry.volume import curve_volume_to_mesh
 if TYPE_CHECKING:
     from ..core.structure import Neuron
     from ..geometry.closed_curve import CurveVolume
+    from ..geometry.unify import VoxelPlan
 
 __all__ = [
     "CURVE_METHODS",
@@ -745,24 +746,31 @@ class FieldPlanner:
     ``pieces_of(neuron, options)`` makes the pieces as a build would (the
     facade's ``_field_pieces``); ``peak_mb(neuron, options)`` is the build
     gate's memory price for those options, which prices the whole raw budget
-    a Face cap allows; ``sheet_mb(raw_triangles, capped)`` is what a build
-    that draws that many raw triangles peaks at (measured on Inferior c1178,
-    the facade's ``FIELD_SHEET_*``; c16137 at 0.04 um with every triangle
-    kept, 2.52 million: 1,422 MB from it, 1,429 MB measured on 2026-10-20),
-    which is what the page is told.
+    a Face cap allows over 3 million and the sheet planned here
+    (:meth:`raw_triangles`), whichever is more; ``sheet_mb(raw_triangles,
+    face_cap, reduce_fraction)`` is what a build that draws that many raw
+    triangles peaks at (measured on Inferior c1178, the facade's
+    ``field_sheet_mb``; c16137 at 0.04 um with every triangle kept, 2.52
+    million: 1,422 MB from it, 1,429 MB measured on 2026-10-20), which is what
+    the page is told.
     """
 
-    #: Cells (copy and pieces) and answers kept.
+    #: Cells (copy and pieces), plans and answers kept.
     CELLS_KEPT = 8
+    PLANS_KEPT = 256
     ANSWERS_KEPT = 256
 
     def __init__(self, pieces_of: Callable[[Neuron, dict], list],
                  peak_mb: Callable[[Neuron, dict], float],
-                 sheet_mb: Callable[[int, bool], float]) -> None:
+                 sheet_mb: Callable[[int, int, float], float]) -> None:
         self._pieces_of = pieces_of
         self._peak_mb = peak_mb
         self._sheet_mb = sheet_mb
         self._bodies: OrderedDict[tuple, tuple[list, list]] = OrderedDict()
+        # Plans by cell and grid sizing: the build gate asks for the one a mesh
+        # job will build (raw_triangles), which the page's estimate of the same
+        # settings has usually planned already.
+        self._plans: OrderedDict[tuple, VoxelPlan | None] = OrderedDict()
         self._answers: OrderedDict[tuple, dict] = OrderedDict()
         self._lock = threading.Lock()
 
@@ -798,9 +806,44 @@ class FieldPlanner:
         return (str(neuron.source), int(neuron.id), getattr(neuron, "load_serial", None),
                 *(repr(options.get(k)) for k in FIELD_PIECE_KEYS))
 
+    def _plan(self, neuron: Neuron, options: dict, voxel_um: float, faces: int) -> VoxelPlan | None:
+        """:func:`~sbfsem.geometry.unify.plan_voxel` of the cell's bodies for a Fine
+        voxel of ``voxel_um`` under Face cap ``faces``, kept: 0.04 to 0.11 s a plan."""
+        from ..geometry.unify import plan_voxel, raw_budget
+
+        pathway = str(options["pathway"])
+        blend = float(options.get("voxel2_blend_um", 0.0) or 0.0) if pathway == "voxel2" else 0.0
+        budget = raw_budget(faces)
+        key = (*self._cell_key(neuron, options), float(voxel_um), budget, blend)
+        with self._lock:
+            if key in self._plans:
+                self._plans.move_to_end(key)
+                return self._plans[key]
+        bodies, thin = self._cell(neuron, options)
+        made = plan_voxel(bodies, thin, voxel_um=voxel_um, max_raw_faces=budget,
+                          blend_um=blend, mode=FIELD_MODES[pathway])
+        with self._lock:
+            self._plans[key] = made
+            while len(self._plans) > self.PLANS_KEPT:
+                self._plans.popitem(last=False)
+        return made
+
+    def raw_triangles(self, neuron: Neuron, options: dict) -> int | None:
+        """The raw triangles a build of ``neuron`` with ``options`` (the mesh
+        route's, method canonical) is sized to draw before its Face cap
+        decimates them; ``None`` when there is nothing to contour.  What the
+        build gate prices the sheet at.  The sizing counts 3.5 triangles a
+        voxel of surface, so builds draw fewer: 0.51 to 0.82 of it on Inferior
+        c943, c1178 and c16137, Temporal c106, RPC1 c430 and RC2 c5624
+        (2026-10-20)."""
+        plan = self._plan(neuron, options, float(options.get("voxel2_um", 0.0) or 0.0),
+                          int(options.get("voxel2_faces", 0) or 0))
+        return None if plan is None else int(min(plan.raw_faces, plan.raw_budget))
+
     def forget(self) -> None:
         with self._lock:
             self._bodies.clear()
+            self._plans.clear()
             self._answers.clear()
 
     def estimate(self, neuron: Neuron, options: dict) -> dict[str, Any]:
@@ -808,7 +851,7 @@ class FieldPlanner:
         method already canonical) would contour at, and what would change it."""
         key = (*self._cell_key(neuron, options), str(options.get("method")),
                *(repr(options.get(k)) for k in ("voxel2_um", "voxel2_faces", "voxel2_blend_um",
-                                                "meshlab", "meshlab_depth")))
+                                                "reduce_fraction", "meshlab", "meshlab_depth")))
         with self._lock:
             held = self._answers.get(key)
             if held is not None:
@@ -829,21 +872,16 @@ class FieldPlanner:
             RAW_PER_CAPPED_FACE,
             TYPED_MIN_VOXEL_UM,
             WORK_PER_RAW_FACE,
-            plan_voxel,
-            raw_budget,
         )
 
         t0 = time.perf_counter()
         pathway = str(options["pathway"])
-        bodies, thin = self._cell(neuron, options)
         typed = float(options.get("voxel2_um", 0.0) or 0.0)
         cap = int(options.get("voxel2_faces", 0) or 0)
-        blend = float(options.get("voxel2_blend_um", 0.0) or 0.0) if pathway == "voxel2" else 0.0
-        mode = FIELD_MODES[pathway]
+        reduce = float(options.get("reduce_fraction", 1.0) or 1.0)
 
         def plan(voxel_um: float, faces: int):
-            return plan_voxel(bodies, thin, voxel_um=voxel_um, max_raw_faces=raw_budget(faces),
-                              blend_um=blend, mode=mode)
+            return self._plan(neuron, options, voxel_um, faces)
 
         now = plan(typed, cap)
         if now is None:
@@ -858,7 +896,7 @@ class FieldPlanner:
             return {"voxel2_faces": int(faces), "voxel2_um": typed,
                     "voxel_um": round(p.voxel_um, 4), "reason": p.reason,
                     "raw_triangles": raw, "triangles": kept(p, faces),
-                    "peak_mb": round(float(self._sheet_mb(raw, faces > 0))),
+                    "peak_mb": round(float(self._sheet_mb(raw, faces, reduce))),
                     "gate_mb": round(float(self._peak_mb(
                         neuron, {**options, "voxel2_faces": int(faces), "voxel2_um": typed})))}
 
@@ -903,7 +941,8 @@ class FieldPlanner:
             "triangles": kept(now, cap),
             "work": int(now.work),
             "work_budget": int(now.work_budget),
-            "peak_mb": round(float(self._sheet_mb(int(min(now.raw_faces, now.raw_budget)), cap > 0))),
+            "peak_mb": round(float(self._sheet_mb(int(min(now.raw_faces, now.raw_budget)), cap,
+                                                  reduce))),
             "gate_mb": round(float(self._peak_mb(neuron, options))),
             # The least Face cap that builds the target voxel; None when the
             # build is not held back by its cap, or no cap reaches the target.

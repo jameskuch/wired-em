@@ -898,7 +898,7 @@ def start_mesh_job(request: Request, source: str, neuron_id: int,
             meshlab=params.get("meshlab", "none"), meshlab_depth=params.get("meshlab_depth", 9),
             curve_averaging=curve_averaging(params["method"], params),
             voxel2_faces=params.get("voxel2_faces"), voxel2_um=params.get("voxel2_um"),
-            curve_options=params, neuron=neuron,
+            curve_options=params, field_options=params, neuron=neuron,
         )
     except Exception:  # noqa: BLE001 - the estimate must never block a build
         weight = 0.0
@@ -931,7 +931,7 @@ def start_grid_job(request: Request, source: str, neuron_id: int,
             pixel_size_um=params["pixel_size_um"], pathway=params.get("pathway", "original"),
             curve_averaging=curve_averaging(params["method"], params),
             voxel2_faces=params.get("voxel2_faces"), voxel2_um=params.get("voxel2_um"),
-            curve_options=params, neuron=neuron,
+            curve_options=params, field_options=params, neuron=neuron,
         )
     except Exception:  # noqa: BLE001 - the estimate must never block a build
         weight = 0.0

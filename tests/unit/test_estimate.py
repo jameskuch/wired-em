@@ -10,6 +10,7 @@ of the cell, behind the volume guard, outside the build queue.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -385,6 +386,121 @@ def test_the_build_gate_prices_a_fine_voxel_typed_under_the_old_floor(c943):
             943, "i", pathway="voxel")
     finally:
         svc.close()
+
+
+def _field_options(svc, **kw):
+    return {**svc._mesh_options(pathway="voxel2", **kw), "method": "cylinder"}
+
+
+def _gate(svc, options, *, planned=True):
+    return svc.estimate_peak_mb(943, "i", method=options["method"], pathway=options["pathway"],
+                                voxel2_faces=options["voxel2_faces"], voxel2_um=options["voxel2_um"],
+                                field_options=options if planned else None)
+
+
+def test_the_build_gate_prices_the_sheet_a_field_build_is_planned_to_draw(c943):
+    """Under 3 million raw triangles the gate priced a field build by its annotations alone:
+    RPC1 c430 at a Face cap of 1,460,000 drew 2.4 million and peaked at 2,582 MB, Inferior
+    c1178 at 1,100,000 drew 2.3 million and peaked at 2,535, priced 2,546 and 1,451
+    (2026-10-20).  Given the build's options it prices the sheet the build is sized to draw
+    as well, whichever is more, and no build draws more than that sheet."""
+    from sbfsem.service import facade
+
+    svc = SbfsemService(offline=True)
+    try:
+        svc.add_neuron(c943)
+        neuron = svc.neuron(943, "i")
+        # A sheet under its cap is kept as drawn: no decimator's copy.
+        under = _field_options(svc, voxel2_um=0.04, voxel2_faces=900_000)
+        raw = svc._field_planner.raw_triangles(neuron, under)
+        assert 0 < raw < 900_000
+        sheet = facade.FIELD_SHEET_BASE_MB + raw * facade.FIELD_SHEET_BYTES_PER_FACE / 1e6
+        assert _gate(svc, under, planned=False) < sheet
+        assert _gate(svc, under) == round(sheet)
+        # A sheet over its cap is decimated, and the copy is priced too.
+        over = _field_options(svc, voxel2_um=0.04, voxel2_faces=150_000)
+        raw_over = svc._field_planner.raw_triangles(neuron, over)
+        assert raw_over > 150_000
+        assert _gate(svc, over) == round(facade.FIELD_SHEET_BASE_MB + raw_over * (
+            facade.FIELD_SHEET_BYTES_PER_FACE + facade.FIELD_SHEET_BYTES_PER_DECIMATED_FACE) / 1e6)
+        # What a build draws is never more than the sheet priced.
+        for options, planned in ((under, raw), (over, raw_over)):
+            built = svc.build_mesh(neuron, **options)
+            assert 0 < built.meta["voxel2_raw_faces"] <= planned, options["voxel2_faces"]
+        # Where the annotations price more, that price stands: the default settings, and a
+        # raw budget over 3 million, priced whole.
+        for options in (_field_options(svc), _field_options(svc, voxel2_um=0.05, voxel2_faces=0)):
+            assert _gate(svc, options) == _gate(svc, options, planned=False)
+    finally:
+        svc.close()
+
+
+def test_the_sheet_law_counts_the_decimators_copy_only_when_it_runs():
+    """Temporal c106 at the default cap drew 323,256 raw triangles, kept them all and peaked
+    at 380 MB: a sheet is decimated only over its Face cap or under a Decimate of 1."""
+    from sbfsem.service.facade import (
+        FIELD_SHEET_BASE_MB,
+        FIELD_SHEET_BYTES_PER_DECIMATED_FACE,
+        FIELD_SHEET_BYTES_PER_FACE,
+        field_sheet_mb,
+    )
+
+    kept = FIELD_SHEET_BASE_MB + 323_256 * FIELD_SHEET_BYTES_PER_FACE / 1e6
+    copied = FIELD_SHEET_BASE_MB + 323_256 * (
+        FIELD_SHEET_BYTES_PER_FACE + FIELD_SHEET_BYTES_PER_DECIMATED_FACE) / 1e6
+    assert field_sheet_mb(323_256, 400_000) == pytest.approx(kept)
+    assert field_sheet_mb(323_256, 0) == pytest.approx(kept)
+    assert field_sheet_mb(323_256, 323_256) == pytest.approx(kept)
+    assert field_sheet_mb(323_256, 300_000) == pytest.approx(copied)
+    assert field_sheet_mb(323_256, 0, 0.5) == pytest.approx(copied)
+
+
+def test_the_gate_plans_only_field_builds_on_the_pages_plans(c943, monkeypatch):
+    """The plan runs in the web process on the mesh job's submit: after the page's estimate of
+    the same settings it is the one already made.  Nothing but a whole-cell field is planned,
+    and a plan that fails leaves the other price."""
+    svc = SbfsemService(offline=True)
+    try:
+        svc.add_neuron(c943)
+        options = _field_options(svc, voxel2_um=0.04, voxel2_faces=900_000)
+        svc.render_estimate(943, "i", memory_limit_mb=9000, **options)
+        planner = svc._field_planner
+        held = (len(planner._plans), len(planner._bodies))
+        priced = _gate(svc, options)
+        assert (len(planner._plans), len(planner._bodies)) == held, "no plan of its own"
+        assert priced > _gate(svc, options, planned=False)
+        for method, pathway in (("cylinder", "voxel"), ("cylinder", "original"),
+                                ("hybrid", "voxel2"), ("closedcurve", "voxel2")):
+            kw = {"method": method, "pathway": pathway, "voxel2_faces": 900_000, "voxel2_um": 0.04}
+            assert svc.estimate_peak_mb(943, "i", field_options={**options, "pathway": pathway},
+                                        **kw) == svc.estimate_peak_mb(943, "i", **kw), (method, pathway)
+
+        def fails(*_args, **_kw):
+            raise RuntimeError("no plan")
+
+        monkeypatch.setattr(planner, "raw_triangles", fails)
+        assert _gate(svc, options) == _gate(svc, options, planned=False)
+    finally:
+        svc.close()
+
+
+def test_a_mesh_job_is_weighed_by_the_sheet_it_will_draw(i943_path):
+    app = create_app()
+    with TestClient(app) as local:
+        svc = app.state.service
+        svc.offline = True
+        svc._disk_meshes = None
+        svc.add_neuron(read_legacy_json(i943_path))
+        query = "method=cylinder&pathway=voxel2&voxel2_um=0.04&voxel2_faces=900000"
+        field = local.get(f"/api/neurons/i/943/render-estimate?{query}").json()["field"]
+        started = local.get(f"/api/neurons/i/943/mesh-job?{query}").json()
+        assert started["weight_mb"] == field["gate_mb"] > svc.estimate_peak_mb(
+            943, "i", method="cylinder", pathway="voxel2", voxel2_um=0.04, voxel2_faces=900_000)
+        deadline = time.time() + 120
+        while local.get(f"/api/mesh-jobs/{started['job_id']}").json()["status"] not in (
+                "done", "error", "cancelled"):
+            assert time.time() < deadline, "the build did not finish"
+            time.sleep(0.05)
 
 
 # -- the route ----------------------------------------------------------------------

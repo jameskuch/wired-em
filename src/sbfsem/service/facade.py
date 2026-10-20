@@ -387,12 +387,27 @@ FIELD_BYTES_PER_RAW_FACE = 500.0
 #: the page can make: about 8 GB priced, 6.1 GB measured on c1178.
 FIELD_BYTES_PER_RAW_FACE_DECIMATED = 1000.0
 #: A whole-cell sheet as the measurements on c1178 above put it (2.5.1): a peak of
-#: 310 MB plus 445 bytes a raw triangle, and 370 more for each under a Face cap
-#: (the decimator's copy).  What a typed Fine voxel under the automatic floor is
-#: priced at, for the whole raw budget it may march (``estimate_peak_mb``).
+#: 310 MB plus 445 bytes a raw triangle, and 370 more for each when a Face cap
+#: decimates it (the decimator's copy).  What a typed Fine voxel under the
+#: automatic floor is priced at, for the whole raw budget it may march, and every
+#: field build at the sheet it is planned to draw (``estimate_peak_mb``).
 FIELD_SHEET_BASE_MB = 310.0
 FIELD_SHEET_BYTES_PER_FACE = 445.0
 FIELD_SHEET_BYTES_PER_DECIMATED_FACE = 370.0
+
+
+def field_sheet_mb(raw_triangles: int, face_cap: int, reduce_fraction: float = 1.0) -> float:
+    """The peak, MB, of a field build that draws ``raw_triangles`` (``FIELD_SHEET_*``).
+
+    The decimator's copy is counted only when it runs: a sheet over its Face cap,
+    or a Decimate under 1 (``cylinder_render``'s ``decimate``).  A sheet under its
+    cap is kept as drawn: Temporal c106 at the default cap drew 323,256 and
+    peaked at 380 MB, which the copy would price at 573 (2026-10-20).
+    """
+    decimated = 0 < int(face_cap) < int(raw_triangles) or float(reduce_fraction) < 1.0
+    per_face = FIELD_SHEET_BYTES_PER_FACE + (FIELD_SHEET_BYTES_PER_DECIMATED_FACE if decimated else 0.0)
+    return FIELD_SHEET_BASE_MB + int(raw_triangles) * per_face / 1e6
+
 
 _CHILD_SERVICE: SbfsemService | None = None
 #: In a build-pool worker: the queue its progress reports go back on.
@@ -639,10 +654,8 @@ class SbfsemService:
                 pathway=str(o["pathway"]), meshlab=str(o.get("meshlab", "none")),
                 meshlab_depth=int(o.get("meshlab_depth", 9)),
                 voxel2_faces=int(o["voxel2_faces"]), voxel2_um=float(o["voxel2_um"]),
-                neuron=neuron),
-            lambda raw, capped: FIELD_SHEET_BASE_MB + raw * (
-                FIELD_SHEET_BYTES_PER_FACE
-                + (FIELD_SHEET_BYTES_PER_DECIMATED_FACE if capped else 0.0)) / 1e6,
+                field_options=o, neuron=neuron),
+            field_sheet_mb,
         )
         self._lock = threading.RLock()
 
@@ -1381,6 +1394,10 @@ class SbfsemService:
     #: a build over the whole budget runs alone, so another person's cell waited
     #: 30 s behind it.  A Hybrid counts only its disc annotations toward the
     #: disc half.
+    #:
+    #: ``field_options`` (the mesh route's options) lets a Voxel remesh,
+    #: Convolution or Ultraliser build be priced by the sheet it is planned to
+    #: draw as well (``FieldPlanner.raw_triangles``), whichever is more.
     def estimate_peak_mb(self, neuron_id: int, source, *, method: str = "cylinder",
                          pixel_size_um: float = 0.05, pathway: str = "original",
                          meshlab: str = "none", meshlab_depth: int = 9,
@@ -1388,6 +1405,7 @@ class SbfsemService:
                          curve_options: Mapping[str, Any] | None = None,
                          voxel2_faces: int | None = None,
                          voxel2_um: float | None = None,
+                         field_options: Mapping[str, Any] | None = None,
                          neuron: Neuron | None = None) -> float:
         if neuron is None:
             neuron = self.neuron(neuron_id, source)
@@ -1459,15 +1477,47 @@ class SbfsemService:
                 # peaked at 931 MB, priced 511 MB here before.  Priced at the sheet
                 # its budget allows instead, whichever is more.
                 if 0.0 < float(voxel2_um or 0.0) < MIN_VOXEL_UM:
-                    per_face = FIELD_SHEET_BYTES_PER_FACE + (
-                        FIELD_SHEET_BYTES_PER_DECIMATED_FACE if int(faces) > 0 else 0.0)
-                    estimate = max(estimate, FIELD_SHEET_BASE_MB + raw_budget(faces) * per_face / 1e6)
+                    estimate = max(estimate, field_sheet_mb(raw_budget(faces), int(faces)))
+                # Under 3 million raw triangles the figures above price the cell's
+                # annotations, not the sheet it draws: RPC1 c430 at a Face cap of
+                # 1,460,000 and Inferior c1178 at 1,100,000 drew 2.4 and 2.3
+                # million and peaked at 2,582 and 2,535 MB, priced 2,546 and 1,451
+                # (2026-10-20).  Priced at the sheet the build is sized to draw as
+                # well, whichever is more (3,869 and 2,978).  The sizing counts
+                # 1.2 to 2 times the triangles a build then draws, and the law,
+                # given a drawn sheet of 0.65 to 2.4 million, comes out up to 14 %
+                # under its peak, so the sheet planned is priced, not a guess at
+                # the one drawn: each build measured where it sets the price
+                # peaked 15 to 33 % under it.
+                if field_options is not None and METHOD_NAMES.get(method) in ("cylinder", "curvemesh"):
+                    estimate = max(estimate, self._planned_sheet_mb(
+                        neuron, field_options, pathway=pw, voxel2_faces=int(faces),
+                        voxel2_um=voxel2_um))
         # MeshLab runs as a child of the build worker, which keeps its own
         # heap while it waits: 337 to 563 MB more at 400,000 faces.
         if str(meshlab) != "none":
             estimate += self.MESHLAB_POISSON_MB if (
                 str(meshlab) == "poisson" and int(meshlab_depth) > 9) else self.MESHLAB_MB
         return float(round(estimate))
+
+    def _planned_sheet_mb(self, neuron: Neuron, field_options: Mapping[str, Any], *,
+                          pathway: str, voxel2_faces: int, voxel2_um: float | None) -> float:
+        """The peak of the sheet a field build of ``neuron`` is sized to draw
+        (:func:`field_sheet_mb` of ``FieldPlanner.raw_triangles``); 0 when there is
+        nothing to contour or the plan fails, which leaves the gate's other price."""
+        options = {**self._mesh_options(**field_options), "pathway": pathway,
+                   "voxel2_faces": voxel2_faces}
+        if voxel2_um is not None:
+            options["voxel2_um"] = float(voxel2_um)
+        try:
+            raw = self._field_planner.raw_triangles(neuron, options)
+        except Exception:  # noqa: BLE001 - a plan only raises the price; never block a build
+            log.warning("c%s: no sheet plan for the build gate", getattr(neuron, "id", "?"),
+                        exc_info=True)
+            return 0.0
+        if not raw:
+            return 0.0
+        return field_sheet_mb(raw, voxel2_faces, float(field_options.get("reduce_fraction", 1.0) or 1.0))
 
     def _field_pieces(self, neuron: Neuron, options: dict) -> list:
         """The pieces a field pathway's build contours ``neuron`` from, under
@@ -1524,8 +1574,9 @@ class SbfsemService:
                 meshlab=str(opts.get("meshlab", "none")),
                 meshlab_depth=int(opts.get("meshlab_depth", 9)),
                 voxel2_faces=opts.get("voxel2_faces"), voxel2_um=opts.get("voxel2_um"),
-                neuron=neuron)
-            field = {**self._mesh_options(**opts), "method": method}
+                field_options=opts, neuron=neuron)
+            field = {**self._mesh_options(**opts), "method": method,
+                     "reduce_fraction": float(opts.get("reduce_fraction", 1.0))}
             if FieldPlanner.applies(method, field):
                 answer["field"] = self._field_planner.estimate(neuron, field)
         answer["cell"] = int(neuron.id)
@@ -2973,7 +3024,7 @@ class SbfsemService:
                     meshlab=o.get("meshlab", "none"), meshlab_depth=o.get("meshlab_depth", 9),
                     curve_averaging=curve_averaging(o.get("method", "cylinder"), o),
                     voxel2_faces=o.get("voxel2_faces"), voxel2_um=o.get("voxel2_um"),
-                    curve_options=o, neuron=neuron,
+                    curve_options=o, field_options=o, neuron=neuron,
                 ))
             except Exception:  # noqa: BLE001 - the estimate must never block a job
                 continue

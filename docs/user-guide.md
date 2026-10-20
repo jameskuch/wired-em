@@ -712,8 +712,14 @@ are indicative; the mean deviation from the annotations is 0.59 µm at every row
 | 0.04 (0.0414) | 3,400,000 | 7.1 M → 3.4 M | 78 s | 5,615 | 194 M |
 
 Peak memory is about 310 MB plus 0.445 MB for every 1,000 raw triangles, and a
-Face cap adds about 0.37 MB more for every 1,000 raw triangles, because the
-decimator holds a second copy. So the heaviest request the page can make, a cap
+Face cap that decimates the sheet (a sheet over its cap) adds about 0.37 MB more
+for every 1,000 raw triangles, because the decimator holds a second copy. Since
+2.19.2 the build gate weighs every Voxel remesh, Convolution and Ultraliser build
+at least at the sheet it is sized to draw, the one the render estimate names:
+before, a sheet under 3 million was weighed by the cell's annotations alone, and
+RPC1 c430 at a Face cap of 1,460,000 (2,582 MB) and Inferior c1178 at 1,100,000
+(2,535 MB) were weighed at 2,546 and 1,451 MB; now 3,869 and 2,978. So the
+heaviest request the page can make, a cap
 of 3.4 million or more on a cell that fills the 10 million, is about 6 GB on
 c1178 and is weighed at 8 GB by the build gate, which then runs it alone;
 Ultraliser at the finest voxel peaked at 3,305 MB and 119 s (7.1 M faces), and
