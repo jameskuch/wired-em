@@ -32,6 +32,34 @@ function remember(detail) {
   return detail;
 }
 
+/*
+ * How many loads of each cell this tab has begun, and how many are still under
+ * way.  A load can change what the copy it names holds (Update from Viking keeps
+ * the copy's name), so an answer asked of a cell while one was under way, or
+ * across one, may be of either state: app.js keeps an extra for later loads only
+ * when neither happened (`loadsOf`, appcore `keptAnswer`).
+ */
+const loads = new Map();
+
+/** `{ begun, running }`: this tab's loads of the cell (see `loads`). */
+export function loadsOf(source, id) {
+  const entry = loads.get(cellKey(source, id));
+  return { begun: entry?.begun ?? 0, running: entry?.running ?? 0 };
+}
+
+function counted(source, id, send) {
+  const key = cellKey(source, id);
+  const entry = loads.get(key) ?? { begun: 0, running: 0 };
+  entry.begun += 1;
+  entry.running += 1;
+  loads.set(key, entry);
+  const done = () => { entry.running -= 1; };
+  // A `send` that throws is a rejected promise like any other failure, and still ends.
+  const out = (async () => send())();
+  out.then(done, done);
+  return out;
+}
+
 function withCopy(path) {
   const match = CELL_PATH.exec(path);
   if (!match || /[?&]copy=/.test(path)) return path;
@@ -559,12 +587,12 @@ export const api = {
     }, 'resolving structures…').then((r) => r.json()),
 
   loaded: () => getJSON('/api/neurons'),
-  load: (body) =>
+  load: (body) => counted(body.source, body.id, () =>
     request('/api/neurons', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(withMoves(body)),
-    }, `loading c${body.id}…`).then((r) => r.json()).then(remember),
+    }, `loading c${body.id}…`).then((r) => r.json()).then(remember)),
   importFile: (file) => {
     const form = new FormData();
     form.append('file', file);

@@ -56,7 +56,10 @@ transforms switch where a volume has none):
   an Apply does (2026-10-20): its annotations and outlines are asked for once each, while its
   surface builds, and its rings are drawn with the surface.  A second switch made while the first
   one's outlines are still out (held here) draws the second copy's rings, never the first's, and
-  nothing of the first is left in the caches for a later draw.
+  nothing of the first is left in the caches for a later draw.  A switch back to a setting already
+  drawn, and an Update that found nothing changed, ask for neither and draw what the tab kept of
+  that state; an Update that found the cell edited (its stamp moved here in the load's answer)
+  asks again (2.17.7).
 * ``console`` -- nothing logged an error or a warning on the way.
 """
 
@@ -1163,7 +1166,7 @@ SWITCH_SPY = r"""
   const tagNow = () => window.sbfsem.state.neurons.get(key)?.summary?.copy_tag ?? null;
   const mark = (o) => (o && typeof o === 'object' ? { copy: o.__copy ?? null, seq: o.__seq ?? null } : null);
   window.__drawn = []; window.__asked = []; window.__seq = window.__seq || 0;
-  window.__holdNext = false; window.__held = 0;
+  window.__holdNext = false; window.__held = 0; window.__editNext = false;
   if (!window.__switchSpied) {
     window.__switchSpied = true;
     for (const name of ['setMesh', 'setDiscs']) {
@@ -1177,6 +1180,17 @@ SWITCH_SPY = r"""
         return f.call(this, k, data, opts, ...rest);
       };
     }
+    // The next load's answer as Viking would give it had the cell been edited: a later stamp.
+    const load = api.load;
+    api.load = async function (...a) {
+      const detail = await load.apply(this, a);
+      if (window.__editNext && detail?.summary?.data_stamp) {
+        window.__editNext = false;
+        const later = new Date(Date.parse(detail.summary.data_stamp) + 1000).toISOString();
+        return { ...detail, summary: { ...detail.summary, data_stamp: later } };
+      }
+      return detail;
+    };
     for (const name of ['nodes', 'closedCurves']) {
       const f = api[name];
       api[name] = async function (...a) {
@@ -1265,6 +1279,20 @@ def _check_early(r: Report, what: str, got) -> None:
             and 0 <= got['setDiscs'] - got['setMesh'] < 1000 and not got['stale'], got)
 
 
+def _check_kept(r: Report, what: str, got, marks) -> None:
+    """A draw of a state the tab drew before: nothing asked, the rings drawn with the surface
+    from what was kept (`marks`: the copy and serial their answers were asked under, both None
+    for answers from before the spy)."""
+    ok = bool(got) and got.get('last') is not None
+    r.check(f'{what}: neither the annotations nor the outlines are asked for',
+            ok and not got['nodes'] and not got['outlines'], got)
+    r.check(f'{what}: the rings are drawn with the surface, from what the tab kept of that state',
+            ok and got['setMesh'] is not None and got['setDiscs'] is not None
+            and 0 <= got['setDiscs'] - got['setMesh'] < 1000
+            and got['last']['nodes'] == marks['nodes'] and got['last']['outlines'] == marks['outlines'],
+            {'got': got, 'want': marks})
+
+
 def s_regswitch(c: Chrome, r: Report, ctx):
     r.start("regswitch: a Registration switch and Update from Viking ask for the new copy's extras while it builds")
     key = start(c, ctx)
@@ -1284,19 +1312,21 @@ def s_regswitch(c: Chrome, r: Report, ctx):
     got = js(c, SWITCH_REPORT % (q, t0, seq0))
     _check_early(r, 'transforms off', got)
     tag1 = (got or {}).get('tag')
+    # What its rings were drawn from, which a switch back to it draws again.
+    first = {'nodes': ((got or {}).get('last') or {}).get('nodes'), 'outlines': ((got or {}).get('last') or {}).get('outlines')}
 
-    # A second switch while the first one's outlines are still out: the transforms on again, its
-    # outlines held after its surface is drawn, then the correction off.  The first copy's rings
-    # are never drawn, nor kept for a later draw.
+    # A second switch while the first one's outlines are still out: the correction off, its
+    # outlines held after its surface is drawn, then the transforms on again.  Both are settings
+    # not drawn before.  The first copy's rings are never drawn, nor kept for a later draw.
     js(c, 'window.__holdNext = true')
     t0, seq0 = _mark(c)
-    _reg_box(c, 'transforms', True)
+    _reg_box(c, 'correction', False)
     held = c.wait_for("window.__held === 1 && window.__drawn.some((d) => d.name === 'setMesh' && d.at >= %s"
                       " && d.tag !== %s)" % (t0, json.dumps(tag1)), 120)
     mid = js(c, "window.sbfsem.state.neurons.get(%s).summary.copy_tag" % q)
     r.check("the first switch's surface is drawn and its outlines are held", held and mid != tag1,
             {'held': held, 'tag': mid})
-    _reg_box(c, 'correction', False)
+    _reg_box(c, 'transforms', True)
     _drawn_after(c, key, t0, mid)
     js(c, 'window.__release && window.__release()')
     time.sleep(1.5)
@@ -1317,17 +1347,46 @@ def s_regswitch(c: Chrome, r: Report, ctx):
             bool(again) and again['nodes']['copy'] == again['tag'] and again['outlines']['copy'] == again['tag']
             and again['tag'] == (got or {}).get('tag'), again)
 
-    # Update from Viking: the row's refresh button.  The copy keeps its name; what is drawn is what
-    # was asked after the click.
+    # Back to settings already drawn: the correction on again is the copy the cell started on
+    # (its answers came before the spy, so they carry no marks), then the transforms off is the
+    # first switch's copy.  Neither asks for anything.
+    t0, seq0 = _mark(c)
+    _reg_box(c, 'correction', True)
+    _drawn_after(c, key, t0, (got or {}).get('tag'))
+    c.settle(3)
+    back = js(c, SWITCH_REPORT % (q, t0, seq0))
+    r.check('back on the first setting', bool(back) and back['tag'] == tag0, back)
+    unmarked = {'copy': None, 'seq': None}
+    _check_kept(r, 'switch back to the setting the cell started on', back, {'nodes': unmarked, 'outlines': unmarked})
+    t0, seq0 = _mark(c)
+    _reg_box(c, 'transforms', False)
+    _drawn_after(c, key, t0, tag0)
+    c.settle(3)
+    back = js(c, SWITCH_REPORT % (q, t0, seq0))
+    r.check("back on the first switch's setting", bool(back) and back['tag'] == tag1, back)
+    _check_kept(r, "switch back to the first switch's setting", back, first)
+
+    # Update from Viking: the row's refresh button.  The copy keeps its name.  Viking had nothing
+    # newer, so the state is the one drawn and nothing is asked; then the cell as if edited in
+    # Viking meanwhile (a later stamp in the load's answer): asked again, early.
+    refresh = json.dumps(f'.neuron-item[data-key="{key}"] .icon-btn.refresh')
     t0, seq0 = _mark(c)
     clicked = js(c, """(() => { const b = document.querySelector(%s); if (!b) return false; b.click(); return true; })()"""
-                 % json.dumps(f'.neuron-item[data-key="{key}"] .icon-btn.refresh'))
+                 % refresh)
     r.check('the refresh button is there', clicked)
+    c.wait_for("window.__drawn.some((d) => d.name === 'setDiscs' && d.at >= %s)"
+               " && window.__drawn.some((d) => d.name === 'setMesh' && d.at >= %s)" % (t0, t0), 180)
+    c.settle(3)
+    got = js(c, SWITCH_REPORT % (q, t0, seq0))
+    _check_kept(r, 'Update from Viking, nothing changed', got, first)
+    js(c, 'window.__editNext = true')
+    t0, seq0 = _mark(c)
+    js(c, """(() => { document.querySelector(%s).click(); })()""" % refresh)
     c.wait_for("window.__drawn.some((d) => d.name === 'setDiscs' && d.at >= %s && (d.nodes?.seq ?? 0) > %s)"
                % (t0, seq0), 180)
     c.settle(3)
     got = js(c, SWITCH_REPORT % (q, t0, seq0))
-    _check_early(r, 'Update from Viking', got)
+    _check_early(r, 'Update from Viking, the cell edited', got)
 
     # As it was: the correction and the transforms back on.
     for which in ('correction', 'transforms'):

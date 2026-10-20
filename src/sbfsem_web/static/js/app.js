@@ -1,6 +1,6 @@
 // Wiring: DOM events -> API calls -> views.
 
-import { api, onBusy, ApiError, setMovesProvider } from './api.js';
+import { api, onBusy, ApiError, setMovesProvider, loadsOf } from './api.js';
 import {
   state, subscribe, upsertNeuron, removeNeuron, loadGeneration, selectNeuron, selectedRecord,
   selectedRecords, setSelected, selectRange, selectAll, clearSelection,
@@ -22,6 +22,7 @@ import {
   meshCacheKey, dropWithPrefix, dropOtherCopies, MeshCache, DrawTokens, importKind, isTypingTarget,
   registrationChoiceDiffers, helpLayouts, pickHelpLayout, singleFlight, sameOptions, paneCountMessage,
   StatusHold, extrasWanted, startExtras, adoptExtras, sharedRequest, sameCamera,
+  extrasWeight, keptRequest, KEPT_EXTRAS_LIMIT,
 } from './appcore.js';
 import { buildRenderForm } from './renderform.js';
 import {
@@ -198,6 +199,12 @@ let recorder;
 // other data (forgetDrawn, dropOtherCopies), when a workspace replaces the
 // cells, or when newer ones need the room.
 const meshCache = new MeshCache();
+// The outlines, annotations and skeletons this tab was answered, kept past the load
+// they came with by the state of the copy they are of (appcore `extrasKey`), least
+// recently used first out: the per-cell caches hold the current load's and are emptied
+// with it (forgetDrawn), these are what a later load at the same state is drawn from
+// (askKept).  Let go of with the surfaces after a redeploy and when a workspace opens.
+const keptExtras = new MeshCache(KEPT_EXTRAS_LIMIT, extrasWeight);
 const skeletonCache = new Map();
 // The newest draw of each cell: an older one still waiting on a build stands down.
 const draws = new DrawTokens();
@@ -1111,7 +1118,9 @@ async function checkBuild() {
   knownBuild = current;
   // The surfaces kept for Undo are keyed on the cell, its copy and stamp, not on the server's
   // geometry version: after a redeploy (or a restart) a cell loaded again must be asked for.
+  // So are its outlines, annotations and skeleton, which the new code may make otherwise.
   meshCache.clear();
+  keptExtras.clear();
   $('update-text').textContent = codeChanged
     ? `A new version (${current.version}) has been deployed. Your session will be restored.`
     : 'The server restarted. Reload to re-sync; your session will be restored.';
@@ -2740,6 +2749,30 @@ const outlinesCache = new Map();
 // change elsewhere on the cell does not fetch it again.
 const annoWireCache = new Map();
 
+/**
+ * A cell's `name` extra ('nodes', 'outlines', 'skeleton') for the copy the tab holds now:
+ * the one kept from an earlier load at the same state (a Registration switch back to a
+ * setting already drawn, the Undo of an unload, an Update that found nothing changed),
+ * else `send()`'s, kept when no load of the cell can have changed it (appcore `keptRequest`).
+ */
+function askKept(record, name, send) {
+  return keptRequest(keptExtras, name, {
+    live: () => state.neurons.get(record.key) ?? null,
+    loads: () => loadsOf(record.source, record.id),
+    send,
+  });
+}
+
+/** A cell's closed-curve outlines, kept or asked for (`askKept`). */
+function askOutlines(record) {
+  return askKept(record, 'outlines', () => api.closedCurves(record.source, record.id));
+}
+
+/** A cell's skeleton, kept or asked for (`askKept`). */
+function askSkeleton(record) {
+  return askKept(record, 'skeleton', () => api.skeleton(record.source, record.id));
+}
+
 /** The annotation wireframe's request, from a cell's display settings. */
 function annoWireParams(display) {
   return {
@@ -2770,7 +2803,7 @@ function lookAt(name) {
 async function outlinesFor(record) {
   let outlines = outlinesCache.get(record.key);
   if (!outlines) {
-    outlines = hasClosedCurves(record) ? await api.closedCurves(record.source, record.id) : [];
+    outlines = hasClosedCurves(record) ? await askOutlines(record) : [];
     outlinesCache.set(record.key, outlines);
   }
   return outlines;
@@ -2795,8 +2828,8 @@ function fetchExtrasEarly(record) {
   const caches = extraCaches();
   return startExtras(wanted, {
     nodes: () => askNodes(record),
-    outlines: () => api.closedCurves(record.source, record.id),
-    skeleton: () => api.skeleton(record.source, record.id),
+    outlines: () => askOutlines(record),
+    skeleton: () => askSkeleton(record),
     wire: async () => ({
       sig: JSON.stringify(params), data: await api.annotationWire(record.source, record.id, params),
     }),
@@ -2837,8 +2870,7 @@ async function refreshExtras(record, { early = null } = {}) {
       // its stored radius would make.
       let outlines = outlinesCache.get(record.key);
       if (!outlines) {
-        outlines = hasClosedCurves(record)
-          ? await api.closedCurves(record.source, record.id) : [];
+        outlines = hasClosedCurves(record) ? await askOutlines(record) : [];
         if (gone()) return;
         outlinesCache.set(record.key, outlines);
       }
@@ -2889,7 +2921,7 @@ async function refreshExtras(record, { early = null } = {}) {
       // re-fetching identical centerline data to do that would be waste.
       let skeleton = skeletonCache.get(record.key);
       if (!skeleton) {
-        skeleton = await api.skeleton(record.source, record.id);
+        skeleton = await askSkeleton(record);
         if (gone()) return;
         skeletonCache.set(record.key, skeleton);
       }
@@ -3024,7 +3056,7 @@ function nearestNode(nodes, point) {
  */
 function askNodes(record) {
   return sharedRequest(nodesAsked, record.key, loadGeneration(record.key),
-    () => api.nodes(record.source, record.id));
+    () => askKept(record, 'nodes', () => api.nodes(record.source, record.id)));
 }
 
 async function nodesFor(record) {
@@ -4318,6 +4350,8 @@ function initFullscreen() {
  * Drop everything drawn from a cell's old positions, so the next draw asks again.
  * Its surfaces too, unless the cell is merely unloaded (`keepSurfaces`): their
  * keys say which copy of the cell they are of, so they stay for an Undo to find.
+ * Its outlines, annotations and skeleton stay in `keptExtras`, by the state they
+ * are of, for a later load at that state; the next draw asks for them there first.
  */
 function forgetDrawn(record, { keepSurfaces = false, keepDrawn = false } = {}) {
   if (!keepSurfaces) dropWithPrefix(meshCache, `${record.key}|`);
@@ -8277,6 +8311,7 @@ async function openWorkspace(doc, label) {
   const replaced = [...state.neurons.values()];
   for (const record of replaced) forgetCell(record);
   meshCache.clear();
+  keptExtras.clear();
   // The cells the document does not bring back are let go of on the server as
   // well, as their ✕ would; the ones it names are loaded again just below.
   const kept = new Set(doc.neurons.map((n) => keyOf(n.source, n.id)));
@@ -8339,6 +8374,7 @@ window.sbfsem = {
   cacheInfo() {
     return {
       meshes: meshCache.size, meshNumbers: meshCache.weight,
+      keptExtras: keptExtras.size, keptExtraNumbers: keptExtras.weight,
       skeletons: skeletonCache.size, nodes: nodesCache.size,
       edges: edgesCache.size, outlines: outlinesCache.size, annotationWires: annoWireCache.size,
     };

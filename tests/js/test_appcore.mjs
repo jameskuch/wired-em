@@ -19,6 +19,7 @@ const {
   MeshCache, meshWeight, dropOtherCopies, singleFlight, sameOptions, chooseSource,
   helpLayouts, pickHelpLayout, paneCountMessage, StatusHold, FLARE_HOLD_MS,
   extrasWanted, startExtras, adoptExtras, sharedRequest, sameCamera,
+  extrasKey, extrasWeight, keptAnswer, keptRequest, KEPT_EXTRAS_LIMIT,
 } = await load('appcore.js');
 
 const cases = [];
@@ -554,6 +555,200 @@ test('a failed request fails for every asker and is not held, and a send that th
   await Promise.resolve();
   assert.equal(pending.has('other'), false);
 });
+
+// -- a copy's extras, kept for the next load at the same positions (2.17.7) ----------
+
+/** A record of RPC1 c430 as a load's summary gives it. */
+const loaded = (extra = {}) => ({
+  key: 'RPC1/430',
+  summary: {
+    copy_tag: 'curvefit.1', data_stamp: '2026-10-20T17:00:00.123000Z', last_modified: '2026-10-19T08:00:00Z',
+    n_nodes: 2487, positions: 'live-registration:9f1c|section-correction:4be0', ...extra,
+  },
+});
+
+test('a kept extra is keyed on the cell, its annotations and their positions, not on the copy\'s name', () => {
+  const base = extrasKey(loaded(), 'outlines');
+  assert.equal(base, extrasKey(loaded({ copy_tag: 'all.1' }), 'outlines'),
+    'two settings that move nothing differently are one state (the server keys its outlines so too)');
+  assert.notEqual(base, extrasKey(loaded(), 'nodes'), 'each extra its own');
+  assert.notEqual(base, extrasKey({ ...loaded(), key: 'RPC2/430' }, 'outlines'), 'an ID is numbered per volume');
+  assert.notEqual(base, extrasKey(loaded({ positions: 'live-registration:9f1c' }), 'outlines'),
+    'the correction off, or asked for and not applied');
+  assert.notEqual(base, extrasKey(loaded({ positions: 'section-correction:4be0' }), 'outlines'), 'the transforms off');
+  assert.notEqual(base, extrasKey(loaded({ positions: `${loaded().summary.positions}|manual:0c41aa` }), 'outlines'),
+    'a manual move');
+  assert.notEqual(base, extrasKey(loaded({ positions: null }), 'outlines'), 'the stored positions');
+  // An Update from Viking that found the cell edited.
+  assert.notEqual(base, extrasKey(loaded({ data_stamp: '2026-10-20T18:00:00Z' }), 'outlines'), 'an annotation edited');
+  assert.notEqual(base, extrasKey(loaded({ n_nodes: 2486 }), 'outlines'),
+    'an annotation deleted: the newest stamp can stay as it was, the count cannot');
+  assert.notEqual(base, extrasKey(loaded({ last_modified: '2026-10-20T18:00:00Z' }), 'outlines'), 'the structure row edited');
+  assert.equal(extrasKey(loaded({ data_stamp: null }), 'outlines'), null, 'a file import is never kept');
+  assert.equal(extrasKey(null, 'outlines'), null);
+});
+
+test('a kept extra weighs its numbers: outline points two each, annotations ten, skeleton points five', () => {
+  const outline = { outline_um: [[0, 0], [1, 0], [1, 1]], cutouts_um: [[[0.2, 0.2], [0.3, 0.2]]] };
+  assert.equal(extrasWeight([outline, { ...outline, cutouts_um: [] }]), (6 + 7 + 4) + (6 + 7));
+  assert.equal(extrasWeight([{ id: 1, xyz_um: [0, 0, 0] }, { id: 2, xyz_um: [1, 1, 1] }]), 20);
+  assert.equal(extrasWeight({ segments: [{ points_um: [[0, 0, 0], [1, 1, 1]] }, { points_um: [[2, 2, 2]] }] }), 4 + 15);
+  assert.equal(extrasWeight([]), 0, 'a cell traced only as discs');
+  // RPC1 c430's three as production answered them (2026-10-20: 897 outlines of 185,771 points
+  // and 77 cutouts, 2,487 annotations, 2,697 skeleton points) weigh 425,916.
+  assert.ok(425_916 * 7 < KEPT_EXTRAS_LIMIT, 'seven of its copies fit');
+});
+
+test('a kept extra answers without a request, and a missing one is asked for and kept', async () => {
+  const kept = new MeshCache(1000, extrasWeight);
+  const r = requests();
+  const first = keptAnswer(kept, 'k', r.send);
+  assert.equal(r.sent.length, 1);
+  r.sent[0].resolve(['outlines']);
+  assert.deepEqual(await first, ['outlines']);
+  assert.deepEqual(await keptAnswer(kept, 'k', r.send), ['outlines']);
+  assert.equal(r.sent.length, 1, 'answered from what is kept');
+  assert.equal(await keptAnswer(kept, 'k', r.send), await keptAnswer(kept, 'k', r.send), 'the same answer, not a copy');
+  // No key (a file import): asked each time, kept never.
+  const a = keptAnswer(kept, null, r.send);
+  r.sent[1].resolve(['import']);
+  await a;
+  keptAnswer(kept, null, r.send);
+  assert.equal(r.sent.length, 3);
+  assert.equal(kept.size, 1);
+});
+
+test('an answer the caller cannot vouch for, a failure or nothing is not kept', async () => {
+  const kept = new MeshCache(1000, extrasWeight);
+  const r = requests();
+  const a = keptAnswer(kept, 'k', r.send, () => false);
+  r.sent[0].resolve(['of either copy']);
+  assert.deepEqual(await a, ['of either copy'], 'still answered');
+  assert.equal(kept.has('k'), false);
+  const b = keptAnswer(kept, 'k', r.send);
+  r.sent[1].reject(new Error('502'));
+  await assert.rejects(b, /502/);
+  assert.equal(kept.has('k'), false);
+  const c = keptAnswer(kept, 'k', r.send);
+  r.sent[2].resolve(null);
+  assert.equal(await c, null);
+  assert.equal(kept.has('k'), false);
+  keptAnswer(kept, 'k', r.send);
+  assert.equal(r.sent.length, 4, 'asked again each time');
+});
+
+test('kept extras are bounded, least recently used first out', () => {
+  const kept = new MeshCache(25, extrasWeight);
+  const nodes = (n) => Array.from({ length: n }, (_, id) => ({ id }));
+  kept.set('a', nodes(1)).set('b', nodes(1));
+  kept.get('a');
+  kept.set('c', nodes(1));
+  assert.deepEqual([...kept.keys()], ['a', 'c'], 'b, used longest ago, made room');
+  kept.set('d', nodes(5));
+  assert.deepEqual([...kept.keys()], ['d'], 'one over the limit alone is kept until the next');
+});
+
+/**
+ * A cell as the page holds it: its record (replaced on each load) and the tab's loads of it,
+ * driven by the test the way api.js and state.js move them.
+ */
+function tabCell(record) {
+  const cell = { record, loads: { begun: 1, running: 0 } };
+  cell.opts = (send) => ({ live: () => cell.record, loads: () => ({ ...cell.loads }), send });
+  return cell;
+}
+
+test('a switch back to a setting already drawn sends no request; a new setting or a manual move does', async () => {
+  const kept = new MeshCache(KEPT_EXTRAS_LIMIT, extrasWeight);
+  const r = requests();
+  const corrected = loaded();
+  const uncorrected = loaded({ copy_tag: 'off.1', positions: 'live-registration:9f1c' });
+  const cell = tabCell(corrected);
+  const ask = () => keptRequest(kept, 'outlines', cell.opts(r.send));
+  const drawn = ask();
+  r.sent[0].resolve(['corrected outlines']);
+  await drawn;
+  // The correction off: a new copy and a new state, so asked.
+  cell.record = uncorrected;
+  cell.loads.begun += 1;
+  const off = ask();
+  assert.equal(r.sent.length, 2);
+  r.sent[1].resolve(['uncorrected outlines']);
+  assert.deepEqual(await off, ['uncorrected outlines']);
+  // And back on: drawn from what this tab holds.
+  cell.record = loaded();
+  cell.loads.begun += 1;
+  assert.deepEqual(await ask(), ['corrected outlines']);
+  assert.equal(r.sent.length, 2, 'no request');
+  // A manual move on top: another state, asked.
+  cell.record = loaded({ copy_tag: 'curvefit.1.m0c41aa', positions: `${corrected.summary.positions}|manual:0c41aa` });
+  cell.loads.begun += 1;
+  ask();
+  assert.equal(r.sent.length, 3);
+});
+
+test('an Update from Viking that found the cell edited asks again; one that found nothing changed does not', async () => {
+  const kept = new MeshCache(KEPT_EXTRAS_LIMIT, extrasWeight);
+  const r = requests();
+  const cell = tabCell(loaded());
+  const ask = () => keptRequest(kept, 'nodes', cell.opts(r.send));
+  const first = ask();
+  r.sent[0].resolve(['as loaded']);
+  await first;
+  // The same copy's name, loaded again: Viking had nothing newer.
+  cell.record = loaded();
+  cell.loads.begun += 1;
+  assert.deepEqual(await ask(), ['as loaded']);
+  assert.equal(r.sent.length, 1);
+  // Viking had an annotation edited.
+  cell.record = loaded({ data_stamp: '2026-10-20T19:00:00Z' });
+  cell.loads.begun += 1;
+  const edited = ask();
+  assert.equal(r.sent.length, 2);
+  r.sent[1].resolve(['edited']);
+  assert.deepEqual(await edited, ['edited']);
+});
+
+test('while a load of the cell is under way nothing is taken from what is kept, nor kept from it', async () => {
+  const kept = new MeshCache(KEPT_EXTRAS_LIMIT, extrasWeight);
+  kept.set(extrasKey(loaded(), 'outlines'), ['kept']);
+  const r = requests();
+  const cell = tabCell(loaded());
+  // Update from Viking was clicked: the server may answer from the copy before or after it.
+  cell.loads = { begun: 2, running: 1 };
+  const during = keptRequest(kept, 'outlines', cell.opts(r.send));
+  assert.equal(r.sent.length, 1, 'asked of the server, not taken from the kept');
+  r.sent[0].resolve(['edited, already']);
+  cell.loads.running = 0;
+  assert.deepEqual(await during, ['edited, already']);
+  assert.deepEqual(kept.get(extrasKey(loaded(), 'outlines')), ['kept'], 'nor kept under the state from before');
+});
+
+test('an answer that came back across a load is not kept: begun meanwhile, or answered and not yet the record', async () => {
+  const kept = new MeshCache(KEPT_EXTRAS_LIMIT, extrasWeight);
+  const r = requests();
+  const before = loaded({ positions: 'live-registration:9f1c' });
+  const cell = tabCell(before);
+  // Asked; then the same copy is loaded again with the correction applied this time.
+  const across = keptRequest(kept, 'outlines', cell.opts(r.send));
+  cell.loads.begun += 1;
+  r.sent[0].resolve(['corrected, under the uncorrected name']);
+  await across;
+  assert.equal(kept.size, 0, 'a load began while it was out');
+  // Asked in the moment between a load's answer and its record (api.js names the new copy).
+  const gap = keptRequest(kept, 'outlines', cell.opts(r.send));
+  cell.record = loaded();
+  r.sent[1].resolve(['of the new copy']);
+  await gap;
+  assert.equal(kept.size, 0, 'the record it was asked for was replaced');
+  // Nothing loaded meanwhile: what came back is of the copy it names, and is kept.
+  const quiet = keptRequest(kept, 'outlines', cell.opts(r.send));
+  r.sent[2].resolve(['corrected']);
+  await quiet;
+  assert.deepEqual(kept.get(extrasKey(loaded(), 'outlines')), ['corrected']);
+});
+
+// -- the view a load put up ------------------------------------------------------------
 
 test('a view moved while the cells came in is told from the one the load put up', () => {
   // The user's saved workspace of 2026-10-20 (c1178 and c16137, orthographic).

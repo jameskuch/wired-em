@@ -1,5 +1,6 @@
 // Decisions app.js makes that need no page: what the browser's copy of a surface
-// is keyed on, which of two draws of one cell is the live one, what a file
+// and of a cell's outlines, annotations and skeleton is keyed on, which of two
+// draws of one cell is the live one, what a file
 // dropped on Import is, whether a key press belongs to a text field, whether
 // an undo step changes where a cell is drawn, and how long a flared status
 // message keeps the line.  Plain functions and small classes, so node can run
@@ -212,6 +213,95 @@ export function sharedRequest(pending, key, gen, send) {
   pending.set(key, entry);
   entry.promise.catch(() => { if (pending.get(key) === entry) pending.delete(key); });
   return entry.promise;
+}
+
+// -- a copy's extras, kept for the next load at the same positions ---------------
+
+/**
+ * The key a cell's `name` extra ('nodes', 'outlines', 'skeleton') is kept under from one
+ * load of it to the next: the cell, its annotations as Viking's freshness names them (the
+ * newest Location's stamp, the structure row's, how many annotations it has) and the moves
+ * applied to them (`positions`: the current transforms, the section correction, a person's
+ * own moves, each by a hash of what it moved).  The server keeps its outline reply under the
+ * same things (`closed_curves_json`), so a load whose summary gives the same key holds the
+ * same annotations at the same places, whatever its copy is called; an Update that found the
+ * cell edited, a manual move, or a setting that moves anything is another key.  Null for a
+ * cell with no stamp (a file import): nothing tells two of its versions apart.
+ */
+export function extrasKey(record, name) {
+  const summary = record?.summary;
+  if (!summary?.data_stamp) return null;
+  return [record.key, name, summary.data_stamp, summary.last_modified ?? '', summary.n_nodes ?? '',
+    summary.positions ?? ''].join('|');
+}
+
+/**
+ * How many numbers a kept extra holds, as `meshWeight` counts a surface's: each outline's
+ * points, two each, its cutouts' and a few scalars; ten an annotation; a skeleton's points,
+ * three each, with a radius and an ID.  Parsed from JSON these are boxed in small arrays,
+ * 22 to 36 bytes a number in V8 (RPC1 c430: 388,454 numbers of outlines, 14 MB).
+ */
+export function extrasWeight(value) {
+  if (Array.isArray(value)) {
+    let weight = 0;
+    for (const item of value) {
+      if (!item?.outline_um) { weight += 10; continue; }
+      weight += 2 * item.outline_um.length + 7;
+      for (const cutout of item.cutouts_um ?? []) weight += 2 * cutout.length;
+    }
+    return weight;
+  }
+  let weight = 4;
+  for (const segment of value?.segments ?? []) weight += 5 * (segment.points_um?.length ?? 0);
+  return weight;
+}
+
+/**
+ * What the tab keeps of its cells' extras: 3 million numbers, about 100 MB at the most
+ * (outlines, 36 bytes a number).  RPC1 c430, 897 outlines, weighs 425,916 for its outlines,
+ * annotations and skeleton, so seven of its copies fit; most cells weigh a few thousand.
+ */
+export const KEPT_EXTRAS_LIMIT = 3_000_000;
+
+/**
+ * Answer an extra from `kept` (a MeshCache weighing by `extrasWeight`) when it holds `key`,
+ * else `send()` it and keep the answer under `key` if `keepable()` still says yes once it is
+ * in hand.  `key` null asks and keeps nothing.  The keys are the copy's state, not its name,
+ * so a Registration switch back to a setting already drawn, the Undo of an unload, or an
+ * Update that found nothing changed draws what this tab already holds: RPC1 c430's outlines
+ * were 3.3 MB on the wire a switch, 0.55 s after the server answered at once (2.17.6), and
+ * held up the surface's own download beside them.  `keepable` is the caller's: whether the
+ * answer is surely of the state `key` names (no load of the cell began or was under way
+ * meanwhile).  A failure is not kept.
+ */
+export async function keptAnswer(kept, key, send, keepable = () => true) {
+  if (key != null) {
+    const hit = kept.get(key);
+    if (hit !== undefined) return hit;
+  }
+  const value = await send();
+  if (key != null && value != null && keepable()) kept.set(key, value);
+  return value;
+}
+
+/**
+ * A cell's `name` extra for the copy the tab holds now, from `kept` or from `send()`
+ * (`keptAnswer`).  `live()` is the cell's record now (null once it is let go of) and
+ * `loads()` this tab's loads of it, `{ begun, running }` (api.js `loadsOf`).  A load can
+ * change what the copy the requests name holds, Update from Viking under the same name,
+ * so nothing is taken from `kept` while one is under way, and an answer is kept only when
+ * no load was under way as it was asked, none began before it came back, and the record
+ * is still the one it was asked for: a load that has answered names its new copy at once,
+ * a moment before its record replaces the old one.
+ */
+export function keptRequest(kept, name, { live, loads, send }) {
+  const record = live();
+  const asked = loads();
+  const key = record && !asked.running ? extrasKey(record, name) : null;
+  return keptAnswer(kept, key, send, () => {
+    const now = loads();
+    return !now.running && now.begun === asked.begun && live() === record;
+  });
 }
 
 // -- an action that arrives twice ------------------------------------------------

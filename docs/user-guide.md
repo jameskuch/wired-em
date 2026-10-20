@@ -129,6 +129,15 @@ Both settings are per cell and survive reloads. The Viking coordinates in the
 pick readout name where Viking draws the annotation, so they paste into
 **Commands → Goto Location** at it.
 
+Switching back to a setting the tab has already drawn the cell under draws its
+annotations, traced outlines and skeleton from what the tab kept of them, without
+asking the server again; so do the Undo of an unload and an **Update from Viking**
+that found nothing changed. They are kept by the cell's annotations as Viking last
+stamped them and by where the settings and any manual moves put them, so an edit
+in Viking, another setting or a manual move is always asked for. A tab keeps about
+3 million numbers of them (RPC1 c430, 897 outlines, is about 430,000), the least
+recently used going first.
+
 Neither corrects the cell itself: a jog the neighboring cells do not make is
 the cell's own, and it stays.
 
