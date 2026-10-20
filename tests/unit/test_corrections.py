@@ -164,6 +164,11 @@ class FakeService:
         self.structure_requests: list[dict] = []
         self.fail_structures: bool | set[int] = False
         self.fail_code = "UNKNOWN"
+        # The volumes it publishes a set for, and the (status, details) it
+        # answers a correction of one volume with while that volume's server is
+        # not reachable from the service (Cped's and Inferior's, 2026-10-20).
+        self.volumes = ["InferiorMonkey"]
+        self.volume_errors: dict[str, tuple[str, str]] = {}
         # GetRebuildStatus: when the last rebuild finished (the service
         # rebuilds on every start, so a restart moves it).
         self.rebuilt = 1790300000
@@ -184,15 +189,20 @@ class FakeService:
             )
 
         def sets(request, context):
-            if request["volume_name"] not in ("", "InferiorMonkey"):
-                return {"sets": []}
+            asked = request["volume_name"]
             return {"sets": [{
-                "volume_name": "InferiorMonkey", "stos_group": "Grid16",
+                "volume_name": name, "stos_group": "Grid16",
                 "provenance": {"built_utc": {"seconds": 1790067000}, "pitch_nm": 2000.0,
                                "kernel_radius_nm": 8000.0, "min_annotation_votes": 3},
-            }]}
+            } for name in self.volumes if asked in ("", name)]}
+
+        def volume_down(request, context):
+            failing = self.volume_errors.get(request["volume_name"])
+            if failing:
+                context.abort(getattr(grpc.StatusCode, failing[0]), failing[1])
 
         def correct(request, context):
+            volume_down(request, context)
             if request["stos_group"] != "Grid16":
                 context.abort(grpc.StatusCode.NOT_FOUND, "no correction set")
             seen = set()
@@ -219,6 +229,7 @@ class FakeService:
 
         def structures(request, context):
             self.structure_requests.append(request)
+            volume_down(request, context)
             failing = self.fail_structures
             if failing is True or (failing and set(request["structure_ids"]) & failing):
                 context.abort(getattr(grpc.StatusCode, self.fail_code),
@@ -268,7 +279,7 @@ def service():
         server.stop(None)
 
 
-def make_neuron(with_curve: bool = True) -> Neuron:
+def make_neuron(with_curve: bool = True, source: str = "i") -> Neuron:
     """Four annotations on 935-938 (7.5 nm pixels) and a closed curve on 936."""
     nodes = pd.DataFrame({
         "ID": [1, 2, 3, 4, 5],
@@ -282,7 +293,7 @@ def make_neuron(with_curve: bool = True) -> Neuron:
         "TypeCode": [1, 1, 1, 1, 6 if with_curve else 1],
     })
     edges = pd.DataFrame({"ID": [9, 9, 9], "A": [1, 2, 3], "B": [2, 3, 4]})
-    neuron = Neuron(9, "i", nodes=nodes, edges=edges, volume_scale=(7.5, 7.5, 90.0),
+    neuron = Neuron(9, source, nodes=nodes, edges=edges, volume_scale=(7.5, 7.5, 90.0),
                     omitted_ids=[], data_stamp=datetime(2026, 9, 1, tzinfo=UTC))
     if with_curve:
         ring = np.array([[67.0, 15.0], [68.0, 15.0], [68.0, 16.0], [67.0, 16.0]])
@@ -627,9 +638,9 @@ def test_correction_mode_names():
         corr.correction_mode("sideways")
 
 
-def make_structure_neuron() -> Neuron:
+def make_structure_neuron(source: str = "i") -> Neuron:
     """Discs 1-4 with section X/Y; 5 a line, whose X/Y columns are empty (0, 0)."""
-    neuron = make_neuron(with_curve=False)
+    neuron = make_neuron(with_curve=False, source=source)
     nodes = neuron.nodes
     nodes.loc[nodes["ID"] <= 4, ["X", "Y"]] = [133.0, 267.0]
     nodes.loc[nodes["ID"] == 5, "TypeCode"] = 5
@@ -929,8 +940,8 @@ def test_a_correction_the_service_could_not_make_is_keyed_as_the_stored_position
     assert corrected[:-1] == uncorrected and corrected[-1] == f"section-correction:{token}"
 
 
-def structure_neuron(sid: int) -> Neuron:
-    neuron = make_structure_neuron()
+def structure_neuron(sid: int, source: str = "i") -> Neuron:
+    neuron = make_structure_neuron(source)
     neuron.id = sid
     return neuron
 
@@ -1005,6 +1016,142 @@ def test_an_error_about_more_than_the_request_holds_the_volume_at_once(structure
         assert len(fake.structure_requests) == 1
     finally:
         provider.close()
+
+
+#: What Viking's service answered for Cped at 17:31 UTC on 2026-10-20, with
+#: Inferior's name and volume server (whose own outage it reported at 17:29).
+MAPPING_DOWN = (
+    "UNAVAILABLE",
+    "volume mapping temporarily unavailable for 'InferiorMonkey': Error connecting to volume "
+    "server after 4 attempts: http://v2486.host.s.uw.edu/Neitz/InferiorMonkey/InferiorMonkey.xml "
+    "Connection refused")
+
+
+def test_an_unavailable_volume_holds_that_volume_and_leaves_the_others_asked(structures):
+    """2026-10-20 17:31 UTC: the service could not reach Cped's volume server and
+    said so, naming Cped, while RC1 answered 8 of 8 calls; the whole service was
+    paused for every volume all the same."""
+    fake, url = structures
+    fake.volumes = ["InferiorMonkey", "RC1"]
+    fake.volume_errors["InferiorMonkey"] = MAPPING_DOWN
+    provider = corr.CorrectionsProvider(url, retry_after_s=60)
+    try:
+        with pytest.raises(corr.CorrectionsUnavailable,
+                           match="volume mapping temporarily unavailable") as failed:
+            provider.correct(structure_neuron(9), "all")
+        assert failed.value.code == "UNAVAILABLE"
+        # RC1, not asked for before, is asked and corrected.
+        rc1 = structure_neuron(476, "RC1")
+        assert provider.correct(rc1, "all") is not None
+        assert rc1.section_correction["n_moved"] == 3
+        assert not provider.paused and not provider.paused_for("RC1", "all")
+        # Inferior is held in both modes CorrectStructures answers, for retry_after_s.
+        assert provider.paused_for("InferiorMonkey", "all")
+        assert provider.paused_for("InferiorMonkey", "curvefit", 10)
+        assert not provider.paused_for("InferiorMonkey", "neighbor")
+        with pytest.raises(corr.CorrectionsError,
+                           match="not asked again for InferiorMonkey until .* UTC"):
+            provider.correct(structure_neuron(10), "curvefit")
+        assert [(r["volume_name"], r["structure_ids"]) for r in fake.structure_requests] == [
+            ("InferiorMonkey", [9]), ("RC1", [476])]
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("details", [
+    "no healthy upstream",  # what a proxy in front of the service says
+    "volume mapping temporarily unavailable for 'RC1': Connection refused",  # not the one asked
+])
+def test_an_unavailable_naming_no_volume_asked_pauses_the_whole_service(structures, details):
+    fake, url = structures
+    fake.volumes = ["InferiorMonkey", "RC1"]
+    fake.volume_errors["InferiorMonkey"] = ("UNAVAILABLE", details)
+    provider = corr.CorrectionsProvider(url, retry_after_s=60)
+    try:
+        with pytest.raises(corr.CorrectionsUnavailable):
+            provider.correct(structure_neuron(9), "all")
+        assert provider.paused and provider.paused_for("RC1", "all")
+        with pytest.raises(corr.CorrectionsUnavailable):
+            provider.correct(structure_neuron(476, "RC1"), "all")
+        assert len(fake.structure_requests) == 1
+    finally:
+        provider.close()
+
+
+def test_a_volume_held_unavailable_keeps_its_offsets_on_disk_and_is_asked_again(
+        structures, tmp_path):
+    fake, url = structures
+    provider = corr.CorrectionsProvider(url, cache=DiskCache(tmp_path), retry_after_s=0.3,
+                                        volume_retry_s=60)
+    try:
+        assert provider.correct(structure_neuron(9), "all") is not None  # now on disk
+        fake.fail_structures = {7, 8}
+        for sid in (7, 8):  # two structures throw in a row: curvefit held for volume_retry_s
+            with pytest.raises(corr.CorrectionsError, match="Exception was thrown by handler"):
+                provider.correct(structure_neuron(sid), "curvefit")
+        fake.volume_errors["InferiorMonkey"] = MAPPING_DOWN
+        with pytest.raises(corr.CorrectionsUnavailable):
+            provider.correct(structure_neuron(10), "all")
+        # c9's offsets are on disk: still applied, and the status says why they are old.
+        neuron = structure_neuron(9)
+        kept = provider.correct(neuron, "all")
+        assert kept.cached and neuron.section_correction["n_moved"] == 3
+        note = neuron.section_correction["service_note"]
+        assert "volume mapping temporarily unavailable for 'InferiorMonkey'" in note
+        assert "not asked again for InferiorMonkey until" in note
+        # The longer hold of curvefit is not cut short by the shorter one.
+        assert "Exception was thrown by handler" in provider.held("InferiorMonkey", "curvefit")
+        n = len(fake.structure_requests)
+        fake.volume_errors.clear()
+        time.sleep(0.35)
+        assert not provider.paused_for("InferiorMonkey", "all")
+        assert provider.correct(structure_neuron(10), "all") is not None
+        assert provider.paused_for("InferiorMonkey", "curvefit")
+        assert len(fake.structure_requests) == n + 1
+    finally:
+        provider.close()
+
+
+def test_a_load_while_its_volume_is_unavailable_is_held_and_other_modes_are_asked(web):
+    fake, svc = web
+    fake.volume_errors["InferiorMonkey"] = MAPPING_DOWN
+    svc.corrections().retry_after_s = 0.3
+    detail = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="all")
+    sc = detail.summary.section_correction
+    assert sc.requested and not sc.applied
+    assert "volume mapping temporarily unavailable for 'InferiorMonkey'" in sc.note
+    first = svc.neuron(1178, "i")
+    # Held: the same load again is answered at once, from the copy it has.
+    fake.volume_errors.clear()
+    svc.load_neuron(1178, "i", include_synapses=False, section_corrections="all")
+    assert svc.neuron(1178, "i") is first and len(fake.structure_requests) == 1
+    provider = svc.corrections()
+    assert not provider.paused and provider.paused_for("InferiorMonkey", "curvefit", 1178)
+    # CorrectPoints maps nothing there: the residual field is still asked for.
+    other = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
+    assert other.summary.section_correction.applied
+    time.sleep(0.35)
+    again = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="all")
+    assert again.summary.section_correction.applied
+    assert len(fake.structure_requests) == 2
+
+
+def test_names_volume_reads_only_the_services_own_unavailable():
+    def error(code, details):
+        exc = corr.CorrectionsUnavailable(f"CorrectStructures at x: {code} {details}")
+        exc.code, exc.details = code, details
+        return exc
+
+    said = error("UNAVAILABLE", "volume mapping temporarily unavailable for 'cped': refused")
+    assert corr.names_volume(said, "cped")
+    assert corr.names_volume(said, "CPED", "")  # Viking's names are not case-sensitive
+    assert not corr.names_volume(said, "RC1")
+    assert not corr.names_volume(said, "")
+    # What gRPC itself says when the service cannot be reached (measured 2026-10-20).
+    assert not corr.names_volume(error("UNAVAILABLE", "failed to connect to all addresses; last "
+                                       "error: UNKNOWN: ipv4:127.0.0.1:9: Connection refused"),
+                                 "cped")
+    assert not corr.names_volume(error("DEADLINE_EXCEEDED", "for 'cped'"), "cped")
 
 
 def test_shift_um_reads_rows_and_series():

@@ -25,6 +25,8 @@ const NOT_FOUND = "Not applied: CorrectStructures at https://corrections.codepha
 const TIMEOUT = 'Not applied: CorrectStructures at https://corrections.codepharm.net:443: DEADLINE_EXCEEDED Deadline Exceeded';
 const DOWN = 'Not applied: ListCorrectionSets at https://corrections.codepharm.net:443: UNAVAILABLE failed to connect';
 const HELD = `${NOT_FOUND} (not asked again for InferiorMonkey until 14:05 UTC)`;
+// What the service said for Cped at 17:31 UTC on 2026-10-20, held as the provider holds it.
+const VOLUME_DOWN = "Not applied: CorrectStructures at https://corrections.codepharm.net:443: UNAVAILABLE volume mapping temporarily unavailable for 'cped': Error connecting to volume server after 4 attempts: http://v2223.host.s.uw.edu/Neitz/CPED/cped.xml Connection refused (not asked again for cped until 17:33 UTC)";
 
 test('a failure is said in plain words first, and the server\'s own message comes last', () => {
   const said = R.explainNote(NOT_FOUND, { mode: 'curvefit' });
@@ -32,6 +34,9 @@ test('a failure is said in plain words first, and the server\'s own message come
   assert.ok(said.endsWith(`The server said: ${NOT_FOUND}`));
   assert.match(R.explainNote(TIMEOUT), /did not answer in time/);
   assert.match(R.explainNote(DOWN), /could not be reached/);
+  const volume = R.explainNote(VOLUME_DOWN, { mode: 'all' });
+  assert.match(volume, /^Viking's corrections service could not reach this volume's own server/);
+  assert.match(volume, /Cells of other volumes are still corrected\. It is not asked again for this volume until 17:33 UTC/);
   assert.match(R.explainNote('Not applied: something new'), /could not correct this cell/);
   assert.match(R.explainNote('No section correction is published for RC9'), /publishes no correction for this volume/);
   assert.match(R.explainNote('Demo is not a Viking volume'), /not a Viking volume/);

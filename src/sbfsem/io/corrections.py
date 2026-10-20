@@ -65,6 +65,8 @@ __all__ = [
     "CorrectionsUnavailable",
     "CorrectionNotFound",
     "REQUEST_CODES",
+    "names_volume",
+    "SAME_CALL",
     "CorrectionSet",
     "CellCorrection",
     "CorrectionsClient",
@@ -125,10 +127,11 @@ class CorrectionsError(RuntimeError):
     """The corrections service answered with an error.
 
     ``code`` is the gRPC status's name (``"UNKNOWN"``), ``""`` for an error
-    raised here rather than by the service.
+    raised here rather than by the service; ``details`` the status's own text.
     """
 
     code = ""
+    details = ""
 
 
 #: gRPC statuses about the one request sent, not about its volume or the
@@ -140,6 +143,32 @@ REQUEST_CODES = frozenset({"UNKNOWN", "INTERNAL", "INVALID_ARGUMENT"})
 
 class CorrectionsUnavailable(CorrectionsError):
     """The service could not be reached, or did not answer in time."""
+
+
+def names_volume(exc: Exception, *volume_names: str) -> bool:
+    """Is ``exc`` the service saying that this volume, not the service, is unavailable?
+
+    gRPC says ``UNAVAILABLE`` for a service it cannot reach ("failed to
+    connect to all addresses", "errors resolving ..."), which knows nothing of
+    the request.  The service says it too when it cannot reach one volume's own
+    server, and then names the volume asked about in quotes: "volume mapping
+    temporarily unavailable for 'cped': Error connecting to volume server after
+    4 attempts: http://v2223.host.s.uw.edu/Neitz/CPED/cped.xml Connection
+    refused" (2026-10-20 17:31 UTC, while RC1 answered every call).
+    """
+    if getattr(exc, "code", "") != "UNAVAILABLE":
+        return False
+    details = str(getattr(exc, "details", "")).lower()
+    return any(name and f"'{name.lower()}'" in details for name in volume_names)
+
+
+#: The correction modes one call answers, held together after it says their
+#: volume is unavailable: ``CorrectStructures`` maps each Location's section
+#: X/Y through the volume's transforms for ``curvefit`` and ``all`` alike;
+#: ``neighbor`` (``CorrectPoints``) samples the published field at positions
+#: mapped here.
+SAME_CALL: dict[str, tuple[str, ...]] = {
+    "neighbor": ("neighbor",), "curvefit": ("curvefit", "all"), "all": ("curvefit", "all")}
 
 
 class CorrectionNotFound(CorrectionsError):
@@ -615,6 +644,7 @@ class CorrectionsClient:
             else:
                 error = CorrectionsError(text)
             error.code = name
+            error.details = str(details or "")
             raise error from exc
 
     # -- RPCs, in the proto's order ------------------------------------------
@@ -1027,7 +1057,12 @@ class CorrectionsProvider:
     The published sets of each volume are asked for at most every
     ``sets_ttl_s`` and remembered on disk; after the service fails, it is not
     asked again for ``retry_after_s``, and meanwhile a cell whose offsets are
-    on disk is still corrected (its status says so).  A correction that fails
+    on disk is still corrected (its status says so).  When the service answers
+    that one volume is unavailable (:func:`names_volume`: it could not reach
+    that volume's server), only that volume is held so, in the modes the same
+    call answers (:data:`SAME_CALL`); on 2026-10-20 Cped's and Inferior's
+    servers refused the service while RC1 answered, and every volume waited
+    out the pause.  A correction that fails
     inside the service -- an exception there, not an unreachable host -- is
     not asked for again for ``volume_retry_s``: for that structure and mode
     when the service's handler threw on its request (:data:`REQUEST_CODES`),
@@ -1130,6 +1165,18 @@ class CorrectionsProvider:
         else:
             log.warning("section correction (%s) failed for %s; not asked again for %.0f s: %s",
                         mode, volume_name, self.volume_retry_s, exc)
+
+    def _unavailable(self, volume_name: str, mode: str, exc: Exception) -> None:
+        """The service could not reach this volume: hold it for ``retry_after_s``
+        in every mode the call answers, a longer hold kept; other volumes are asked."""
+        until = time.monotonic() + self.retry_after_s
+        modes = SAME_CALL.get(mode, (mode,))
+        with self._lock:
+            for m in modes:
+                if self._held.get((volume_name, m), (0.0, ""))[0] < until:
+                    self._held[(volume_name, m)] = (until, str(exc))
+        log.warning("section correction (%s) unavailable for %s; not asked again for %.0f s: %s",
+                    "/".join(modes), volume_name, self.retry_after_s, exc)
 
     def _answered(self, volume_name: str, mode: str) -> None:
         """The service answered for this volume and mode: no failures in a row."""
@@ -1237,7 +1284,9 @@ class CorrectionsProvider:
         except CorrectionsUnavailable as exc:
             if held:
                 raise CorrectionsError(held) from exc
-            if fresh:
+            if names_volume(exc, volume_name, cset.volume_name):
+                self._unavailable(volume_name, mode, exc)
+            elif fresh:
                 self._failed(exc)
             raise
         except CorrectionNotFound:

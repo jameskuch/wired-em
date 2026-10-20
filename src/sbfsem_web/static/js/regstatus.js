@@ -75,6 +75,10 @@ export function explainNote(note, { what = 'correction', mode = null } = {}) {
       + 'drawn uncorrected. Another Correction may be available.';
   } else if (/DEADLINE_EXCEEDED|timed? ?out/i.test(text)) {
     plain = 'Viking\'s corrections service did not answer in time, so the cell is drawn uncorrected.';
+  } else if (/UNAVAILABLE .*'[^']+'/.test(text)) {
+    // The service answered, naming the volume whose own server it could not reach.
+    plain = 'Viking\'s corrections service could not reach this volume\'s own server, so the cell is drawn '
+      + 'uncorrected. Cells of other volumes are still corrected.';
   } else if (/UNAVAILABLE|not answering|offline|could not be reached/i.test(text)) {
     plain = 'Viking\'s corrections service could not be reached, so the cell is drawn uncorrected.';
   } else {

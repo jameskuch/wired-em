@@ -152,7 +152,12 @@ volume and mode once two different cells of it fail so in a row (RC1 threw
 after 5-15 s on every call on 2026-09-24; on 2026-10-20 Cped's volume server
 refused connections on and off, and every Cped request failed meanwhile). Any
 other error from the service holds the volume and mode at once, and an
-unreachable service is left alone for two minutes. `SBFSEM_CORRECTIONS_URL` names the service (default
+unreachable service is left alone for two minutes. When the service answers
+`UNAVAILABLE` naming the volume asked about (it could not reach that volume's
+own server: "volume mapping temporarily unavailable for 'cped'"), only that
+volume is left alone for two minutes, in Curve fit and Field + fit together
+(the one call that maps its sections); the other volumes are still asked.
+`SBFSEM_CORRECTIONS_URL` names the service (default
 `https://corrections.codepharm.net`; an `http://` URL means cleartext
 HTTP/2), and `SBFSEM_CORRECTIONS_STOS_GROUP` picks a set by name (default: the
 first by name, as Viking's DataExport picks). None of them is set in the

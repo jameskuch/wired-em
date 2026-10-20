@@ -118,7 +118,9 @@ uncorrected and the chip reads `unavailable`, with why in its hover. When it ans
 for that cell and correction for ten minutes, and once two cells of a volume
 fail in a row, for the whole volume, so the cells load at once; the chip's
 hover says until when. The other cells of the volume are still corrected while
-only one is held.
+only one is held. When the service says it cannot reach one volume's own
+server, that volume is not asked again for two minutes, in Curve fit and
+Field + fit, while the other volumes' cells are still corrected.
 
 Both settings are per cell and survive reloads. The Viking coordinates in the
 pick readout name where Viking draws the annotation, so they paste into
