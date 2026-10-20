@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import pandas as pd
+from pydantic import TypeAdapter
 
 from .. import progress
 from ..analysis import dendrite as dendrite_analysis
@@ -492,6 +493,11 @@ class SbfsemService:
     #: The cells and settings move mode asked to keep grids for, the oldest let go first.
     GRID_WANTED = 64
 
+    #: The finished closed-curve replies kept (:meth:`closed_curves_json`), MB in
+    #: all; the least recently used goes first.  RPC1 c430's 897 outlines are
+    #: 7.6 MB of JSON, Inferior c1178's 155 are 3.6 MB.
+    OUTLINE_REPLY_CACHE_MB = 128.0
+
     def __init__(self, *, offline: bool = False, cache_dir=None,
                  mesh_cache_size: int | None = None, build_processes: int = 0,
                  build_recycle_mb: float | None = None,
@@ -588,6 +594,11 @@ class SbfsemService:
         # like a mesh's, so a reloaded cell drops them with it.
         self._deviation_maps: OrderedDict[tuple, Any] = OrderedDict()
         self._differences: OrderedDict[tuple, Any] = OrderedDict()
+        # The closed-curve replies as the JSON text sent (closed_curves_json),
+        # keyed by what decides them rather than by the copy, so a copy loaded
+        # again at positions already seen -- a Registration switch back, an
+        # update that found nothing new -- is answered from here.
+        self._outline_replies: OrderedDict[tuple, bytes] = OrderedDict()
         # One build per mesh at a time: a pane's mesh job and the measurement
         # job that needs the same mesh must not each build it.
         self._flights: dict[tuple, list] = {}
@@ -1555,7 +1566,8 @@ class SbfsemService:
         with self._lock:
             held = len(self._meshes)
             self._meshes.clear()
-            for store in (self._deviations, self._deviation_maps, self._differences):
+            for store in (self._deviations, self._deviation_maps, self._differences,
+                          self._outline_replies):
                 store.clear()
         report = {"memory_meshes": held, "disk_files": 0, "disk_bytes": 0}
         if disk and self._disk_meshes is not None:
@@ -1588,6 +1600,7 @@ class SbfsemService:
             "meshes_cached": len(self._meshes),
             "mesh_cache_limit": self._mesh_cache_size,
             "mesh_bytes": mesh_bytes,
+            "outline_reply_bytes": sum(len(body) for body in self._outline_replies.values()),
             "boundaries_fitted": load_ipl_boundaries.cache_info().currsize,
         }
         try:
@@ -3234,34 +3247,43 @@ class SbfsemService:
         Ports what ``sbfsem.image.ConeOutline`` displayed; that class did not
         load at all in MATLAB (F164).
         """
-        from ..geometry.cone_outline import cone_outlines_from_neuron
+        return _closed_curve_dtos(self.neuron(neuron_id, source), z_section, spline_points)
 
+    def closed_curves_json(self, neuron_id: int, source, *, z_section: int | None = None,
+                           spline_points: int | None = None) -> bytes:
+        """:meth:`closed_curves` as the JSON text a reply sends, kept.
+
+        The reply was made again for every request, and its cost was the text,
+        not the curves: RPC1 c430's 897 outlines are Viking's registered curves,
+        drawn as they are and read in 0.01 s, then 7.6 MB of JSON, 0.45 s on a
+        Mac (1.5 to 2.2 s a request on production, 2026-10-20, the floor of a
+        Registration switch back).  Kept by what decides it, as the disk mesh
+        key is: the cell's annotations as Viking's StructureFreshness names
+        them, and the moves applied to them (:func:`positions_token`), so a
+        copy loaded again at positions already seen is answered from here.  A
+        cell with no stamp (a JSON import, a fixture) is made each time:
+        nothing tells two of its versions apart.
+        """
         neuron = self.neuron(neuron_id, source)
-        outlines = cone_outlines_from_neuron(neuron, z_section=z_section)
-        out = []
-        for outline in outlines:
-            # The outline and its cut-outs are splined alike (``rings``); the
-            # cut-outs used to go out as raw control points beside a splined
-            # outline.  A registered curve is sent as it is, both ways.
-            curve, *cutouts = outline.rings(spline_points)
-            out.append(
-                ClosedCurveDTO(
-                    # The annotation's own ID; this used to repeat the parent
-                    # structure's, so every outline of a cell shared one "ID".
-                    location_id=int(outline.location_id or 0),
-                    parent_id=int(outline.parent_id or 0),
-                    z_section=int(outline.z_section),
-                    z_um=float(outline.z_um),
-                    outline_um=[[float(x), float(y)] for x, y in curve],
-                    cutouts_um=[
-                        [[float(x), float(y)] for x, y in cut] for cut in cutouts
-                    ],
-                    area_um2=outline.area_um2,
-                    equivalent_diameter_um=outline.equivalent_diameter_um,
-                    centroid_um=[float(v) for v in outline.centroid_um],
-                )
-            )
-        return out
+        stamp, count = cell_freshness(neuron)
+        if stamp is None:
+            return _CLOSED_CURVES_JSON.dump_json(_closed_curve_dtos(neuron, z_section, spline_points))
+        key = (neuron.source, int(neuron.id), stamp.isoformat(), count, positions_token(neuron),
+               z_section, spline_points)
+        with self._single_flight(("closed-curves", *key), "waiting for the same outlines"):
+            with self._lock:
+                body = self._outline_replies.get(key)
+                if body is not None:
+                    self._outline_replies.move_to_end(key)
+                    return body
+            body = _CLOSED_CURVES_JSON.dump_json(_closed_curve_dtos(neuron, z_section, spline_points))
+            budget = self.OUTLINE_REPLY_CACHE_MB * 1e6
+            with self._lock:
+                if len(body) <= budget:
+                    self._outline_replies[key] = body
+                while sum(len(kept) for kept in self._outline_replies.values()) > budget:
+                    self._outline_replies.popitem(last=False)
+        return body
 
     def cone_outline_mesh(self, neuron_id: int, source, *,
                           thickness_um: float | None = None,
@@ -4011,6 +4033,45 @@ def annotation_targets(neuron: Neuron) -> AnnotationTargets:
         kind.append(1)
     return AnnotationTargets(np.asarray(ids, dtype=np.int64), np.asarray(sections, dtype=np.int64),
                              np.asarray(kind, dtype=np.int8))
+
+
+#: A list of outlines as JSON, by pydantic's own encoder: the bytes the reply's
+#: ``json.dumps`` made from the same numbers (c430 and c1178 compared), at a
+#: seventh of the time.
+_CLOSED_CURVES_JSON: TypeAdapter[list[ClosedCurveDTO]] = TypeAdapter(list[ClosedCurveDTO])
+
+
+def _closed_curve_dtos(neuron, z_section: int | None,
+                       spline_points: int | None) -> list[ClosedCurveDTO]:
+    """The cell's closed-curve outlines (one section's with ``z_section``), each
+    splined once.  The numbers are made here as the fields' own types, so the
+    models are built without being checked again."""
+    from ..geometry.cone_outline import cone_outlines_from_neuron
+
+    out = []
+    for outline in cone_outlines_from_neuron(neuron, z_section=z_section):
+        # The outline and its cut-outs are splined alike (``rings``); the
+        # cut-outs used to go out as raw control points beside a splined
+        # outline.  A registered curve is sent as it is, both ways.
+        rings = outline.rings(spline_points)
+        area, diameter, centroid = outline.measures(rings if spline_points is None else None)
+        curve, *cutouts = rings
+        out.append(
+            ClosedCurveDTO.model_construct(
+                # The annotation's own ID; this used to repeat the parent
+                # structure's, so every outline of a cell shared one "ID".
+                location_id=int(outline.location_id or 0),
+                parent_id=int(outline.parent_id or 0),
+                z_section=int(outline.z_section),
+                z_um=float(outline.z_um),
+                outline_um=np.asarray(curve, dtype=float).tolist(),
+                cutouts_um=[np.asarray(cut, dtype=float).tolist() for cut in cutouts],
+                area_um2=area,
+                equivalent_diameter_um=diameter,
+                centroid_um=np.asarray(centroid, dtype=float).tolist(),
+            )
+        )
+    return out
 
 
 def cell_freshness(neuron) -> tuple[datetime | None, int]:

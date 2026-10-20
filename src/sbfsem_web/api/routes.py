@@ -1359,10 +1359,13 @@ def synapse_mesh(request: Request, source: str, neuron_id: int, synapse_type: st
 def closed_curves(request: Request, source: str, neuron_id: int,
                   z_section: int | None = None,
                   spline_points: int | None = Query(None, ge=1, le=1000)):
+    """The cell's outlines, sent as the service keeps them: already JSON
+    (:meth:`~sbfsem.service.facade.SbfsemService.closed_curves_json`)."""
     svc = service(request)
     src = _source(source)
     _neuron_or_404(svc, neuron_id, src)
-    return svc.closed_curves(neuron_id, src, z_section=z_section, spline_points=spline_points)
+    body = svc.closed_curves_json(neuron_id, src, z_section=z_section, spline_points=spline_points)
+    return Response(content=body, media_type="application/json")
 
 
 @router.get("/neurons/{source}/{neuron_id}/closed-curves/mesh", response_model=MeshDTO)

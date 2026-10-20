@@ -79,20 +79,25 @@ class ConeOutline:
     @property
     def area_um2(self) -> float:
         """Enclosed area by the shoelace formula, minus any cut-outs."""
-        rings = self.rings()
-        area = _polygon_area(rings[0])
-        for hole in rings[1:]:
-            area -= _polygon_area(hole)
-        return float(max(area, 0.0))
+        return _rings_area(self.rings())
 
     @property
     def equivalent_diameter_um(self) -> float:
-        return float(2.0 * np.sqrt(self.area_um2 / np.pi)) if self.area_um2 > 0 else 0.0
+        return _equivalent_diameter(self.area_um2)
 
     @property
     def centroid_um(self) -> np.ndarray:
         curve = self.spline()
         return curve.mean(axis=0) if len(curve) else np.zeros(2)
+
+    def measures(self, rings: list[np.ndarray] | None = None) -> tuple[float, float, np.ndarray]:
+        """``area_um2``, ``equivalent_diameter_um`` and ``centroid_um`` from one
+        set of the default :meth:`rings`, passed in when already made.  Read one
+        by one, the three properties spline the outline four times."""
+        rings = self.rings() if rings is None else rings
+        area = _rings_area(rings)
+        curve = rings[0]
+        return area, _equivalent_diameter(area), (curve.mean(axis=0) if len(curve) else np.zeros(2))
 
     def mask(self, shape, *, pixel_size_um: float = 0.05, origin=None) -> np.ndarray:  # noqa: D401
         """Rasterize the outline (minus cut-outs) onto a pixel grid."""
@@ -200,6 +205,18 @@ def _extruded_polygon(curve: np.ndarray, holes, z_low: float, z_high: float) -> 
     vertices = np.asarray(solid.vertices, dtype=float)
     vertices[:, 2] += z_low
     return Mesh(vertices, np.asarray(solid.faces))
+
+
+def _rings_area(rings: list[np.ndarray]) -> float:
+    """The outline's area minus its cut-outs', never below zero."""
+    area = _polygon_area(rings[0])
+    for hole in rings[1:]:
+        area -= _polygon_area(hole)
+    return float(max(area, 0.0))
+
+
+def _equivalent_diameter(area_um2: float) -> float:
+    return float(2.0 * np.sqrt(area_um2 / np.pi)) if area_um2 > 0 else 0.0
 
 
 def _polygon_area(points: np.ndarray) -> float:

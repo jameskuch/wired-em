@@ -9,7 +9,9 @@ right number of pixels, and extrude to the right volume.
 
 from __future__ import annotations
 
+import json
 import re
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -62,6 +64,14 @@ def test_outline_area_and_diameter():
     expected_d = 2 * np.sqrt((np.pi * (16 - 1.44)) / np.pi)
     assert outline.equivalent_diameter_um == pytest.approx(expected_d, rel=0.01)
     np.testing.assert_allclose(outline.centroid_um, [10, 12], atol=0.05)
+
+
+def test_measures_are_the_three_properties_from_one_set_of_rings():
+    outline = ConeOutline(ring(4.0), [ring(1.2)], 1500, 135.0)
+    area, diameter, centroid = outline.measures()
+    assert area == outline.area_um2 and diameter == outline.equivalent_diameter_um
+    np.testing.assert_array_equal(centroid, outline.centroid_um)
+    assert outline.measures(outline.rings()) == (area, diameter, pytest.approx(centroid))
 
 
 def test_spline_closes_with_the_first_control_points():
@@ -726,3 +736,83 @@ def test_a_surface_too_big_for_memory_names_a_pixel_that_fits():
     assert 0.05 < fits < 0.2
     assert sum(build_curve_volume(stack, pixel_size_um=fits,
                                   max_surface=limit).exposed_faces()) <= limit
+
+
+# -- the outlines' reply, kept by what decides it -------------------------------------------------
+@pytest.fixture
+def outline_service(request):
+    from sbfsem.service.facade import SbfsemService
+
+    neuron = read_legacy_json(request.path.parents[1] / "fixtures" / "i90000_closedcurve.json")
+    neuron.data_stamp = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
+    svc = SbfsemService(offline=True)
+    svc.add_neuron(neuron)
+    yield svc, neuron
+    svc.close()
+
+
+def _shift_outlines(neuron, dx_um: float) -> None:
+    frame = neuron.geometries.copy()
+    frame["Curve"] = pd.Series([[np.asarray(c) + [dx_um, 0.0] for c in curves]
+                                for curves in frame["Curve"]], index=frame.index, dtype=object)
+    neuron.geometries = frame
+
+
+def test_the_outline_reply_is_the_outlines_and_their_measures_as_json(outline_service):
+    from sbfsem.service.dto import ClosedCurveDTO
+    from sbfsem_web.json_response import SafeJSONResponse
+
+    svc, neuron = outline_service
+    dtos = svc.closed_curves(neuron.id, neuron.source)
+    outlines = cone_outlines_from_neuron(neuron)
+    assert len(dtos) == len(outlines) == 3
+    for dto, outline in zip(dtos, outlines, strict=True):
+        assert ClosedCurveDTO(**dto.model_dump()) == dto        # built as the fields' own types
+        assert (dto.area_um2, dto.equivalent_diameter_um) == (outline.area_um2, outline.equivalent_diameter_um)
+        assert dto.centroid_um == outline.centroid_um.tolist()
+        assert dto.outline_um == outline.rings()[0].tolist()
+    # The bytes Python's encoder made of the same models: what the route sent before.
+    body = svc.closed_curves_json(neuron.id, neuron.source)
+    assert body == SafeJSONResponse([d.model_dump(mode="json") for d in dtos]).body
+
+
+def test_an_outline_reply_is_kept_until_the_annotations_or_their_positions_change(outline_service):
+    svc, neuron = outline_service
+    first = svc.closed_curves_json(neuron.id, neuron.source)
+    assert svc.closed_curves_json(neuron.id, neuron.source) is first
+    assert svc.closed_curves_json(neuron.id, neuron.source, spline_points=8) != first
+    # Moved (a Registration setting): a positions token of its own, so made again.
+    _shift_outlines(neuron, 1.0)
+    neuron.live_registration = {"token": "moved"}
+    moved = svc.closed_curves_json(neuron.id, neuron.source)
+    x0 = json.loads(first)[0]["outline_um"][0][0]
+    assert json.loads(moved)[0]["outline_um"][0][0] == pytest.approx(x0 + 1.0)
+    # Back at the stored positions: the first reply, not made again.
+    _shift_outlines(neuron, -1.0)
+    neuron.live_registration = None
+    assert svc.closed_curves_json(neuron.id, neuron.source) is first
+    # Edited in Viking (a later stamp): made again.
+    _shift_outlines(neuron, 2.0)
+    neuron.data_stamp += timedelta(seconds=1)
+    edited = svc.closed_curves_json(neuron.id, neuron.source)
+    assert json.loads(edited)[0]["outline_um"][0][0] == pytest.approx(x0 + 2.0)
+
+
+def test_an_unstamped_cells_outline_reply_is_made_each_time(outline_service):
+    svc, neuron = outline_service
+    neuron.data_stamp = None
+    first = svc.closed_curves_json(neuron.id, neuron.source)
+    _shift_outlines(neuron, 1.0)
+    assert svc.closed_curves_json(neuron.id, neuron.source) != first
+    assert svc.memory_report()["outline_reply_bytes"] == 0
+
+
+def test_outline_replies_stay_within_their_budget_and_clear_with_the_renders(outline_service,
+                                                                              monkeypatch):
+    svc, neuron = outline_service
+    one = len(svc.closed_curves_json(neuron.id, neuron.source))
+    monkeypatch.setattr(svc, "OUTLINE_REPLY_CACHE_MB", 1.5 * one / 1e6)
+    svc.closed_curves_json(neuron.id, neuron.source, spline_points=8)
+    assert 0 < svc.memory_report()["outline_reply_bytes"] <= 1.5 * one
+    svc.clear_renders()
+    assert svc.memory_report()["outline_reply_bytes"] == 0
