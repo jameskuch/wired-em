@@ -70,6 +70,7 @@ from .remesh import SampledField, _tube_distance
 
 __all__ = [
     "BLOCK",
+    "CHUNKED_DECIMATION",
     "MODES",
     "Capsule",
     "DiscHull",
@@ -82,6 +83,7 @@ __all__ = [
     "VoxelPlan",
     "WORK_PER_RAW_FACE",
     "auto_voxel_um",
+    "decimates_in_chunks",
     "field_bodies",
     "hull_pairs",
     "plan_voxel",
@@ -140,10 +142,12 @@ MAX_VOXEL_UM = 0.3
 #: Inferior c1178 (4,090 um2 of surface), every triangle kept, peaked at 310
 #: MB plus 0.445 MB per 1,000 triangles -- 1,256 MB at 2.1 million (13 s),
 #: 2,467 MB at 4.9 million (31 s), 3,467 MB at 7.1 million (60 s), the most it
-#: holds of the 10 million -- and a Face cap adds 0.37 MB per 1,000 raw
+#: holds of the 10 million -- and a Face cap added 0.37 MB per 1,000 raw
 #: triangles for the decimator's copy (3.4 million kept of 7.1: 5,615 MB,
-#: 78 s).  A cell that fills the whole budget is about 4.8 GB, or 8 GB under a
-#: cap (``service.facade.FIELD_BYTES_PER_RAW_FACE``).
+#: 78 s) until such a cap was decimated a chunk at a time (2026-10-20,
+#: ``geometry.decimate``: 3,148 MB, 58 s; on the server 3,134 -> 1,568 MB).  A
+#: cell that fills the whole budget is about 4.8 GB, under a cap or not
+#: (``service.facade.FIELD_BYTES_PER_RAW_FACE``).
 MAX_RAW_FACES = 10_000_000
 
 #: The ceiling before 2.5.1.  A build whose raw budget is no higher than this
@@ -183,6 +187,20 @@ def raw_budget(voxel2_faces: int) -> int:
     if cap <= 0:
         return MAX_RAW_FACES
     return min(max(RAW_PER_CAPPED_FACE * cap, MIN_RAW_BUDGET), MAX_RAW_FACES)
+
+
+#: The version of :func:`~sbfsem.geometry.decimate.decimate_in_chunks` in the key
+#: of a surface it decimates (``service.facade._budget_token``).
+CHUNKED_DECIMATION = 1
+
+
+def decimates_in_chunks(voxel2_faces: int) -> bool:
+    """Whether a build under this Face cap decimates its sheet a chunk at a time
+    (:func:`~sbfsem.geometry.decimate.decimate_in_chunks`): a cap whose raw
+    budget is over ``RAW_FACES_KEYED_ABOVE``, so only builds whose key already
+    names their budget change, and none the app makes by default (2026-10-20)."""
+    cap = int(voxel2_faces)
+    return cap > 0 and raw_budget(cap) > RAW_FACES_KEYED_ABOVE
 
 
 def work_budget(max_raw_faces: int) -> int:

@@ -75,11 +75,15 @@ def test_memory_is_the_sheet_the_cell_draws_not_the_whole_budget(svc):
     from sbfsem.service import facade
 
     held = _field(svc, voxel2_um=0.03, voxel2_faces=20_000)
-    for way, capped in ((held["cap_for_asked"], True), (held["uncapped"], False)):
-        per = facade.FIELD_SHEET_BYTES_PER_FACE + (
-            facade.FIELD_SHEET_BYTES_PER_DECIMATED_FACE if capped else 0.0)
-        assert way["peak_mb"] == round(facade.FIELD_SHEET_BASE_MB + way["raw_triangles"] * per / 1e6)
+    for way in (held["cap_for_asked"], held["uncapped"]):
+        assert way["peak_mb"] == round(facade.field_sheet_mb(way["raw_triangles"], way["voxel2_faces"]))
         assert way["gate_mb"] >= way["peak_mb"] - 1
+    # A cap of a million or less decimates the sheet whole, beside it; over that a chunk at a time.
+    whole = facade.field_sheet_mb(2_000_000, 1_000_000)
+    assert whole == facade.FIELD_SHEET_BASE_MB + 2_000_000 * (
+        facade.FIELD_SHEET_BYTES_PER_FACE + facade.FIELD_SHEET_BYTES_PER_DECIMATED_FACE) / 1e6
+    assert facade.field_sheet_mb(2_000_000, 1_100_000) == facade.field_sheet_mb(
+        2_000_000, 0) + facade.FIELD_CHUNKED_DECIMATION_MB
 
 
 def test_a_voxel_no_budget_reaches_is_said_with_the_finest_there_is(svc):

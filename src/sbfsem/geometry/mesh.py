@@ -171,6 +171,7 @@ class Mesh:
         for _ in range(int(iterations)):
             vertices = vertices + lam * (neighbor_mean(vertices) - vertices)
             vertices = vertices + mu * (neighbor_mean(vertices) - vertices)
+        del neighbor_mean                 # its edge list, before the faces are copied
         return Mesh(np.asarray(vertices), self.faces.copy(),
                     None if self.vertex_data is None else self.vertex_data.copy(),
                     dict(self.meta))
@@ -199,13 +200,28 @@ class Mesh:
     def _directed_edges(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """The vertex adjacency as a directed edge list (every undirected edge
         once each way): ``rows``, ``cols`` and ``1 / (neighbors + 1)`` per
-        vertex, the weight of the smoothers' mean (the vertex itself counts)."""
+        vertex, the weight of the smoothers' mean (the vertex itself counts).
+
+        The edges are packed a side of the triangles at a time into one array
+        and sorted where they lie, which is ``np.unique`` of them without its
+        temporaries: the same arrays from 78 bytes a triangle at the peak, not
+        108, in 0.3 s, not 2.0 (Inferior c1178's 2.1 million raw triangles,
+        2026-10-20).
+        """
         n = len(self.vertices)
         f = self.faces.astype(np.int64, copy=False)
-        a = np.concatenate([f[:, 0], f[:, 1], f[:, 2]])
-        b = np.concatenate([f[:, 1], f[:, 2], f[:, 0]])
-        packed = np.unique(np.minimum(a, b) * n + np.maximum(a, b))   # undirected, once
-        del a, b
+        t = len(f)
+        packed = np.empty(3 * t, dtype=np.int64)
+        for k, (i, j) in enumerate(((0, 1), (1, 2), (2, 0))):
+            side = packed[k * t:(k + 1) * t]
+            np.minimum(f[:, i], f[:, j], out=side)
+            side *= n
+            side += np.maximum(f[:, i], f[:, j])
+        packed.sort()
+        first = np.ones(len(packed), dtype=bool)
+        np.not_equal(packed[1:], packed[:-1], out=first[1:])
+        packed = packed[first]                                     # undirected, once
+        del first
         lo = (packed // n).astype(np.int32)
         hi = (packed % n).astype(np.int32)
         del packed

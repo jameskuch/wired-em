@@ -78,11 +78,13 @@ from ..geometry.meshops import bounding_box, clip_mesh, clip_mesh_by_stratificat
 from ..geometry.primitives import synapse_ellipsoids, synapse_spheres
 from ..geometry.segmentation import dendrite_segmentation
 from ..geometry.unify import (
+    CHUNKED_DECIMATION,
     MIN_VOXEL_UM,
     RAW_FACES_KEYED_ABOVE,
     TYPED_MIN_VOXEL_UM,
     GridReuse,
     GridState,
+    decimates_in_chunks,
     grid_reuse,
     raw_budget,
 )
@@ -306,11 +308,19 @@ def _budget_token(method: str, options: dict) -> str | None:
     key.  A build at or under the old ceiling is what it always was and keeps
     the key it always had, so a deploy that raises the ceiling keeps every
     stored surface that it does not change.
+
+    Under a Face cap such a build is also decimated a chunk at a time
+    (``geometry.decimate``, 2026-10-20), which places its triangles a little
+    differently from the one pass before it: the key says which version did.
     """
     if not _uses_whole_cell_grid(method, options):
         return None
-    budget = raw_budget(options.get("voxel2_faces", 0))
-    return f"raw-budget:{budget}" if budget > RAW_FACES_KEYED_ABOVE else None
+    faces = options.get("voxel2_faces", 0)
+    budget = raw_budget(faces)
+    if budget <= RAW_FACES_KEYED_ABOVE:
+        return None
+    return (f"raw-budget:{budget}:chunks{CHUNKED_DECIMATION}" if decimates_in_chunks(faces)
+            else f"raw-budget:{budget}")
 
 
 @contextlib.contextmanager
@@ -379,15 +389,20 @@ CURVE_TIE_MAX_MB = 260e-6 * 1.9 * MAX_SURFACE
 #: that fills its budget, which c1178's does not (its areas overlap, so a
 #: budget of 10 million holds about 7 million of its triangles).
 FIELD_BYTES_PER_RAW_FACE = 500.0
-#: The same under a Face cap: decimating the sheet holds a second copy of it,
-#: 356 to 384 bytes more for each raw triangle (4.3 million down to 2 million
-#: peaked at 3,842 MB; 6.0 million down to 5 million at 5,106 MB, against 2,971
-#: with every triangle kept), so priced at 1,000.  A build with a cap of 3.4
-#: million or more marches the full 10 million, and is the heaviest request
-#: the page can make: about 8 GB priced, 6.1 GB measured on c1178.
-FIELD_BYTES_PER_RAW_FACE_DECIMATED = 1000.0
+#: Under a Face cap the sheet is decimated, and until 2026-10-20 the decimator held
+#: a second copy of it: 356 to 384 bytes more for each raw triangle (4.3 million
+#: down to 2 million peaked at 3,842 MB; 7.1 million down to 3.4 million at
+#: 5,615 MB, against 3,467 with every triangle kept).  A cap whose raw budget is
+#: over ``RAW_FACES_KEYED_ABOVE`` -- every build priced past it here -- is now
+#: decimated a chunk at a time (``geometry.decimate``), and the decimator holds a
+#: chunk of up to a million raw triangles: c1178 at 0.04 um down to 3.4 million
+#: peaked at 3,148 MB, under the price of keeping every triangle, and at 0.07 um
+#: down to 1.2 million (2.5 million raw) at 1,784 MB, 366 over it, a chunk and the
+#: triangles kept.  Priced at the sheet with every triangle kept plus this.
+FIELD_CHUNKED_DECIMATION_MB = 500.0
 #: A whole-cell sheet as the measurements on c1178 above put it (2.5.1): a peak of
-#: 310 MB plus 445 bytes a raw triangle, and 370 more for each when a Face cap
+#: 310 MB plus 445 bytes a raw triangle, and 370 more for each when a Face cap of
+#: a million or less (a raw budget of 3 million or less, decimated whole)
 #: decimates it (the decimator's copy).  What a typed Fine voxel under the
 #: automatic floor is priced at, for the whole raw budget it may march, and every
 #: field build at the sheet it is planned to draw (``estimate_peak_mb``).
@@ -396,17 +411,29 @@ FIELD_SHEET_BYTES_PER_FACE = 445.0
 FIELD_SHEET_BYTES_PER_DECIMATED_FACE = 370.0
 
 
-def field_sheet_mb(raw_triangles: int, face_cap: int, reduce_fraction: float = 1.0) -> float:
+def field_sheet_mb(raw_triangles: int, face_cap: int, reduce_fraction: float = 1.0, *,
+                   chunked: bool | None = None) -> float:
     """The peak, MB, of a field build that draws ``raw_triangles`` (``FIELD_SHEET_*``).
 
     The decimator's copy is counted only when it runs: a sheet over its Face cap,
     or a Decimate under 1 (``cylinder_render``'s ``decimate``).  A sheet under its
     cap is kept as drawn: Temporal c106 at the default cap drew 323,256 and
-    peaked at 380 MB, which the copy would price at 573 (2026-10-20).
+    peaked at 380 MB, which the copy would price at 573 (2026-10-20).  A cap whose
+    raw budget is over 3 million (``chunked``; by default
+    ``unify.decimates_in_chunks`` of ``face_cap``) decimates the sheet a chunk at a
+    time, and the decimator then holds a chunk, not a copy of the sheet
+    (``FIELD_CHUNKED_DECIMATION_MB``).
     """
     decimated = 0 < int(face_cap) < int(raw_triangles) or float(reduce_fraction) < 1.0
-    per_face = FIELD_SHEET_BYTES_PER_FACE + (FIELD_SHEET_BYTES_PER_DECIMATED_FACE if decimated else 0.0)
-    return FIELD_SHEET_BASE_MB + int(raw_triangles) * per_face / 1e6
+    if chunked is None:
+        chunked = decimates_in_chunks(int(face_cap))
+    per_face = FIELD_SHEET_BYTES_PER_FACE
+    extra = 0.0
+    if decimated and chunked:
+        extra = FIELD_CHUNKED_DECIMATION_MB
+    elif decimated:
+        per_face += FIELD_SHEET_BYTES_PER_DECIMATED_FACE
+    return FIELD_SHEET_BASE_MB + int(raw_triangles) * per_face / 1e6 + extra
 
 
 _CHILD_SERVICE: SbfsemService | None = None
@@ -1472,9 +1499,10 @@ class SbfsemService:
                 faces = self._mesh_options()["voxel2_faces"] if voxel2_faces is None else voxel2_faces
                 over = raw_budget(faces) - RAW_FACES_KEYED_ABOVE
                 if over > 0:
-                    per_face = (FIELD_BYTES_PER_RAW_FACE_DECIMATED if int(faces) > 0
-                                else FIELD_BYTES_PER_RAW_FACE)
-                    estimate += over * per_face / 1e6
+                    # Under a cap such a sheet is decimated a chunk at a time.
+                    estimate += over * FIELD_BYTES_PER_RAW_FACE / 1e6
+                    if decimates_in_chunks(faces):
+                        estimate += FIELD_CHUNKED_DECIMATION_MB
                 # A Fine voxel typed under the automatic floor (2026-10-16) can fill
                 # the whole raw budget on a small cell, which the figures above,
                 # sized from the cell's annotations, do not see: Temporal c106 typed
@@ -1545,7 +1573,10 @@ class SbfsemService:
         cap = voxel2_faces
         if hybrid_pixel_um is not None and voxel2_faces > 0:
             cap += self._field_planner.outline_triangles(neuron, options)
-        return field_sheet_mb(raw, cap, float(field_options.get("reduce_fraction", 1.0) or 1.0))
+        # A Hybrid's outline triangles join its cap, not its raw budget: whether the
+        # sheet is decimated in chunks is the discs' Face cap's to say.
+        return field_sheet_mb(raw, cap, float(field_options.get("reduce_fraction", 1.0) or 1.0),
+                              chunked=decimates_in_chunks(voxel2_faces))
 
     def _field_pieces(self, neuron: Neuron, options: dict) -> list:
         """The pieces a field pathway's build contours ``neuron`` from, under

@@ -1248,6 +1248,7 @@ def cylinder_render(
                                                  float(ultra_inflate))
             if not unified.is_empty:
                 meshes.append(unified)
+            del unified
         else:
             for i, item in enumerate(items):
                 report("meshing pieces", i, len(items))
@@ -1307,7 +1308,15 @@ def cylinder_render(
         log.warning("c%s produced no renderable segments", getattr(neuron, "id", "?"))
         return EMPTY_MESH
 
-    combined = concatenate(meshes)
+    n_segments = len(meshes)
+    if use_remesh in FIELD_PATHWAYS and n_segments == 1:
+        # The whole-cell sheet is this build's own: smoothing and decimating
+        # make new meshes, so it needs no copy, and nothing else holds it while
+        # they do (at 7 million raw triangles a copy is some 250 MB).
+        combined = meshes.pop()
+    else:
+        combined = concatenate(meshes)
+        meshes.clear()
 
     def smooth(m: Mesh) -> Mesh:
         if not smooth_iterations or use_smooth == "none":
@@ -1335,6 +1344,17 @@ def cylinder_render(
         if fraction >= 1.0:
             return m
         report("decimating")
+        if use_remesh in FIELD_PATHWAYS:
+            from .unify import BLOCK, decimates_in_chunks
+
+            if decimates_in_chunks(voxel2_faces):
+                # A raw budget over 3 million is decimated a chunk at a time, so
+                # the decimator holds one chunk and not the sheet (geometry.decimate).
+                from .decimate import decimate_in_chunks
+
+                voxel = float(m.meta.get("voxel2_um", 0.0) or 0.0)
+                return decimate_in_chunks(m, max(4, int(round(len(m.faces) * fraction))),
+                                          span_um=BLOCK * voxel)
         return m.decimate(fraction)
 
     stages = (smooth, decimate) if post_order == "smooth_first" else (decimate, smooth)
@@ -1342,5 +1362,5 @@ def cylinder_render(
         combined = stage(combined)
 
     combined.meta["neuron_id"] = getattr(neuron, "id", None)
-    combined.meta["n_segments"] = len(meshes)
+    combined.meta["n_segments"] = n_segments
     return combined

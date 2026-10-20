@@ -698,7 +698,8 @@ budget grows with it, because the triangle limit alone changed nothing — c1178
 came out at 0.0745 µm instead of 0.076 µm, the same surface, as the evaluations
 ran out first. Measured on Inferior c1178 (2,304 annotations, 4,090 µm² of
 surface), `sbfsem-measure`, on a Mac that was also doing other work, so the times
-are indicative; the mean deviation from the annotations is 0.59 µm at every row:
+are indicative; the mean deviation from the annotations is 0.59 µm at every row,
+and the capped rows were measured again for 2.19.4 (2.19.3's in parentheses):
 
 | Fine voxel (used) | Face cap | raw → final faces | build | peak MB | field evaluations |
 |---|---|---|---|---|---|
@@ -707,21 +708,32 @@ are indicative; the mean deviation from the annotations is 0.59 µm at every row
 | 0.05 | 0 | 4.85 M | 31 s | 2,467 | 120 M |
 | 0.045 | 0 | 6.00 M | 40 s | 2,971 | 157 M |
 | 0.04 (0.0414, the limit's finest) | 0 | 7.10 M | 60 s | 3,467 | 194 M |
-| 0.04 (0.053, a 6 M budget) | 2,000,000 | 4.3 M → 2.0 M | 71 s | 3,842 | 102 M |
-| 0.045 | 5,000,000 | 6.0 M → 5.0 M | 54 s | 5,106 | 157 M |
-| 0.04 (0.0414) | 3,400,000 | 7.1 M → 3.4 M | 78 s | 5,615 | 194 M |
+| 0.04 (0.053, a 6 M budget) | 2,000,000 | 4.3 M → 2.0 M | 26 s (71) | 2,249 (3,842) | 102 M |
+| 0.045 | 5,000,000 | 6.0 M → 5.0 M | 42 s (54) | 2,658 (5,106) | 157 M |
+| 0.04 (0.0414) | 3,400,000 | 7.1 M → 3.4 M | 45 s (78) | 3,135 (5,615) | 194 M |
 
-Peak memory is about 310 MB plus 0.445 MB for every 1,000 raw triangles, and a
-Face cap that decimates the sheet (a sheet over its cap) adds about 0.37 MB more
-for every 1,000 raw triangles, because the decimator holds a second copy. Since
+Peak memory is about 310 MB plus 0.445 MB for every 1,000 raw triangles. A Face
+cap of a million or less that decimates the sheet (a sheet over its cap) adds
+about 0.37 MB more for every 1,000 raw triangles, because the decimator holds a
+second copy. A cap over a million, the only kind that lets the sheet past 3
+million, decimates it a chunk of up to a million raw triangles at a time since
+2.19.4, the triangles along each cut locked so the chunks weld back exactly and
+each chunk's share of the cap following the error its edges start with: the
+decimator then holds one chunk, and the capped rows above peak under the 3,467 MB
+of keeping every triangle. On the server the same builds take about half the
+memory they did, 1.5 to 7 % slower, with the same deviation, creases and one
+body (c1178 at 0.042 µm under 3.4 million 3,132 → 1,564 MB; at 0.07 µm under 1.2
+million 1,401 → 815; c16137 at 0.04 µm under 1.2 million 1,473 → 823). Since
 2.19.2 the build gate weighs every Voxel remesh, Convolution and Ultraliser build
 at least at the sheet it is sized to draw, the one the render estimate names:
 before, a sheet under 3 million was weighed by the cell's annotations alone, and
 RPC1 c430 at a Face cap of 1,460,000 (2,582 MB) and Inferior c1178 at 1,100,000
-(2,535 MB) were weighed at 2,546 and 1,451 MB; now 3,869 and 2,978. So the
-heaviest request the page can make, a cap
-of 3.4 million or more on a cell that fills the 10 million, is about 6 GB on
-c1178 and is weighed at 8 GB by the build gate, which then runs it alone;
+(2,535 MB) were weighed at 2,546 and 1,451 MB; now 3,869 and 2,978 (both caps
+are over a million, so since 2.19.4 they decimate in chunks: c1178's peaks at
+1,576 MB here and is weighed at 2,267). So the heaviest request the page can
+make, a cap of 3.4 million or more on a cell that fills the 10 million, is about
+3.1 GB on c1178 (5.6 before 2.19.4) and is weighed at 5.3 GB by the build gate
+(8.5 before), which leaves the server's 9 GB build budget room for another build;
 Ultraliser at the finest voxel peaked at 3,305 MB and 119 s (7.1 M faces), and
 Convolution surface, whose evaluations are counted on another scale, gets finer
 too (c1178 at a typed 0.06 µm: 0.152 µm, 561,000 faces, 24 s, 540 MB, against

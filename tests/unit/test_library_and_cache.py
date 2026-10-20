@@ -438,10 +438,12 @@ def test_a_voxel_remesh_build_over_the_old_ceiling_is_priced_by_its_raw_sheet(se
     """Up to 3 million raw triangles (a Face cap of 1,000,000) the estimate is the per-annotation
     one it was measured as; past that every triangle of the budget adds what it was measured to
     cost (Inferior c1178: 310 MB plus 445 bytes a triangle with every triangle kept, 2.1 to 7.1
-    million of them; 356 to 384 bytes more under a Face cap, which decimates a second copy).  A
+    million of them).  Under such a cap the sheet is decimated a chunk at a time (2026-10-20), which
+    adds a chunk's weight, not a second copy of the sheet (356 to 384 bytes a triangle before).  A
     build with no cap asks for 10 million and adds 3.5 GB; one capped at 3.4 million or more
-    marches the same 10 million and adds 7 GB, the heaviest request the page can make, and both
-    fit the production unit's budget beside the weight of the largest cell measured."""
+    marches the same 10 million and adds 4 GB, the heaviest request the page can make (7 GB
+    before), and both fit the production unit's budget beside the weight of the largest cell
+    measured."""
     import re
     from pathlib import Path
 
@@ -453,8 +455,8 @@ def test_a_voxel_remesh_build_over_the_old_ceiling_is_priced_by_its_raw_sheet(se
         943, "i", method="cylinder", pathway="voxel2", voxel2_faces=1_000_000) == default
     over = unify.MAX_RAW_FACES - unify.RAW_FACES_KEYED_ABOVE
     kept_all = over * facade.FIELD_BYTES_PER_RAW_FACE / 1e6
-    worst = over * facade.FIELD_BYTES_PER_RAW_FACE_DECIMATED / 1e6
-    assert kept_all == 3500 and worst == 7000
+    worst = kept_all + facade.FIELD_CHUNKED_DECIMATION_MB
+    assert kept_all == 3500 and worst == 4000
     for pathway in ("voxel2", "convolution", "ultraliser"):
         def weigh(faces, pathway=pathway):
             return service.estimate_peak_mb(
@@ -500,7 +502,7 @@ def test_a_raw_budget_over_the_old_ceiling_is_named_in_the_surface_key(service):
         stored[faces] = service._disk_meshes.keys[-1]
     assert stored[400_000][-1] == facade.GEOMETRY_VERSION
     assert stored[1_000_000][-1] == facade.GEOMETRY_VERSION
-    assert stored[2_000_000][-1] == "raw-budget:6000000"
+    assert stored[2_000_000][-1] == "raw-budget:6000000:chunks1"
     assert stored[0][-1] == "raw-budget:10000000"
     assert len(set(stored.values())) == 4
 
@@ -509,7 +511,9 @@ def test_a_raw_budget_over_the_old_ceiling_is_named_in_the_surface_key(service):
     assert token("cylinder", {"pathway": "original", "voxel2_faces": 0}) is None
     assert token("hybrid", {"pathway": "voxel2", "voxel2_faces": 0}) == "raw-budget:10000000"
     assert token("curvemesh", {"pathway": "ultraliser", "voxel2_faces": 0}) == "raw-budget:10000000"
-    assert token("cylinder", {"pathway": "convolution", "voxel2_faces": 5_000_000}) == "raw-budget:10000000"
+    assert token("cylinder", {"pathway": "convolution", "voxel2_faces": 5_000_000}) == "raw-budget:10000000:chunks1"
+    # A cap of a million or less keeps the one-pass decimation and its key.
+    assert token("cylinder", {"pathway": "voxel2", "voxel2_faces": 1_000_000}) is None
 
 
 # -- the build gate ---------------------------------------------------------------
