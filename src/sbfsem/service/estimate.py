@@ -725,6 +725,30 @@ CAP_STEP = 10_000
 FIELD_PIECE_KEYS = ("pathway", "voxel_detail", "voxel_smooth_um", "ring_arc_um",
                     "wrap_spacing_um", "wrap_blend", "wrap_reject_sigma", "wrap_passes",
                     "ultra_soma", "exact_tube_deg", "conv_support", "curve_avg_discs")
+#: And what decides a Hybrid's outline half in the field: the raster's pixel and
+#: the reach of its bridges across skipped sections.
+OUTLINE_PIECE_KEYS = ("pixel_size_um", "curve_bridge_um", "curve_link_bridge_um")
+
+#: The largest outline raster the planner makes of a Hybrid's outline half, and the
+#: most exposed faces it contours: the bounds of the render estimate's reference
+#: raster, made in the same slot (``_REFERENCE_SLOT``), since both are made in the
+#: web process.  Measured 2026-10-20 at 0.25 um (rasterize, contour): Inferior
+#: c16137 0.4 million voxels 0.03 + 0.05 s, c1178 1.7 million 0.06 + 0.18 s, RC1
+#: c410 2.8 million 0.31 + 0.38 s, RPC1 c2628 4.1 million 0.8 + 0.44 s; c2628 at
+#: 0.1 um, 12.4 million, 1.2 + 1.6 s.  A larger raster is not planned here, and
+#: the build is priced at the most any budget lets it draw (``MAX_RAW_FACES``).
+OUTLINE_PLAN_MAX_VOXELS = REFERENCE_MAX_VOXELS
+OUTLINE_PLAN_MAX_FACES = REFERENCE_CONTOUR_MAX_FACES
+#: How long the build gate waits for that slot before pricing the most instead.
+OUTLINE_PLAN_WAIT_S = 30.0
+
+
+class _Unplanned(Exception):
+    """A Hybrid's outline half too large to raster in the web process, or its slot busy."""
+
+
+#: What the planner keeps for a Hybrid whose outline raster is over its bounds.
+_TOO_LARGE = object()
 
 
 class FieldPlanner:
@@ -753,6 +777,17 @@ class FieldPlanner:
     ``field_sheet_mb``; c16137 at 0.04 um with every triangle kept, 2.52
     million: 1,422 MB from it, 1,429 MB measured on 2026-10-20), which is what
     the page is told.
+
+    A Hybrid whose outlines and discs are one field (2.7.0, options with
+    ``method`` "hybrid") is planned for the build gate as its build sizes it:
+    the disc annotations' pieces and the outline raster at the build's
+    ``pixel_size_um``, no coarser automatic voxel than that pixel, and a raw
+    budget widened by the outline half's own triangles (``halves_of(neuron,
+    options, max_voxels, max_faces)``, the facade's ``_hybrid_halves``: the disc
+    pieces, the raster, its surface's area and triangles; ``None`` when the
+    build would not be one field; a ``ValueError`` over the bounds).  Its plan
+    reproduces the voxel the build contours at on Inferior c16137 and c1178,
+    RC1 c410, RPC1 c2628 and RC2 c5624 (2026-10-20).
     """
 
     #: Cells (copy and pieces), plans and answers kept.
@@ -762,11 +797,15 @@ class FieldPlanner:
 
     def __init__(self, pieces_of: Callable[[Neuron, dict], list],
                  peak_mb: Callable[[Neuron, dict], float],
-                 sheet_mb: Callable[[int, int, float], float]) -> None:
+                 sheet_mb: Callable[[int, int, float], float],
+                 halves_of: Callable[[Neuron, dict, int, int], Any] | None = None) -> None:
         self._pieces_of = pieces_of
         self._peak_mb = peak_mb
         self._sheet_mb = sheet_mb
-        self._bodies: OrderedDict[tuple, tuple[list, list]] = OrderedDict()
+        self._halves_of = halves_of
+        # Per cell: its bodies, thin radii and the triangles a Hybrid's outline half
+        # brings to the Face cap (0 for any other build).
+        self._bodies: OrderedDict[tuple, Any] = OrderedDict()
         # Plans by cell and grid sizing: the build gate asks for the one a mesh
         # job will build (raw_triangles), which the page's estimate of the same
         # settings has usually planned already.
@@ -779,7 +818,11 @@ class FieldPlanner:
         """A Cylinder or Tube build whose pathway contours one whole-cell field."""
         return method in ("cylinder", "curvemesh") and options.get("pathway") in FIELD_MODES
 
-    def _cell(self, neuron: Neuron, options: dict) -> tuple[list, list]:
+    @staticmethod
+    def _hybrid(options: dict) -> bool:
+        return str(options.get("method", "")) == "hybrid"
+
+    def _cell(self, neuron: Neuron, options: dict) -> tuple[list, list, int]:
         from ..geometry.cylinder import STRAND_COIN_HALF_UM
         from ..geometry.unify import field_bodies
 
@@ -788,27 +831,65 @@ class FieldPlanner:
             held = self._bodies.get(key)
             if held is not None:
                 self._bodies.move_to_end(key)
-                return held
+        if held is _TOO_LARGE:
+            raise _Unplanned("the outline raster is too large to plan here")
+        if held is not None:
+            return held
+        items: list = []
+        extra = 0
+        if self._hybrid(options):
+            halves = self._outline_halves(neuron, options)
+            if halves is _TOO_LARGE:
+                with self._lock:
+                    self._bodies[key] = _TOO_LARGE
+                raise _Unplanned("the outline raster is too large to plan here")
+            if halves is not None:
+                # As the build hands them over: the discs' pieces, then the raster.
+                pieces, volume, area_um2, extra = halves
+                items = [*pieces, ("curve", volume, float(area_um2))]
+        else:
+            items = self._pieces_of(neuron, options)
         mode = FIELD_MODES[str(options["pathway"])]
-        made = field_bodies(self._pieces_of(neuron, options), mode=mode,
-                            lens_h=STRAND_COIN_HALF_UM,
-                            support=float(options.get("conv_support", 2.0)),
-                            hull_tilt_deg=(float(options.get("exact_tube_deg", 0.0) or 0.0)
-                                           if mode != "sum" else 0.0))
+        bodies, thin = field_bodies(items, mode=mode, lens_h=STRAND_COIN_HALF_UM,
+                                    support=float(options.get("conv_support", 2.0)),
+                                    hull_tilt_deg=(float(options.get("exact_tube_deg", 0.0) or 0.0)
+                                                   if mode != "sum" else 0.0))
+        made = (bodies, thin, int(extra))
         with self._lock:
             self._bodies[key] = made
             while len(self._bodies) > self.CELLS_KEPT:
                 self._bodies.popitem(last=False)
         return made
 
-    @staticmethod
-    def _cell_key(neuron: Neuron, options: dict) -> tuple:
+    def _outline_halves(self, neuron: Neuron, options: dict) -> Any:
+        """``halves_of``'s answer, in the slot the web process makes one raster at a
+        time in; :data:`_TOO_LARGE` over the bounds."""
+        if self._halves_of is None:
+            return None
+        if not _REFERENCE_SLOT.acquire(timeout=OUTLINE_PLAN_WAIT_S):
+            raise _Unplanned("another outline raster is being made")
+        try:
+            return self._halves_of(neuron, options, OUTLINE_PLAN_MAX_VOXELS,
+                                   OUTLINE_PLAN_MAX_FACES)
+        except ValueError:
+            # build_curve_volume's refusal, before it allocates or contours.
+            return _TOO_LARGE
+        finally:
+            _REFERENCE_SLOT.release()
+
+    @classmethod
+    def _cell_key(cls, neuron: Neuron, options: dict) -> tuple:
+        # A Hybrid's discs are planned from a copy of the cell with its id and
+        # load serial (the facade's _disc_subset): its own key, never the cell's.
+        hybrid = ("hybrid", *(repr(options.get(k)) for k in OUTLINE_PIECE_KEYS)) \
+            if cls._hybrid(options) else ()
         return (str(neuron.source), int(neuron.id), getattr(neuron, "load_serial", None),
-                *(repr(options.get(k)) for k in FIELD_PIECE_KEYS))
+                *(repr(options.get(k)) for k in FIELD_PIECE_KEYS), *hybrid)
 
     def _plan(self, neuron: Neuron, options: dict, voxel_um: float, faces: int) -> VoxelPlan | None:
         """:func:`~sbfsem.geometry.unify.plan_voxel` of the cell's bodies for a Fine
         voxel of ``voxel_um`` under Face cap ``faces``, kept: 0.04 to 0.11 s a plan."""
+        from ..geometry.cylinder import EXTRA_RAW_PER_FACE
         from ..geometry.unify import plan_voxel, raw_budget
 
         pathway = str(options["pathway"])
@@ -819,9 +900,14 @@ class FieldPlanner:
             if key in self._plans:
                 self._plans.move_to_end(key)
                 return self._plans[key]
-        bodies, thin = self._cell(neuron, options)
+        bodies, thin, extra = self._cell(neuron, options)
+        # A Hybrid's raster is contoured no coarser than it was drawn, and its own
+        # triangles widen the raw budget (cylinder_render's extra_faces).
+        hybrid = self._hybrid(options)
         made = plan_voxel(bodies, thin, voxel_um=voxel_um, max_raw_faces=budget,
-                          blend_um=blend, mode=FIELD_MODES[pathway])
+                          blend_um=blend, mode=FIELD_MODES[pathway],
+                          max_auto_um=float(options["pixel_size_um"]) if hybrid else None,
+                          curve_raw_faces=int(EXTRA_RAW_PER_FACE * extra) if faces > 0 else 0)
         with self._lock:
             self._plans[key] = made
             while len(self._plans) > self.PLANS_KEPT:
@@ -835,10 +921,27 @@ class FieldPlanner:
         build gate prices the sheet at.  The sizing counts 3.5 triangles a
         voxel of surface, so builds draw fewer: 0.51 to 0.82 of it on Inferior
         c943, c1178 and c16137, Temporal c106, RPC1 c430 and RC2 c5624
-        (2026-10-20)."""
-        plan = self._plan(neuron, options, float(options.get("voxel2_um", 0.0) or 0.0),
-                          int(options.get("voxel2_faces", 0) or 0))
+        (2026-10-20); a Hybrid in one field 0.66 to 0.83 on c16137, c1178,
+        c410, c2628 and c5624.  For a Hybrid whose outline raster is too large
+        to make here (or whose slot stays busy), the most any budget allows."""
+        from ..geometry.unify import MAX_RAW_FACES
+
+        try:
+            plan = self._plan(neuron, options, float(options.get("voxel2_um", 0.0) or 0.0),
+                              int(options.get("voxel2_faces", 0) or 0))
+        except _Unplanned as why:
+            log.info("c%s: Hybrid not planned (%s); priced at %s raw triangles",
+                     getattr(neuron, "id", "?"), why, f"{MAX_RAW_FACES:,}")
+            return MAX_RAW_FACES
         return None if plan is None else int(min(plan.raw_faces, plan.raw_budget))
+
+    def outline_triangles(self, neuron: Neuron, options: dict) -> int:
+        """The triangles a Hybrid's outline half brings to the Face cap, as its plan
+        found them (``cylinder_render``'s ``extra_faces``): 0 for any other build,
+        and when it was not planned.  Read after :meth:`raw_triangles`; makes nothing."""
+        with self._lock:
+            held = self._bodies.get(self._cell_key(neuron, options))
+        return int(held[2]) if isinstance(held, tuple) else 0
 
     def forget(self) -> None:
         with self._lock:

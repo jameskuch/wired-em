@@ -1034,6 +1034,19 @@ piece pathways have no field, so under those Hybrid is still the two halves side
 side. Only a Hybrid build of a cell with traced outlines under Voxel remesh or
 Ultraliser is built again; every other stored surface is kept.
 
+The one field is contoured at the discs' voxel, which is often finer than the Voxel
+size the outlines were rasterized at, so it can weigh far more than either half
+alone: RPC1 c2628 (26 discs, 3,978 outlines) at the default settings contours at
+0.052 µm, draws 2.66 million raw triangles where its outline half alone is 312,412,
+and peaks at 2,921 MB. Until 2.19.3 the build gate weighed it by its outline raster
+and its disc annotations, 783 MB. It now plans the field as the build does (the disc
+annotations' pieces and the outline raster at the build's Voxel size) and weighs
+the disc half at least at the sheet that plan draws, with the raster on top: c2628
+3,293 MB, and at Voxel 0.1 µm (4,254 MB measured) 4,762. Planning makes the outline
+raster once per cell and size in the server's web process, 0.1 to 1.4 s at 0.25 µm
+on the cells measured; a raster too large to make there (20 million voxels, or
+900,000 exposed faces) is weighed at the 10 million raw triangles any budget allows.
+
 ### Why disc tubes come out fatter than traced outlines
 
 On a cell traced partly with outlines and partly with discs, a process often looks

@@ -656,6 +656,7 @@ class SbfsemService:
                 voxel2_faces=int(o["voxel2_faces"]), voxel2_um=float(o["voxel2_um"]),
                 field_options=o, neuron=neuron),
             field_sheet_mb,
+            self._hybrid_halves,
         )
         self._lock = threading.RLock()
 
@@ -1413,6 +1414,7 @@ class SbfsemService:
         n = max(1, len(cells))
         method = str(method).lower()
         estimate = 0.0
+        voxels = 0.0
         curves = method in ("closedcurve", "curve", "outline", "volume")
         if curves or method in ("hybrid", "mixed"):
             try:
@@ -1451,6 +1453,9 @@ class SbfsemService:
                     estimate += min(voxels * CURVE_TIE_BYTES_PER_VOXEL / 1e6, CURVE_TIE_MAX_MB)
             if "TypeCode" in cells.columns:
                 n = int((cells["TypeCode"] == 1).sum())
+        # What the outline half holds, the raster and the surface made of it: a
+        # Hybrid in one field holds it through its field's sheet.
+        outline_mb = estimate
         if not curves and n > 0:
             pw = str(pathway).lower()
             per = {"voxel": 0.08, "voxel2": 0.3, "convolution": 0.3,
@@ -1493,6 +1498,21 @@ class SbfsemService:
                     estimate = max(estimate, self._planned_sheet_mb(
                         neuron, field_options, pathway=pw, voxel2_faces=int(faces),
                         voxel2_um=voxel2_um))
+                # A Hybrid whose outlines and discs are one field (2.7.0) draws its
+                # outlines into the discs' sheet, at the discs' voxel: priced by its
+                # disc annotations it was under its peak by up to 3.7 times.  At the
+                # default Face cap, RPC1 c2628 (26 discs and 3,978 outlines) drew 2.66
+                # million raw triangles and peaked at 2,921 MB, priced 783; Inferior
+                # c16137 1.35 million, 1,491 MB, priced 1,140; at a cap of 1,000,000
+                # RC1 c410 1.16 million, 1,582 MB, priced 1,038 (2026-10-20).  Its
+                # discs' price is now never less than the sheet it is sized to draw,
+                # planned as the build plans it, and its outline raster is priced on
+                # top as before: each build measured peaked 11 to 32 % under that.
+                if (field_options is not None and METHOD_NAMES.get(method) == "hybrid"
+                        and pw in HYBRID_ONE_FIELD and voxels > 0):
+                    estimate = max(estimate, outline_mb + self._planned_sheet_mb(
+                        neuron, field_options, pathway=pw, voxel2_faces=int(faces),
+                        voxel2_um=voxel2_um, hybrid_pixel_um=max(float(pixel_size_um), 1e-3)))
         # MeshLab runs as a child of the build worker, which keeps its own
         # heap while it waits: 337 to 563 MB more at 400,000 faces.
         if str(meshlab) != "none":
@@ -1501,14 +1521,19 @@ class SbfsemService:
         return float(round(estimate))
 
     def _planned_sheet_mb(self, neuron: Neuron, field_options: Mapping[str, Any], *,
-                          pathway: str, voxel2_faces: int, voxel2_um: float | None) -> float:
+                          pathway: str, voxel2_faces: int, voxel2_um: float | None,
+                          hybrid_pixel_um: float | None = None) -> float:
         """The peak of the sheet a field build of ``neuron`` is sized to draw
         (:func:`field_sheet_mb` of ``FieldPlanner.raw_triangles``); 0 when there is
-        nothing to contour or the plan fails, which leaves the gate's other price."""
+        nothing to contour or the plan fails, which leaves the gate's other price.
+        ``hybrid_pixel_um``: a Hybrid in one field with its outlines rasterized at
+        that pixel, whose outline half's triangles join the Face cap."""
         options = {**self._mesh_options(**field_options), "pathway": pathway,
                    "voxel2_faces": voxel2_faces}
         if voxel2_um is not None:
             options["voxel2_um"] = float(voxel2_um)
+        if hybrid_pixel_um is not None:
+            options.update(method="hybrid", pixel_size_um=float(hybrid_pixel_um))
         try:
             raw = self._field_planner.raw_triangles(neuron, options)
         except Exception:  # noqa: BLE001 - a plan only raises the price; never block a build
@@ -1517,7 +1542,10 @@ class SbfsemService:
             return 0.0
         if not raw:
             return 0.0
-        return field_sheet_mb(raw, voxel2_faces, float(field_options.get("reduce_fraction", 1.0) or 1.0))
+        cap = voxel2_faces
+        if hybrid_pixel_um is not None and voxel2_faces > 0:
+            cap += self._field_planner.outline_triangles(neuron, options)
+        return field_sheet_mb(raw, cap, float(field_options.get("reduce_fraction", 1.0) or 1.0))
 
     def _field_pieces(self, neuron: Neuron, options: dict) -> list:
         """The pieces a field pathway's build contours ``neuron`` from, under
@@ -2532,7 +2560,8 @@ class SbfsemService:
                       discs: bool = False, avg_discs: float = 0.0,
                       avg_paths: float = 0.0, curve_um: float = 0.0,
                       bridge_um: float = BRIDGE_UM,
-                      link_bridge_um: float = LINK_BRIDGE_UM) -> CurveVolume | None:
+                      link_bridge_um: float = LINK_BRIDGE_UM,
+                      limits: Mapping[str, int] | None = None) -> CurveVolume | None:
         """The rasterized closed-curve outlines, or ``None`` without any.
 
         ``discs``: a cell with no traced outlines is rasterized from its discs
@@ -2540,7 +2569,9 @@ class SbfsemService:
         average the annotations along their chains first (and make the raster
         remember which annotation drew each voxel, for the surface's averaging
         after the contour); ``curve_um``, ``bridge_um`` and ``link_bridge_um``
-        are :func:`_curve_outlines`'."""
+        are :func:`_curve_outlines`'.  ``limits`` (``max_voxels``,
+        ``max_surface``) are :func:`build_curve_volume`'s, which refuses past
+        them with a ``ValueError``."""
         annotations, how = _curve_outlines(
             neuron, discs=discs, avg_discs=avg_discs, avg_paths=avg_paths,
             pixel_size_um=pixel_size_um, curve_um=curve_um, bridge_um=bridge_um,
@@ -2554,7 +2585,34 @@ class SbfsemService:
             pixel_size_um=pixel_size_um,
             keep_labels=bool(avg_discs > 0 or avg_paths > 0),
             **how,
+            **(limits or {}),
         )
+
+    def _hybrid_halves(self, neuron: Neuron, options: dict, max_voxels: int,
+                       max_faces: int) -> tuple[list, CurveVolume, float, int] | None:
+        """What a Hybrid build in one field contours ``neuron`` from, under
+        ``options`` (``_mesh_options``' and ``pixel_size_um``), for its plan
+        (``FieldPlanner``): the disc annotations' field pieces, the outline
+        raster at the build's pixel, and the area and triangles of the surface
+        the outline half makes of it alone, as :meth:`_build_geometry` measures
+        them before it builds the field.  ``None`` when the build is not one
+        field; a ``ValueError`` when the raster passes ``max_voxels`` or
+        ``max_faces``, before it is allocated or contoured."""
+        discs = _disc_subset(neuron)
+        if discs is None or discs is neuron:
+            return None
+        volume = self._curve_volume(
+            neuron, float(options["pixel_size_um"]),
+            bridge_um=float(options.get("curve_bridge_um", BRIDGE_UM)),
+            link_bridge_um=float(options.get("curve_link_bridge_um", LINK_BRIDGE_UM)),
+            limits={"max_voxels": int(max_voxels), "max_surface": int(max_faces)})
+        if volume is None:
+            return None
+        curve = self._contour_curve(volume, 0.0, 0.0)
+        if curve.is_empty:
+            return None
+        return self._field_pieces(discs, options), volume, float(curve.surface_area()), \
+            int(len(curve.faces))
 
     @staticmethod
     def _contour_curve(volume: CurveVolume, avg_discs: float, avg_paths: float,

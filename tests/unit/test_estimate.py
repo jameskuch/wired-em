@@ -503,6 +503,137 @@ def test_a_mesh_job_is_weighed_by_the_sheet_it_will_draw(i943_path):
             time.sleep(0.05)
 
 
+# -- a Hybrid whose outlines and discs are one field ----------------------------------
+
+
+def _hybrid_options(svc, **kw):
+    return {**svc._mesh_options(pathway="voxel2", **kw), "method": "hybrid", "pixel_size_um": 0.25}
+
+
+def _hybrid_gate(svc, options, *, planned=True):
+    return svc.estimate_peak_mb(1178, "i", method="hybrid", pathway=options["pathway"],
+                                pixel_size_um=options["pixel_size_um"],
+                                voxel2_faces=options["voxel2_faces"], voxel2_um=options["voxel2_um"],
+                                curve_options=options, field_options=options if planned else None)
+
+
+def _disc_half_mb(neuron):
+    """The old price of a Hybrid's disc half under 3 million raw triangles: 0.3 MB a disc and 420."""
+    nodes = neuron.get_cell_nodes()
+    return 120.0 + 0.3 * int((nodes["TypeCode"] == 1).sum()) + 300.0
+
+
+@pytest.fixture
+def mixed(c1178):
+    """Inferior c1178: 130 traced outlines and 2,281 discs, the cell 2.7.0 made one field."""
+    svc = SbfsemService(offline=True)
+    svc.add_neuron(c1178)
+    yield svc, svc.neuron(1178, "i")
+    svc.close()
+
+
+def test_the_build_gate_prices_a_one_field_hybrid_by_the_sheet_it_is_planned_to_draw(mixed):
+    """A Hybrid in one field (2.7.0) draws its outlines into its discs' sheet, at the discs'
+    voxel, and was priced by its outline raster and its disc annotations: at the default
+    settings RPC1 c2628 drew 2.66 million raw triangles and peaked at 2,921 MB, priced 783, and
+    Inferior c16137 peaked at 1,491, priced 1,140 (2026-10-20).  Given the build's options its
+    disc half is never priced under the sheet it is sized to draw, planned as the build plans it
+    (the voxel the build contours at, never fewer raw triangles than it draws), with the outline
+    raster on top."""
+    from sbfsem.service.facade import field_sheet_mb
+
+    svc, neuron = mixed
+    planner = svc._field_planner
+    options = _hybrid_options(svc)
+    cap = options["voxel2_faces"]
+    raw = planner.raw_triangles(neuron, options)
+    outline = planner.outline_triangles(neuron, options)
+    assert raw > 3 * cap and outline > 0
+    old = _hybrid_gate(svc, options, planned=False)
+    priced = _hybrid_gate(svc, options)
+    assert priced > old
+    # The outline raster as before, and the disc half at the sheet: the outline half's own
+    # triangles join the Face cap the sheet is decimated to.
+    assert priced == pytest.approx(old - _disc_half_mb(neuron)
+                                   + field_sheet_mb(raw, cap + outline), abs=1)
+    built = svc._build_geometry(neuron, "hybrid", 1, 1.0, 0.25,
+                                {"pathway": "voxel2", "voxel2_faces": cap})
+    assert built.meta.get("hybrid_one_field") is True
+    plan = planner._plan(neuron, options, 0.0, cap)
+    assert built.meta["voxel2_um"] == pytest.approx(plan.voxel_um, rel=1e-9)
+    assert 0 < built.meta["voxel2_raw_faces"] <= raw
+    assert len(built.faces) <= cap + outline
+
+
+def test_a_hybrids_plan_is_kept_apart_from_the_whole_cells(mixed):
+    """The disc half is planned from a copy of the cell with its id and load serial
+    (``_disc_subset``): its bodies and plans are kept under keys of their own, per raster pixel
+    and bridges, and the whole cell's plan is the one a planner that never saw the Hybrid makes."""
+    from sbfsem.service.estimate import FieldPlanner
+    from sbfsem.service.facade import field_sheet_mb
+
+    svc, neuron = mixed
+    planner = svc._field_planner
+    whole = svc._mesh_options(pathway="voxel2", voxel2_faces=150_000)
+    hybrid = _hybrid_options(svc, voxel2_faces=150_000)
+    alone = FieldPlanner(svc._field_pieces, lambda _n, _o: 0.0, field_sheet_mb).raw_triangles(
+        neuron, whole)
+    half = planner.raw_triangles(neuron, hybrid)
+    assert planner.raw_triangles(neuron, whole) == alone != half
+    assert planner.outline_triangles(neuron, whole) == 0 < planner.outline_triangles(neuron, hybrid)
+    keys = {planner._cell_key(neuron, o) for o in (
+        whole, hybrid, {**hybrid, "pixel_size_um": 0.5}, {**hybrid, "curve_bridge_um": 3.0})}
+    assert len(keys) == 4
+
+
+def test_a_hybrid_too_large_to_plan_here_is_priced_at_the_most_it_may_draw(mixed, monkeypatch):
+    """The plan rasters the outlines in the web process, within the render estimate's bounds and
+    in its one slot: a raster over them is not made (and not tried again), nor while the slot
+    stays busy, and the build is priced at the most any budget lets it draw."""
+    from sbfsem.geometry.unify import MAX_RAW_FACES
+    from sbfsem.service.facade import field_sheet_mb
+
+    svc, neuron = mixed
+    planner = svc._field_planner
+    options = _hybrid_options(svc)
+    most = _hybrid_gate(svc, options, planned=False) - _disc_half_mb(neuron) \
+        + field_sheet_mb(MAX_RAW_FACES, options["voxel2_faces"])
+    # The slot held elsewhere: priced at the most, and planned once it is free.
+    monkeypatch.setattr(estimate, "OUTLINE_PLAN_WAIT_S", 0.01)
+    assert estimate._REFERENCE_SLOT.acquire(timeout=5)
+    try:
+        assert _hybrid_gate(svc, options) == pytest.approx(most, abs=1)
+    finally:
+        estimate._REFERENCE_SLOT.release()
+    assert planner.raw_triangles(neuron, options) < MAX_RAW_FACES
+    # Over the bounds: priced at the most, and the raster is not tried again.
+    over = {**options, "pixel_size_um": 0.2}
+    monkeypatch.setattr(estimate, "OUTLINE_PLAN_MAX_VOXELS", 1_000)
+    asked = []
+    halves = planner._halves_of
+    monkeypatch.setattr(planner, "_halves_of", lambda *a: asked.append(1) or halves(*a))
+    assert planner.raw_triangles(neuron, over) == MAX_RAW_FACES
+    assert planner.raw_triangles(neuron, over) == MAX_RAW_FACES
+    assert len(asked) == 1
+
+
+def test_only_a_one_field_hybrid_is_planned_and_a_failed_plan_leaves_the_old_price(mixed,
+                                                                                    monkeypatch):
+    svc, neuron = mixed
+    for pathway in ("convolution", "original", "adaptive_taubin", "voxel"):
+        options = {**_hybrid_options(svc, voxel2_faces=150_000), "pathway": pathway}
+        assert _hybrid_gate(svc, options) == _hybrid_gate(svc, options, planned=False), pathway
+    ultraliser = {**_hybrid_options(svc), "pathway": "ultraliser"}
+    assert _hybrid_gate(svc, ultraliser) > _hybrid_gate(svc, ultraliser, planned=False)
+
+    def fails(*_args, **_kw):
+        raise RuntimeError("no plan")
+
+    options = _hybrid_options(svc)
+    monkeypatch.setattr(svc._field_planner, "_halves_of", fails)
+    assert _hybrid_gate(svc, options) == _hybrid_gate(svc, options, planned=False)
+
+
 # -- the route ----------------------------------------------------------------------
 
 
