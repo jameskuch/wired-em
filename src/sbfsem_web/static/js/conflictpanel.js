@@ -2,7 +2,8 @@
 // (renderconflicts.js decides; this draws): the controls to change turn black
 // with red text, and a row at the top of the panel says why and lists what to
 // change, best first.  A suggestion's button puts its settings into the
-// controls; nothing is built until Apply.
+// controls; nothing is built until Apply (Compare, in a Render compare pane's
+// options panel, which has a row of its own).
 
 /** The class a control's field takes while its setting is one to change. */
 export const CONFLICT_CLASS = 'conflict';
@@ -11,15 +12,16 @@ export class ConflictPanel {
   /**
    * `form` is the render form (renderform.js: `el(key)`, `control(key)`), `mount`
    * the panel the row goes at the top of, `onPick(set)` what a suggestion's
-   * button does with the options it changes.
+   * button does with the options it changes.  `id` is the row's (the 3D render
+   * panel's; null for another panel's row, so the page has one of it).
    */
-  constructor({ form, mount, onPick }) {
+  constructor({ form, mount, onPick, id = 'render-conflict' }) {
     this.form = form;
     this.onPick = onPick;
     this.marked = new Set();
     this.drawn = '';
     this.box = document.createElement('div');
-    this.box.id = 'render-conflict';
+    if (id) this.box.id = id;
     this.box.className = 'render-conflict';
     this.box.setAttribute('role', 'alert');
     this.box.hidden = true;

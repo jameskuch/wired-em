@@ -117,6 +117,12 @@ class El {
   }
 
   replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
+  prepend(...nodes) {
+    const kept = this.children;
+    this.children = [];
+    this.append(...nodes);
+    this.children.push(...kept);
+  }
   remove() {
     if (this.parentElement) {
       this.parentElement.children = this.parentElement.children.filter((c) => c !== this);
@@ -239,7 +245,8 @@ export class Renderer3D {
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sbfsem-compare-test-'));
 for (const name of ['compare.js', 'comparelayers.js', 'api.js', 'jobcard.js', 'loadprogress.js', 'state.js',
   'shifts.js', 'shiftlayer.js', 'shiftpanel.js', 'shiftlegend.js', 'fatlines.js', 'renderoptions.js',
-  'render-schema.js', 'compareoptions.js', 'renderform.js', 'renderestimate.js', 'regstatus.js']) {
+  'render-schema.js', 'compareoptions.js', 'renderform.js', 'renderestimate.js', 'regstatus.js',
+  'renderconflicts.js', 'conflictpanel.js']) {
   let text = fs.readFileSync(path.join(jsDir, name), 'utf8');
   text = text.replace("'./render3d.js'", "'./render3d_stub.js'");
   fs.writeFileSync(path.join(tmp, name), text);
@@ -3875,6 +3882,123 @@ test('Reset view and Save picture give the keyboard back to the tools button, as
     assert.ok(globalThis.document.activeElement === pane.moreButton);
     assert.equal(pane.paneMenu.hidden, true);
   }
+});
+
+// -- settings that will not build as set -------------------------------------------------
+
+/** A whole-cell field estimate: a typed Fine voxel of 0.03 um that a Face cap of 400,000 holds to 0.0763
+ * (RPC1 c430 under Voxel remesh, as the server answered on 2026-10-20). */
+const heldField = () => ({
+  applies: false, peak_mb: 1288,
+  field: {
+    applies: true, pathway: 'voxel2', typed: true, typed_um: 0.03, asked_um: 0.03, floor_um: 0.02,
+    voxel_um: 0.0763, coarsened: true, reason: 'faces', voxel2_faces: 400000, raw_budget: 1_200_000,
+    work_budget: 60_000_000,
+    cap_for_asked: { voxel2_faces: 2_960_000, raw_triangles: 7_764_204, triangles: 2_960_000, peak_mb: 9493 },
+    uncapped: { voxel_um: 0.03, triangles: 7_764_204, peak_mb: 3765 },
+    finest_um: 0.0297,
+  },
+});
+/** A field estimate that builds as typed. */
+const fitsField = () => ({ applies: false, field: { applies: true, typed: true, coarsened: false } });
+/** A Closed curve estimate past the server's memory at 0.006 um, Join bodies included. */
+const overCurve = () => ({
+  applies: true, method: 'closedcurve', pixel_size_um: 0.006, voxels: 1e7, faces: 8e6, triangles: 1.5e7,
+  peak_mb: 9000, serve_mb: 4500, server_mb: 13500, json_mb: 540, tab_mb: 900, seconds: 240,
+  over: ['memory', 'page'], finest_um: 0.011, binding: 'memory',
+  alternatives: [{ off: 'joins', set: { curve_tie_um: 0 }, finest_um: 0.009, fits: false }],
+  limits: { voxels: 3e8, faces: 1e7, memory_mb: 9000, json_mb: 500 },
+  basis: { kind: 'built', pixel_um: 0.1 }, approximate: false,
+});
+const fitsCurve = (options) => ({
+  applies: true, method: 'closedcurve', pixel_size_um: options.pixel_size_um, voxels: 1e5, faces: 1e5,
+  triangles: 2e5, peak_mb: 200, serve_mb: 100, server_mb: 300, json_mb: 10, tab_mb: 20, seconds: 4, over: [],
+  limits: { voxels: 3e8, faces: 1e7, memory_mb: 9000, json_mb: 500 }, basis: { kind: 'built', pixel_um: 0.1 },
+  approximate: false,
+});
+/** The pane options panel's row and the fields it marks. */
+const conflictRow = (view) => view.optionsPanel.conflicts.box;
+const conflictMarked = (view) => [...view.optionsPanel.conflicts.marked].sort();
+const fixButtons = (view) => conflictRow(view).find((c) => c.tagName === 'button');
+
+async function conflictView(answer) {
+  const { EstimateCache } = await mod('renderestimate.js');
+  const asked = [];
+  const estimates = new EstimateCache(async (rec, options) => {
+    asked.push(options);
+    return answer(options);
+  }, { delay: 0 });
+  const cell = { ...record, summary: { n_curve_annotations: 0, n_disc_annotations: 400, n_nodes: 400, type_id: 1 } };
+  const made = makeOptionsView(2, { estimates, cell: () => cell });
+  return { ...made, asked, cell };
+}
+
+test('a pane\'s options mark a typed Fine voxel the Face cap holds coarser, and a fix changes that layer only', async () => {
+  resetServer();
+  const { view, asked } = await conflictView((o) => (o.voxel2_um === 0.03 && o.voxel2_faces === 400000
+    ? heldField() : fitsField()));
+  setTech(view, 0, 'voxel2');
+  setTech(view, 1, 'voxel2');
+  press(view, 0);
+  await until(() => asked.length, 'the first estimate');
+  await settle();
+  assert.equal(conflictRow(view).hidden, true, 'the automatic Fine voxel builds as set');
+  assert.ok(!conflictRow(view).id, 'the 3D render panel has the row\'s id');
+  edit(view, 'voxel2_um', 0.03, 'change');
+  await until(() => !conflictRow(view).hidden, 'the row');
+  assert.deepEqual(conflictMarked(view), ['voxel2_faces', 'voxel2_um']);
+  assert.ok(label(view, 'voxel2_um').classList.contains('conflict'));
+  assert.equal(control(view, 'voxel2_um').attrs.get('aria-invalid'), 'true');
+  assert.match(conflictRow(view).textContent, /Fine voxel 0\.03 µm will be built coarser for c1 · NeitzInferiorMonkey/);
+  const fixes = fixButtons(view);
+  assert.deepEqual(fixes.map((b) => b.textContent),
+    ['Face cap 2,960,000', 'Face cap 0 (keep every triangle)', 'Fine voxel 0.0763 µm']);
+  assert.ok(fixes[0].className.includes('best'));
+  const other = { ...view.panes[1].layers[0].config.options };
+  fixes[0].click();
+  const layer = view.panes[0].layers[0].config.options;
+  assert.deepEqual([layer.voxel2_um, layer.voxel2_faces], [0.03, 2_960_000], 'the fix is in the layer');
+  assert.equal(shown(view, 'voxel2_faces'), '2960000', 'and in its box');
+  assert.deepEqual(view.panes[1].layers[0].config.options, other, 'the other pane is not touched');
+  assert.equal(meshJobs().length, 0, 'nothing is built until Compare');
+  await until(() => conflictRow(view).hidden, 'the row to go');
+  assert.deepEqual(conflictMarked(view), []);
+  assert.ok(!label(view, 'voxel2_um').classList.contains('conflict'));
+  assert.equal(control(view, 'voxel2_um').attrs.has('aria-invalid'), false);
+  // The other pane's panel has its own settings, which build as set.
+  press(view, 1);
+  await settle();
+  assert.equal(conflictRow(view).hidden, true);
+});
+
+test('a pane\'s Closed curve size past the server\'s memory marks Voxel and Join bodies; a fix sets both', async () => {
+  resetServer();
+  const { view } = await conflictView((o) => (o.method === 'closedcurve' && o.pixel_size_um === 0.006
+    ? overCurve() : fitsCurve(o)));
+  setTech(view, 0, 'closedcurve');
+  press(view, 0);
+  edit(view, 'pixel_size_um', 0.006, 'change');
+  await until(() => !conflictRow(view).hidden, 'the row');
+  assert.deepEqual(conflictMarked(view), ['curve_tie_um', 'pixel_size_um']);
+  assert.deepEqual(fixButtons(view).map((b) => b.textContent), ['Voxel 0.011 µm', 'Join bodies off, Voxel 0.009 µm']);
+  assert.match(view.optionsPanel.chip.textContent, /too fine/, 'the chip says it too');
+  fixButtons(view)[1].click();
+  const { config } = view.panes[0].layers[0];
+  assert.deepEqual([config.options.pixel_size_um, config.options.curve_tie_um], [0.009, 0]);
+  assert.equal(config.pixelChosen, true, 'the size picked is the user\'s: Compare builds it as set');
+  await until(() => conflictRow(view).hidden, 'the row to go');
+  // A method the estimates do not speak for marks nothing.
+  setTech(view, 0, 'original');
+  await settle();
+  assert.equal(conflictRow(view).hidden, true);
+  assert.deepEqual(conflictMarked(view), []);
+});
+
+test('a pane with no estimates has no row', () => {
+  const { view } = makeOptionsView(2);
+  setTech(view, 0, 'voxel2');
+  press(view, 0);
+  assert.equal(conflictRow(view).hidden, true);
 });
 
 // -- run -------------------------------------------------------------------

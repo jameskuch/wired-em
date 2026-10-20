@@ -18,6 +18,8 @@ import {
   storeTechDefaults, pick, MESH_OPTION_KEYS, CURVE_METHODS,
 } from './renderoptions.js';
 import { estimateChip, interim, LONG_WAIT_S } from './renderestimate.js';
+import { renderConflicts, buildsField, fieldNotes } from './renderconflicts.js';
+import { ConflictPanel } from './conflictpanel.js';
 
 // -- a pane's options --------------------------------------------------------
 
@@ -177,17 +179,20 @@ const el = (tag, className, text) => {
 /**
  * The options panel a pane's header arrow opens: the render schema's strip
  * and More controls for the layer being edited in the focused pane, the cost
- * chip, and a More menu with the bridges.  One panel serves every layer;
- * `bind()` points it at one.
+ * chip, a More menu with the bridges, and the 3D render panel's row for
+ * settings that will not build as set (conflictpanel.js).  One panel serves
+ * every layer; `bind()` points it at one.
  *
  * `onInput(key, event)` hears every edit of a control, `onBridge(id)` a press of
- * a bridge, `onClose()` the close button.
+ * a bridge, `onPick(set)` a press of one of the row's fixes (the options it
+ * changes), `onClose()` the close button.
  */
 export class OptionsPanel {
-  constructor(host, { caps = () => ({}), onInput, onBridge, onClose, estimates = null }) {
+  constructor(host, { caps = () => ({}), onInput, onBridge, onPick, onClose, estimates = null }) {
     this.host = host;
     this.caps = caps;
-    // The server's estimates (renderestimate.js), for the chip of an outline method.
+    // The server's estimates (renderestimate.js), for the chip of an outline method
+    // and the settings that will not build as set.
     this.estimates = estimates;
     this._shown = null;
     host.setAttribute('role', 'group');
@@ -242,6 +247,9 @@ export class OptionsPanel {
       skip: ['clip_ipl'],
       onInput: (key, event) => onInput(key, event),
     });
+    // Settings that will not build as set for the cell: their controls black with red
+    // text, and a row at the top of the panel with the fixes, best first.
+    this.conflicts = new ConflictPanel({ form: this.form, mount: host, id: null, onPick: (set) => onPick?.(set) });
 
     // Esc closes the panel, as it closes the More menu (which has the first Esc when open).
     host.addEventListener('keydown', (event) => {
@@ -302,42 +310,70 @@ export class OptionsPanel {
     this.update({ options, record });
   }
 
-  /** What follows from the options without touching what is typed: which controls show, and the cost. */
+  /**
+   * What follows from the options without touching what is typed: which controls
+   * show, the cost, and the settings that will not build as set.
+   */
   update({ options, record, title }) {
     if (title !== undefined) this.title.textContent = title;
     this.form.refresh(options, this.caps());
     this._shown = { options, record };
-    const cost = this._cost(record, options);
+    const held = this._estimate(record, options);
+    const notes = this._conflicts(record, options, held);
+    const cost = this._cost(record, options, held);
     this.chip.hidden = !cost;
     if (cost) {
       this.chip.textContent = cost.text;
       this.chip.classList.toggle('warn', cost.warn);
       this.chip.classList.toggle('over', !!cost.over);
-      this.chip.dataset.help = cost.help;
+      // An automatic Fine voxel the Face cap holds coarser is said on hover, as in the 3D render.
+      this.chip.dataset.help = notes.length ? `${cost.help}\n\n${notes.join('\n')}` : cost.help;
     }
   }
 
   /**
-   * The chip: for Closed curve and Hybrid the server's estimate of the cell (asked
-   * for once typing stops, and drawn when it comes, if the panel still shows the
-   * same options), otherwise the rough one.
+   * The server's estimate of building this layer on the cell, for a method it
+   * speaks for (Closed curve and Hybrid; a whole-cell field): asked for once
+   * typing stops, and drawn when it comes, if the panel still shows the same
+   * options.  Undefined while it is out, null when there is none to ask for or
+   * the server could not say.
    */
-  _cost(record, options) {
-    if (this.estimates && record?.summary && CURVE_METHODS.has(options.method)) {
-      const held = this.estimates.peek(record, options);
-      const redraw = () => {
-        const now = this._shown;
-        if (now && now.record === record && JSON.stringify(now.options) === JSON.stringify(options)) {
-          this.update(now);
-        }
-      };
-      // An interim answer is held a moment and asked again: look again once it has gone.
-      if (interim(held)) {
-        clearTimeout(this._retry);
-        this._retry = setTimeout(redraw, this.estimates.interimMs + 100);
+  _estimate(record, options) {
+    if (!this.estimates || !record?.summary) return null;
+    if (!CURVE_METHODS.has(options.method) && !buildsField(options)) return null;
+    const held = this.estimates.peek(record, options);
+    const redraw = () => {
+      const now = this._shown;
+      if (now && now.record === record && JSON.stringify(now.options) === JSON.stringify(options)) {
+        this.update(now);
       }
+    };
+    // An interim answer is held a moment and asked again: look again once it has gone.
+    if (interim(held)) {
+      clearTimeout(this._retry);
+      this._retry = setTimeout(redraw, this.estimates.interimMs + 100);
+    }
+    if (held === undefined) this.estimates.soon('compare-pane', [record], options, redraw);
+    return held;
+  }
+
+  /**
+   * Mark the settings that will not build as set for the cell and list the fixes
+   * (renderconflicts.js), or clear them; the field notes for the chip's hover.
+   */
+  _conflicts(record, options, held) {
+    const entries = held ? [{ name: `c${record.id} · ${record.source}`, estimate: held }] : [];
+    this.conflicts.show(entries.length ? renderConflicts(entries, options) : null);
+    return entries.length ? fieldNotes(entries, options) : [];
+  }
+
+  /**
+   * The chip: for Closed curve and Hybrid the server's estimate of the cell
+   * (`held`, from `_estimate`), otherwise the rough one.
+   */
+  _cost(record, options, held) {
+    if (this.estimates && record?.summary && CURVE_METHODS.has(options.method)) {
       if (held === undefined || held?.pending) {
-        if (held === undefined) this.estimates.soon('compare-chip', [record], options, redraw);
         return { text: '≈ …', warn: false, over: false,
           help: 'Asking the server what building this layer at this Voxel size would cost.' };
       }

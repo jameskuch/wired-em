@@ -988,7 +988,9 @@ and the finest any budget allows it is 0.030 µm. Inferior c1178 is built at 0.1
 under the default cap and can go no finer than 0.042 µm, where it fills the 10 million.
 How long the server takes to say so, on production: 2.7 to 3.1 s for a cell's first
 answer (c430, c1178), 0.7 to 0.9 s for each new Fine voxel or Face cap, and nothing for
-an answer already given; the marks appear when it comes.
+an answer already given; the marks appear when it comes. Render compare's options
+panel marks a layer's settings the same way, for the cell the picker names, and a
+fix there changes that layer only (*Render compare*).
 
 A build cut short by a restart of the server (every deploy restarts it) is no longer
 reported as one that ran out of memory with advice to ask for a coarser setting
@@ -2725,6 +2727,13 @@ does.
   left alone. *Reset to technique defaults* and picking the technique again hand
   the choice back to the cell. The cost chip prices a pane at the raster it will
   build at.
+- **Settings that will not build as set are marked here too** (since 2.19.1), as
+  in the 3D render (*Settings that will not build as set*): a layer's Closed curve
+  or Hybrid Voxel size past a limit for the cell the picker names, or its typed
+  Fine voxel the Face cap holds coarser, turns those controls black with red text,
+  and a row at the top of the panel says why and lists the fixes, best first. A
+  fix goes into that layer alone, as if typed: the other layers and panes and the
+  3D render panel keep their settings, and nothing is built until Compare.
 - **Panes keep everything** — layers, settings, surfaces — when you change the
   number of panes (panes come and go at the end), and the arrows' panel follows
   its pane. None of it is saved with the session: a reload starts from the

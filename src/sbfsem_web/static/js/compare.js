@@ -214,7 +214,9 @@ export class CompareView {
    * transforms are not read (`has_transforms` false), the Position shift offers the
    * section correction alone.
    * `estimates` (renderestimate.js's EstimateCache) puts the server's estimate of a
-   * Closed curve or Hybrid layer on the options panel's chip, and
+   * Closed curve or Hybrid layer on the options panel's chip, and marks the settings
+   * of a layer that will not build as set (an outline method's Voxel size, a whole-cell
+   * field's Fine voxel and Face cap) with the fixes, as the 3D render panel does;
    * `fitPixel(record, options)` answers `{ pixel, why }` when that layer's Voxel size
    * is too fine for the cell: the layer is then built at `pixel` (both optional).
    */
@@ -242,6 +244,7 @@ export class CompareView {
       estimates: estimates || null,
       onInput: (key, event) => this._optionsEdited(key, event),
       onBridge: (id) => this._bridge(id),
+      onPick: (set) => this._fixPicked(set),
       onClose: () => this._closeFromPanel(),
     }) : null;
     // The toolbar's one-line account of every pane (ready, working, failed).
@@ -1543,6 +1546,28 @@ export class CompareView {
     });
     // Typing is never rewritten under the cursor; a committed value is shown as it will be built.
     if (event?.type === 'change') this.optionsPanel.write(layer.config.options);
+    this._syncEditor(layer.pane);
+    this._touch(layer);
+  }
+
+  /**
+   * A fix from the panel's row for settings that will not build as set: its
+   * settings go into the layer the panel edits, and only that one, as if typed
+   * (a Voxel size becomes the user's); Compare builds it.
+   */
+  _fixPicked(set) {
+    const layer = this._optionsLayer();
+    if (!layer || !this.optionsPanel?.open) return;
+    layer.config.options = paneOptions({ ...this._layerOptions(layer), ...set });
+    if ('pixel_size_um' in set) {
+      layer.config.seededPixel = null;
+      layer.config.pixelChosen = true;
+    }
+    this._deriveTech(layer);
+    this.optionsPanel.write(layer.config.options);
+    this.optionsPanel.update({
+      options: layer.config.options, record: this._compareRecord(), title: this._paneName(layer),
+    });
     this._syncEditor(layer.pane);
     this._touch(layer);
   }

@@ -54,6 +54,12 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   controls and clears the marks, and Apply then builds it as typed; a Closed curve size past the
   server's memory marks Voxel and Join bodies, and the other way sets both; a method that reads
   neither marks nothing.
+* ``compareconflicts`` -- the same marks and fixes in a Render compare pane's options panel: a pane's typed
+  Fine voxel the Face cap holds coarser marks both of its controls black with red text and lists the fixes;
+  picking the best (a real click) changes only that layer (the other pane, the 3D render panel and its row are
+  untouched, nothing is built), and Compare then builds it as typed; a pane's Closed curve size past the
+  server's memory marks Voxel and Join bodies, and the other way sets both in that layer; a method that reads
+  neither marks nothing.
 * ``compare`` -- Render compare's pane header: it keeps its height in every state (idle, waiting,
   building, measuring, out of date, stopped, failed) at 900, 1140, 1440 and 1920 px, 3 and 6 panes, 1 and
   4 layers, annotations on, and through a real build; Tab walks the buttons and then the chips under
@@ -1550,6 +1556,130 @@ HEADER_STATES = r"""(() => {
 })()""" % COMPARE
 
 
+# -- compareconflicts ----------------------------------------------------------------------
+
+PANE_FORM = f'{COMPARE}.optionsPanel.form'
+PANE_ROW = "document.querySelector('#panel-compare-options .render-conflict')"
+PANE_MARKED = ("[...document.querySelectorAll('#panel-compare-options .field.conflict')]"
+               ".map((e) => e.dataset.key).sort()")
+
+
+def _pane_set(c: Chrome, key: str, value: str) -> None:
+    """Set a control of the pane options panel as a person does: its value, then input and change."""
+    js(c, """(() => { const b = %s.control(%s); b.value = %s;
+        b.dispatchEvent(new Event('input', { bubbles: true }));
+        b.dispatchEvent(new Event('change', { bubbles: true })); })()""" % (PANE_FORM, json.dumps(key), json.dumps(value)))
+    c.settle(2)
+
+
+def compareconflicts(c: Chrome, r: Report, ctx):
+    r.start('compareconflicts: a Render compare pane\'s settings that will not build as set, with fixes to pick')
+    boot(c, ctx.url)
+    js(c, VOXEL_SPY)
+    key = load(c, ctx.cell)
+    main = "({ faces: document.getElementById('voxel2-faces').value, um: document.getElementById('voxel2-um').value," \
+           " pixel: document.getElementById('pixel-size').value, tie: document.getElementById('curve-tie').value })"
+    main_shown = js(c, main)
+    _compare_tab(c, 2)
+    js(c, """(() => { const p = document.getElementById('compare-cell'); p.value = %s;
+        p.dispatchEvent(new Event('change', { bubbles: true })); })()""" % json.dumps(key))
+    c.settle(2)
+    for pane in (0, 1):
+        js(c, """(() => { const t = %s.panes[%d].techSelect; t.value = 'voxel2';
+            t.dispatchEvent(new Event('change', { bubbles: true })); })()""" % (COMPARE, pane))
+    _click_js(c, _pane_el(0, 'optsButton'))
+    c.settle(2)
+    r.check('settings that build as set mark nothing', c.wait_for(f'{PANE_ROW}.hidden', 30)
+            and js(c, PANE_MARKED) == [], js(c, PANE_MARKED))
+    # c943 under a Face cap of 20,000 is held to 0.027 um; 0.02 is typed (as in the conflicts section).
+    _pane_set(c, 'voxel2_faces', '20000')
+    _pane_set(c, 'voxel2_um', '0.02')
+    shown = c.wait_for(f'!{PANE_ROW}.hidden', 60)
+    got = js(c, f"""(() => {{
+        const style = (el) => {{ const s = getComputedStyle(el); return [s.backgroundColor, s.color]; }};
+        const form = {PANE_FORM};
+        return {{ marked: {PANE_MARKED}, text: {PANE_ROW}.innerText,
+          field: style(form.el('voxel2_um')), box: style(form.control('voxel2_um')),
+          fixes: [...{PANE_ROW}.querySelectorAll('.render-conflict-use')].map((b) => [b.textContent, b.classList.contains('best')]),
+          invalid: form.control('voxel2_um').getAttribute('aria-invalid'),
+          rows: document.querySelectorAll('.render-conflict').length,
+          ids: document.querySelectorAll('#render-conflict').length,
+          main: document.getElementById('render-conflict').hidden }};
+    }})()""")
+    r.check('a pane\'s typed Fine voxel the Face cap holds coarser marks both of its controls', shown
+            and got['marked'] == ['voxel2_faces', 'voxel2_um'] and got['invalid'] == 'true', got)
+    r.check('black, with red text: the field and its box', got['field'] == ['rgb(0, 0, 0)', 'rgb(255, 0, 0)']
+            and got['box'] == ['rgb(0, 0, 0)', 'rgb(255, 0, 0)'], got)
+    r.check('the pane\'s row says why and lists the fixes, the least Face cap first',
+            f'coarser for c{ctx.cell} · {ctx.source}' in got['text']
+            and got['fixes'] and got['fixes'][0][0].startswith('Face cap ') and got['fixes'][0][1]
+            and any(f[0] == 'Face cap 0 (keep every triangle)' for f in got['fixes'])
+            and got['fixes'][-1][0].startswith('Fine voxel '), got['fixes'])
+    r.check('the pane\'s row is its own: the 3D render panel\'s stays hidden, one element has its id',
+            got['rows'] == 2 and got['ids'] == 1 and got['main'], got)
+    other = js(c, f'JSON.stringify({COMPARE}.panes[1].layers[0].config.options)')
+    builds = js(c, 'window.sbfsem.api.__meshes.length')
+    _click_js(c, f'{PANE_ROW}.querySelector(".render-conflict-use.best")')
+    cleared = c.wait_for(f'{PANE_ROW}.hidden', 60)
+    cap = int(got['fixes'][0][0].removeprefix('Face cap ').replace(',', ''))
+    now = js(c, f"""({{ layer: [{COMPARE}.panes[0].layers[0].config.options.voxel2_faces,
+        {COMPARE}.panes[0].layers[0].config.options.voxel2_um],
+        box: [{PANE_FORM}.control('voxel2_faces').value, {PANE_FORM}.control('voxel2_um').value],
+        marked: {PANE_MARKED}, other: JSON.stringify({COMPARE}.panes[1].layers[0].config.options),
+        main: {main}, status: document.getElementById('compare-status').textContent,
+        builds: window.sbfsem.api.__meshes.length }})""")
+    r.check('picking the best fix puts it in that layer and its boxes and clears the marks',
+            cleared and now['layer'] == [cap, 0.02] and now['box'] == [str(cap), '0.02'] and now['marked'] == [], now)
+    r.check('only that layer: the other pane and the 3D render panel keep their settings, nothing is built',
+            now['other'] == other and now['main'] == main_shown and now['builds'] == builds
+            and 'press Compare' in now['status'], now)
+    _click_js(c, "document.getElementById('compare-build')")
+    c.wait_for(f"{COMPARE}.panes[0].layers[0].mesh && !{COMPARE}.running", 240)
+    c.settle(2)
+    built = js(c, f"""(() => {{ const m = {COMPARE}.panes[0].layers[0].mesh || {{}};
+        return {{ used: m.voxel2_um ?? null, coarsened: m.voxel2_coarsened ?? null, faces: m.n_faces ?? null,
+          asked: window.sbfsem.api.__meshes.slice({builds}).filter((x) => x.id === {ctx.cell}).length }}; }})()""")
+    r.check('Compare builds it as typed', built['asked'] >= 1 and not built['coarsened']
+            and built['used'] is not None and abs(built['used'] - 0.02) < 1e-6, built)
+
+    # Closed curve past the server's memory, with Join bodies on: an estimate held to it.
+    js(c, r"""(() => {
+      const api = window.sbfsem.api;
+      const real = api.renderEstimate;
+      api.renderEstimate = async (source, id, opts, extra) => {
+        if (opts.method !== 'closedcurve' || opts.pixel_size_um !== 0.006) return real(source, id, opts, extra);
+        return { applies: true, method: 'closedcurve', pixel_size_um: 0.006, voxels: 1e7, faces: 8e6,
+          triangles: 1.5e7, peak_mb: 9000, serve_mb: 4500, server_mb: 13500, json_mb: 540, tab_mb: 900,
+          seconds: 240, over: ['memory', 'page'], finest_um: 0.011, binding: 'memory',
+          alternatives: [{ off: 'joins', set: { curve_tie_um: 0 }, finest_um: 0.009, fits: false }],
+          limits: { voxels: 3e8, faces: 1e7, memory_mb: 9000, json_mb: 500 },
+          basis: { kind: 'built', pixel_um: 0.1 }, approximate: false };
+      };
+    })()""")
+    _pane_set(c, 'method', 'closedcurve')
+    pane_box = f"{PANE_FORM}.control('pixel_size_um')"
+    type_into(c, pane_box, '0.006')
+    press_key(c, pane_box, 'Enter')
+    shown = c.wait_for(f'!{PANE_ROW}.hidden', 60)
+    got = js(c, f"({{ marked: {PANE_MARKED}, fixes: [...{PANE_ROW}.querySelectorAll('.render-conflict-use')].map((b) => b.textContent) }})")
+    r.check('a pane\'s Closed curve too fine: Voxel and Join bodies are marked, the finest size first',
+            shown and got['marked'] == ['curve_tie_um', 'pixel_size_um']
+            and got['fixes'] == ['Voxel 0.011 µm', 'Join bodies off, Voxel 0.009 µm'], got)
+    _click_js(c, f'{PANE_ROW}.querySelector("li:nth-child(2) .render-conflict-use")')
+    c.wait_for(f'{PANE_ROW}.hidden', 60)
+    now = js(c, f"""({{ box: [{pane_box}.value, {PANE_FORM}.control('curve_tie_um').value],
+        layer: [{COMPARE}.panes[0].layers[0].config.options.pixel_size_um,
+          {COMPARE}.panes[0].layers[0].config.options.curve_tie_um, {COMPARE}.panes[0].layers[0].config.pixelChosen],
+        marked: {PANE_MARKED}, other: JSON.stringify({COMPARE}.panes[1].layers[0].config.options), main: {main} }})""")
+    r.check('the other way is two settings at once, in that layer only',
+            now['box'] == ['0.009', '0'] and now['layer'] == [0.009, 0, True] and now['marked'] == []
+            and now['other'] == other and now['main'] == main_shown, now)
+    _pane_set(c, 'method', 'cylinder')
+    _pane_set(c, 'pathway', 'original')
+    r.check('a method that reads neither marks nothing', c.wait_for(f'{PANE_ROW}.hidden', 10)
+            and js(c, PANE_MARKED) == [], js(c, PANE_MARKED))
+
+
 def compare(c: Chrome, r: Report, ctx):
     r.start('compare: the layers\' header, its tab order and its popovers')
     boot(c, ctx.url)
@@ -2542,6 +2672,7 @@ SECTIONS = {
     'race': race,
     'fine': fine,
     'conflicts': conflicts,
+    'compareconflicts': compareconflicts,
     'compare': compare, 'comparekeys': comparekeys, 'comparestate': comparestate,
     'comparetoolbar': comparetoolbar,
     'helpmovie': helpmovie,
