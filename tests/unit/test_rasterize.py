@@ -51,7 +51,7 @@ def unfused_mask(points, shape):
         right ^= ((y0 > 0) != (y1 > 0)) & (val > 0)
         left ^= ((y0 < 0) != (y1 < 0)) & (val < 0)
     mask = right | left
-    for vx, vy in pts:
+    for vx, vy in pts[np.isfinite(pts).all(axis=1)]:
         vc, vr = round(vx), round(vy)
         if (abs(vx - vc) < rasterize.VERTEX_EPS and abs(vy - vr) < rasterize.VERTEX_EPS
                 and 0 <= vr < rows and 0 <= vc < cols):
@@ -76,8 +76,8 @@ def fill_only(monkeypatch):
     monkeypatch.setattr(rasterize, "sk_polygon", refuse)
 
 
-def assert_same(points, shape):
-    expected = (unfused_mask if SKIMAGE_FUSES else skimage_mask)(points, shape)
+def assert_same(points, shape, reference=None):
+    expected = (reference or (unfused_mask if SKIMAGE_FUSES else skimage_mask))(points, shape)
     actual = polygon_mask(points, shape)
     assert actual.dtype == bool and actual.shape == expected.shape
     diff = np.argwhere(actual != expected)
@@ -199,7 +199,7 @@ def test_skimage_keeps_small_and_unusual_rings(monkeypatch):
                [[1, 1], [np.inf, 4], [6, 2]],
                [[1, 1], [2.0**41, 4], [6, 2]])
     for points in (small, *unusual):
-        assert_same(points, (8, 8))
+        assert_same(points, (8, 8), reference=skimage_mask)  # skimage draws these itself, fused or not
     assert calls == [3, 4, 3, 3]
     calls.clear()
     big = _star(np.random.default_rng(1), 300, 40.2, 30.6, 10, 25)
