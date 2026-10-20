@@ -1,0 +1,36 @@
+site_name: SBFSEM-pytools
+site_description: Connectomics analysis and rendering for serial block-face EM annotations
+repo_url: https://github.com/sarastokes/SBFSEM-tools
+docs_dir: docs
+# docs/deviations.md is a symlink to the canonical DEVIATIONS.md at the repo
+# root, which the plan asks to publish as a first-class document.
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: { icon: material/weather-night, name: Dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: { icon: material/weather-sunny, name: Light mode }
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - User guide: user-guide.md
+  - Backend guide: backend.md
+  - HTTP API: api.md
+  - Deploying to Lightsail: deployment.md
+  - Viking Identity sign-in: viking-identity.md
+  - Sizing the VM: vm-upgrade.md
+  - Migrating from MATLAB: migration.md
+  - Deviations: deviations.md
+markdown_extensions:
+  - admonition
+  - tables
+  - toc: { permalink: true }
+  - pymdownx.superfences
+plugins:
+  - search

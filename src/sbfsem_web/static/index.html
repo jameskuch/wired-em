@@ -1,0 +1,804 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SBFSEM-pytools</title>
+<link rel="stylesheet" href="/static/css/app.css?v=__SBFSEM_VERSION__">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#129504;</text></svg>">
+<script type="importmap">
+{
+  "imports": {
+    "three": "/static/vendor/three/three.module.min.js?v=__SBFSEM_VERSION__",
+    "three/addons/": "/static/vendor/three/addons/",
+    "cytoscape": "/static/vendor/cytoscape.esm.min.mjs?v=__SBFSEM_VERSION__"
+  }
+}
+</script>
+</head>
+<body>
+<div id="update-banner" class="update-banner" role="alert" hidden>
+  <span id="update-text">A new version of SBFSEM-pytools has been deployed.</span>
+  <button id="update-reload" class="primary">Reload now</button>
+  <button id="update-dismiss" class="icon-btn" title="Keep working; reload later">&#10005;</button>
+</div>
+<div id="restore-banner" class="update-banner restore-banner" role="region" aria-label="Cells to restore" hidden>
+  <span id="restore-text"></span>
+  <button id="restore-yes" class="primary">Restore</button>
+  <button id="restore-no">Discard</button>
+</div>
+<header class="topbar">
+  <h1>SBFSEM<span>-pytools</span></h1>
+  <div class="topbar-meta">
+    <span id="status" class="status" role="status" aria-live="polite">ready</span>
+    <!-- Stamped by the server with the signed-in user; empty when login is off. -->
+    <span id="whoami" class="whoami" data-user="__SBFSEM_USER__" hidden></span>
+    <!-- Stamped by /open with what a deep link asked for; empty otherwise. -->
+    <span id="open-link" data-open="__SBFSEM_OPEN__" hidden></span>
+    <a id="signout" class="signout" href="/logout" hidden>Sign out</a>
+    <script>
+      (() => {
+        const who = document.getElementById("whoami");
+        if (who.dataset.user) {
+          who.textContent = who.dataset.user;
+          who.hidden = false;
+          document.getElementById("signout").hidden = false;
+        }
+      })();
+    </script>
+  </div>
+</header>
+<!-- Full screen only: the cell list folds away, and this brings it back. -->
+<button id="fs-cells" type="button" aria-pressed="false"
+        title="Show or hide the cell list while in full screen">&#9776; Cells</button>
+
+<main class="layout">
+  <aside class="sidebar" aria-label="Neurons">
+    <section class="panel volume-panel">
+      <label class="field" for="volume">Volume
+        <select id="volume"></select>
+      </label>
+    </section>
+
+    <section class="panel">
+      <h2>Load a neuron</h2>
+      <form id="load-form" class="row">
+        <input id="neuron-id" type="text"
+               placeholder="ID, range or label" autocomplete="off"
+               title="IDs, ranges, and labels, separated by commas or semicolons: 1178   or   5-10, 12   or   CBb4w; 180-476. A label loads every cell whose label contains it." required>
+        <button type="submit" class="primary">Load</button>
+      </form>
+      <form id="search-form" class="row">
+        <input id="search-label" type="search" placeholder="Search by label…">
+        <button type="submit">Find</button>
+      </form>
+      <ul id="search-results" class="search-results"></ul>
+      <div id="search-actions" class="row search-actions" hidden>
+        <span id="search-count" class="muted"></span>
+        <button id="search-add-selected" type="button" title="Load the ticked results">Add selected</button>
+        <button id="search-add-all" type="button" class="primary" title="Load every result">Add all</button>
+      </div>
+      <fieldset class="groupbox">
+        <legend>Files</legend>
+        <div class="row json-row">
+          <label class="filebtn"
+                 title="Import a workspace or neuron JSON, or a .txt structure list (IDs, ranges, and labels, as in the Viking export portal)">
+            Import…
+            <input id="import-file" type="file" accept=".json,.txt" hidden>
+          </label>
+          <button id="save-open" type="button" title="Open a workspace saved on the server">Open…</button>
+          <button id="save-store" type="button" title="Save the current cells and their settings on the server">Save…</button>
+        </div>
+      </fieldset>
+    </section>
+
+    <section class="panel grow">
+      <!-- The actions ride in the heading, which stays at the top of the
+           sidebar while a long list scrolls under it. -->
+      <div class="loaded-head">
+        <div class="loaded-title">
+          <h2>Loaded <span id="loaded-count" class="pill">0</span></h2>
+          <div class="list-actions">
+            <button id="select-all" class="linkish" type="button">Select all</button>
+            <button id="select-none" class="linkish" type="button">Select none</button>
+            <button id="refresh-all" class="icon-btn refresh-all" type="button"
+                    title="Refresh all cached renders" aria-label="Refresh all cached renders">&#8635;</button>
+            <button id="clear-all" class="linkish clear-all" type="button"
+                    title="Unload every loaded cell (Undo brings them back)">Clear all cells</button>
+          </div>
+        </div>
+        <div class="list-header" aria-hidden="true">
+          <span class="hdr-vis">show</span><span class="hdr-sel">sel</span>
+        </div>
+      </div>
+      <ul id="neuron-list" class="neuron-list"></ul>
+      <p id="selection-count" class="muted selection-count">No cells loaded</p>
+    </section>
+
+  </aside>
+  <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical"
+       aria-label="Resize the cell panel" title="Drag to widen the cell panel; double-click to reset"></div>
+
+  <section class="content">
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-view="render" role="tab" aria-selected="true">3D render</button>
+      <button class="tab" data-view="compare" role="tab" aria-selected="false">Render compare</button>
+      <button class="tab" data-view="network" role="tab" aria-selected="false">Network</button>
+      <button class="tab" data-view="connectivity" role="tab" aria-selected="false">Connectivity</button>
+      <button class="tab" data-view="strata" role="tab" aria-selected="false">Stratification</button>
+      <button class="tab" data-view="table" role="tab" aria-selected="false">Annotations</button>
+      <button class="tab" data-view="stats" role="tab" aria-selected="false">Analyses</button>
+      <button class="tab tab-end" data-view="settings" role="tab" aria-selected="false"
+              title="Debug tools: what this page and the server have loaded, clearing caches, restarting the server">Settings</button>
+    </nav>
+
+    <div class="views">
+      <div class="view active" id="view-render">
+        <!-- The overlays live INSIDE the viewport: anchored to the view they
+             would sit behind the tool panels, which are what they annotate. -->
+        <div id="viewport">
+          <div id="scale-bar" class="scale-bar" hidden></div>
+          <div id="colorbar" class="colorbar" hidden>
+            <div class="cbar-gradient"></div>
+            <div class="cbar-labels"><span>INL</span><span>IPL depth</span><span>GCL</span></div>
+          </div>
+          <div id="rec-indicator" class="rec-indicator" hidden>
+            <span class="rec-dot"></span><span id="rec-text">recording</span>
+            <button id="rec-stop" type="button">Stop</button>
+          </div>
+          <!-- The download is offered on a real click as well as attempted
+               automatically: a save fired minutes after the button press is
+               not a user gesture, and Safari refuses those outright. -->
+          <div id="video-ready" class="rec-indicator ready" hidden>
+            <span id="video-ready-text">Video ready</span>
+            <button id="video-save" type="button" class="primary">Save</button>
+            <button id="video-dismiss" type="button">Dismiss</button>
+          </div>
+          <!-- The Position shift layer, while a cell draws one: the exaggeration,
+               the slice and how many arrows, with a stepper in slice mode. Bottom
+               center, a row above the scale bar (app.css). -->
+          <div id="shift-chip" class="shift-chip" hidden>
+            <span id="shift-chip-text" class="shift-chip-text"></span>
+            <span id="shift-chip-steps" class="shift-chip-steps" hidden>
+              <button id="shift-prev" type="button" aria-label="Previous section"
+                      title="Previous section">&#9664;</button>
+              <input id="shift-range" type="range" step="1" aria-label="Slice section">
+              <button id="shift-next" type="button" aria-label="Next section"
+                      title="Next section">&#9654;</button>
+            </span>
+            <button id="shift-off" type="button" title="Turn the position shift off for the cells that draw it">Off</button>
+          </div>
+        </div>
+        <!-- A render that fails must not whisper from the status corner: this
+             banner sits over the viewport, names the cell, the technique and
+             the reason, and stays until dismissed or the cell succeeds. -->
+        <div id="render-error" class="render-error" role="alert" hidden>
+          <strong id="render-error-title">Render failed.</strong>
+          <span id="render-error-text"></span>
+          <button id="render-error-dismiss" class="icon-btn"
+                  title="Dismiss">&#10005;</button>
+        </div>
+        <!-- A setting the app changed from its default, said for a while. -->
+        <div id="render-notice" class="render-notice" role="status" hidden>
+          <span><strong id="render-notice-title"></strong><span id="render-notice-text"></span></span>
+          <button id="render-notice-dismiss" class="icon-btn"
+                  title="Dismiss">&#10005;</button>
+        </div>
+        <!-- How far a load has got: cells done of cells asked for, and the
+             ones in flight by name and stage. Hidden while nothing loads. -->
+        <div id="load-progress" class="load-progress" hidden>
+          <div class="load-head">
+            <div class="load-title" role="status" aria-live="polite"></div>
+            <button type="button" class="load-stop" hidden
+              title="Stop this load: cells not drawn yet are dropped and their builds cancelled; cells already on screen stay">Stop</button>
+          </div>
+          <progress max="1" value="0" aria-label="Cells loaded"></progress>
+          <ul class="load-cells"></ul>
+        </div>
+        <div class="viewport-overlay">
+          <!-- The readout of the last pick, and under it, whenever something is
+               selected, a row for each marker: red above the yellow selection,
+               blue below it (app.js renderMarkerTable). -->
+          <div class="readouts">
+          <div class="picked">
+            <span id="pick-text">Click a render to pick a point</span>
+            <span class="pick-sep" aria-hidden="true">|</span>
+            <button id="pick-viking" class="pick-field" type="button"
+                    title="Click: copy “X Y Z downsample” for Viking → Commands → Goto Location. Right-click: type or paste a Viking location, Enter takes the view there.">Viking —</button>
+            <span class="pick-sep" aria-hidden="true">|</span>
+            <button id="pick-location" class="pick-field" type="button"
+                    title="Click: copy the Location ID for Viking → Annotation → Goto Location ID. Right-click: type or paste a Location ID, Enter takes the view there.">Location ID —</button>
+            <span id="pick-shift-sep" class="pick-sep" aria-hidden="true" hidden>|</span>
+            <span id="pick-shift" class="pick-shift" hidden></span>
+            <input id="pick-input" class="pick-input" type="text" spellcheck="false" autocomplete="off" hidden>
+          </div>
+          <div id="marker-table" class="marker-table" hidden></div>
+          <!-- Moving an annotation by hand (movecontrol.js builds it): where it is,
+               the viewport's axes, the axis and step, Apply. -->
+          <div id="move-panel" class="move-panel" hidden></div>
+          </div>
+          <!-- Shown only when the viewport is too narrow for the readout and
+               the hint side by side (the CSS decides): the hint then folds
+               into this button and opens under the readout. -->
+          <button id="hint-toggle" class="hint-toggle" type="button"
+                  aria-expanded="false" aria-controls="nav-hint"
+                  aria-label="Mouse and keyboard controls"
+                  title="Mouse and keyboard controls">?</button>
+          <div id="nav-hint" class="hint">
+            drag orbit &middot; right-drag pan &middot; triple-click select &middot;
+            shift/ctrl/alt-drag roll/pitch/yaw &middot;
+            <kbd>q</kbd>/<kbd>e</kbd> roll &middot; <kbd>z</kbd>/<kbd>Z</kbd> zoom &middot;
+            <kbd>m</kbd> reset &middot; <kbd>&#8984;Z</kbd> undo &middot; <kbd>c</kbd> copy Viking
+          </div>
+        </div>
+        <!-- The panels rise from the toolbar as vertical columns, each only
+             as wide as its controls need, and sit side by side when both are
+             open. They float over the viewport rather than sitting in the
+             column flow: pushed in-flow they squeezed the render into a
+             strip, which is the opposite of what a side panel is for. -->
+        <div class="view-footer">
+        <div class="tool-panels">
+        <!-- Everything that changes how a cell is BUILT lives in this panel,
+             so the toolbar below stays a fixed row of view actions however
+             many render knobs come and go. -->
+        <div id="panel-render" class="tool-panel" hidden>
+          <!-- Help text is carried in data-help and shown only on a deliberate
+               hover, rather than sitting on screen permanently. -->
+          <!-- Method through Blend -- every render control but the ones in the More
+               menu below -- are built here at boot from the render schema by
+               renderform.js (render-schema.js, generated from
+               src/sbfsem/service/render_schema.py): the label, help text, range,
+               step, default and when each one shows are declared once, in the
+               order the schema's PANEL_SLOTS list.  Their ids are the ones they
+               have always had. -->
+
+          <span id="cost-chip" class="cost-chip" hidden></span>
+
+          <span class="tool-divider" aria-hidden="true"></span>
+
+          <button id="apply-selected" class="primary">Apply to selected</button>
+          <button id="apply-all">Apply to all</button>
+          <!-- Everything defaults-related folds into one menu so the strip
+               stays a single row: four buttons cost the row; one does not. -->
+          <span class="menu">
+            <button id="defaults-menu-btn" aria-haspopup="true" aria-expanded="false"
+                    aria-controls="defaults-menu">More &#9662;</button>
+            <div id="defaults-menu" class="menu-pop" hidden>
+              <!-- MeshLab through Clip IPL: built here by renderform.js, like the
+                   strip's controls. -->
+              <hr>
+              <button id="defaults-selected"
+                      data-help="Reset the selected cells to THIS technique's default parameters — your saved defaults for it if you have any, the recommended values otherwise. The technique itself (Method + Pathway) is kept; only its knobs reset. Per-cell display choices (color, opacity, depth coloring, wireframe, skeleton, synapses) are left alone.">Defaults to selected</button>
+              <button id="defaults-all"
+                      data-help="Reset every loaded cell to THIS technique's default parameters — your saved defaults for it if you have any, the recommended values otherwise. The technique itself (Method + Pathway) is kept; only its knobs reset. Per-cell display choices (color, opacity, depth coloring, wireframe, skeleton, synapses) are left alone.">Defaults to all</button>
+              <hr>
+              <button id="save-tech-defaults"
+                      data-help="Remember the current parameters as YOUR defaults for this technique, in this browser. From then on, picking the technique in the toolbar or pressing a Defaults button applies these values instead of the recommended ones. Each technique remembers its own set.">Save technique defaults</button>
+              <button id="forget-tech-defaults"
+                      data-help="Discard your saved defaults for this technique and put its controls back to the recommended values.">Forget saved defaults</button>
+              <hr>
+              <button id="set-startup-render"
+                      data-help="Make the CURRENT technique and parameters what this browser starts with — and what newly loaded cells get — instead of the app default (Voxel remesh). Stored in this browser; a render attached to a specific cell still wins.">Set as startup default</button>
+              <button id="clear-startup-render"
+                      data-help="Forget the startup default and go back to the app default (Voxel remesh).">Clear startup default</button>
+              <hr>
+              <button id="attach-render"
+                      data-help="Save each SELECTED cell's current render settings to that cell on the server. From then on, loading the cell — in any browser, by anyone — starts it with these settings. Re-attach any time to update them.">Attach render to selected cell(s)</button>
+              <button id="detach-render"
+                      data-help="Remove the render settings attached to the selected cell(s) on the server; future loads go back to the defaults.">Remove attached render</button>
+              <hr>
+              <button id="rebuild"
+                      data-help="Re-fetch every loaded cell from the server under its own per-cell settings. Unlike Apply to all, this changes no settings — use it to refresh geometry after a server update while keeping each cell's rendering.">Rebuild all</button>
+            </div>
+          </span>
+        </div>
+
+        <!-- The MATLAB Plot tab's job: how the scene is DRAWN, plus the
+             volume context RenderApp could show. Nothing here refetches a
+             cell, so every control is instant. -->
+        <div id="panel-display" class="tool-panel" hidden>
+          <div class="panel-group">
+            <h4>Display</h4>
+            <label class="check" data-help="A light background, for figures."><input type="checkbox" id="opt-invert"> Invert</label>
+            <label class="check" data-help="Mirror the scene through the XY plane, as MATLAB's ZDir reverse."><input type="checkbox" id="opt-flipz"> Flip Z</label>
+            <label class="check" data-help="Look straight down Z, orthographic: what you measure on screen is what the section plane holds. The box unticks itself when you orbit away or switch to perspective."><input type="checkbox" id="opt-2d"> 2D</label>
+            <label class="check"
+                   data-help="Draws each dropdown's option list inside the page instead of in a separate browser window. Turn it on if dropdown lists draw blank, in the wrong place or ignore clicks (seen in a Windows virtual machine); turn it off to get the browser's own list back. Chrome and Edge only; touch screens always use the system list."><input type="checkbox" id="opt-page-selects"> In-page dropdowns</label>
+          </div>
+
+          <div class="panel-group">
+            <h4>Materials</h4>
+            <label class="field">Material <select id="mat-select"></select></label>
+            <p id="mat-desc" class="panel-note"></p>
+            <div class="row editor-row">
+              <span class="muted">Apply to</span>
+              <button id="mat-apply-selected" type="button">selected</button>
+              <button id="mat-apply-all" type="button">all cells</button>
+            </div>
+            <details id="mat-editor" class="editor">
+              <summary data-help-delay="2000" data-help-side="right"
+                       data-help="Choosing a material gives it to the selected cells, or to every cell when none is selected; a cell's own Surface section can override it. Changes made here preview on the selected cells as you drag. The library is shared: a material saved here is on every user's menu.">Edit materials…</summary>
+              <div id="mat-fields" class="editor-fields"></div>
+              <label class="field">Name <input id="mat-name" type="text" maxlength="63" placeholder="Name to save as"></label>
+              <label class="field">Notes <input id="mat-desc-input" type="text" maxlength="200" placeholder="What it is for"></label>
+              <div class="row editor-row">
+                <button id="mat-save" type="button" class="primary" data-help="Save to the shared library under the name above.">Save to library</button>
+                <button id="mat-delete" type="button" title="Remove this custom material from the shared library">Delete</button>
+              </div>
+              <p id="mat-status" class="panel-note"></p>
+            </details>
+          </div>
+
+          <div class="panel-group">
+            <h4>Colormap</h4>
+            <label class="field">Map <select id="opt-colormap"></select></label>
+            <label class="field" data-help="Number of discrete color bands; banding is what makes a depth gradient read as strata. The colorbar shows the same bands.">Levels
+              <input id="opt-levels" type="number" min="2" max="256" step="1" value="256">
+            </label>
+            <label class="check"><input type="checkbox" id="opt-cmap-invert"> Invert map</label>
+            <label class="check"><input type="checkbox" id="opt-colorbar"> Show colorbar</label>
+            <details id="grad-editor" class="editor">
+              <summary data-help-delay="2000" data-help-side="right"
+                       data-help="The colormap applies to cells rendered with Color by IPL depth (a checkbox in each cell's Surface section). Every vertex of such a cell is shaded by where it sits in the inner plexiform layer: 0 % at the INL border, 100 % at the GCL border, read through this map. Cells without that checkbox keep their flat color, and a volume with no IPL boundary markers cannot use it at all (the checkbox says so).
+
+Map picks the gradient; Levels is how many steps it is cut into (256 is smooth, 8 gives bands); Invert map swaps its ends; Show colorbar draws the scale beside the render. Changing any of these recolors the cells already on screen at once: nothing is rebuilt.
+
+Edit gradients… makes new maps from color stops. A gradient saved there goes into the shared library and appears, starred, on every user's Map menu.
+
+Opening the editor changes nothing on screen; each edit previews on the depth-colored cells as you make it.">Edit gradients…</summary>
+              <label class="field">Start from <select id="grad-select"></select></label>
+              <div id="grad-preview" class="grad-preview" data-help="The gradient as it will color a cell, INL to GCL."></div>
+              <div id="grad-stops" class="editor-fields"></div>
+              <div class="row editor-row">
+                <button id="grad-add" type="button" data-help="Add a stop halfway between the last two.">Add stop</button>
+                <button id="grad-reverse" type="button">Reverse</button>
+                <button id="grad-even" type="button" data-help="Space the stops evenly.">Space evenly</button>
+              </div>
+              <label class="field">Name <input id="grad-name" type="text" maxlength="63" placeholder="Name to save as"></label>
+              <div class="row editor-row">
+                <button id="grad-save" type="button" class="primary" data-help="Save to the shared library and select it.">Save to library</button>
+                <button id="grad-delete" type="button" title="Remove this custom gradient from the shared library">Delete</button>
+              </div>
+              <p id="grad-status" class="panel-note"></p>
+            </details>
+          </div>
+
+          <div class="panel-group">
+            <h4>Scale bar</h4>
+            <label class="check"><input type="checkbox" id="opt-scalebar"> Show scale bar</label>
+            <label class="field" data-help="Blank follows the zoom and rounds to a legible length.">Length µm
+              <input id="opt-scalebar-um" type="number" min="0.1" step="1" placeholder="auto">
+            </label>
+          </div>
+
+          <div class="panel-group">
+            <h4>Context</h4>
+            <label class="check" data-help="The fitted INL/IPL boundary surface."><input type="checkbox" id="ctx-inl"> INL boundary</label>
+            <label class="check" data-help="The fitted IPL/GCL boundary surface."><input type="checkbox" id="ctx-gcl"> GCL boundary</label>
+            <label class="check" data-help="Every traced blood vessel in this volume."><input type="checkbox" id="ctx-vessels"> Blood vessels</label>
+            <label class="field">Opacity
+              <input id="ctx-opacity" type="range" min="0.05" max="1" step="0.05" value="0.45">
+            </label>
+          </div>
+
+          <div class="panel-group" id="vol-group" hidden>
+            <h4 data-help="Each cell sits in its own volume's frame, in microns. Shift a volume to put cells from different volumes side by side or on top of one another; picks and Viking coordinates stay in each volume's own frame.">Volume offsets</h4>
+            <div id="vol-offsets"></div>
+            <div class="vol-actions">
+              <button type="button" id="vol-arrange" data-help="Line the loaded volumes up along X, centered on the first in Y and Z, with a gap between them; the first volume stays put.">Side by side</button>
+              <button type="button" id="vol-align" data-help="Move every other volume so the soma of its selected cell lands on the soma of the first selected cell.">Align selected somas</button>
+              <button type="button" id="vol-reset" data-help="Put every volume back in its own frame.">Reset</button>
+            </div>
+          </div>
+
+          <div class="panel-group">
+            <h4>Viewpoint</h4>
+            <label class="field" data-help="Degrees from the −Y axis, as MATLAB's view(az, el). Blank keeps the current azimuth.">Az
+              <input id="cam-az" type="number" step="1">
+            </label>
+            <label class="field" data-help="Degrees above the XY plane. Blank keeps the current elevation.">El
+              <input id="cam-el" type="number" step="1">
+            </label>
+            <label class="field" data-help="Camera distance from the orbit target, in microns. Blank keeps the current distance.">Dist
+              <input id="cam-dist" type="number" step="1">
+            </label>
+            <div class="panel-row">
+              <button id="cam-read" type="button">Read view</button>
+              <button id="cam-apply" type="button" class="primary">Set view</button>
+            </div>
+          </div>
+
+          <div class="panel-group">
+            <h4>Axis limits (µm)</h4>
+            <div class="lim-grid">
+              <span>X</span><input id="lim-x0" type="number" step="1"><input id="lim-x1" type="number" step="1">
+              <span>Y</span><input id="lim-y0" type="number" step="1"><input id="lim-y1" type="number" step="1">
+              <span>Z</span><input id="lim-z0" type="number" step="1"><input id="lim-z1" type="number" step="1">
+            </div>
+            <label class="check" data-help="Keep the view where it is when a cell is loaded into an empty viewer, instead of framing the new cell. The crop itself stays until Clear either way."><input type="checkbox" id="lim-hold"> Hold</label>
+            <div class="panel-row">
+              <button id="lim-read" type="button">Read</button>
+              <button id="lim-apply" type="button" class="primary" data-help="Clip the scene to the box. A blank limit is the scene's own extent on that side.">Crop</button>
+              <button id="lim-reset" type="button">Clear</button>
+            </div>
+          </div>
+        </div>
+        </div>
+
+        <div class="viewport-tools">
+          <button id="toggle-display" class="panel-toggle" aria-expanded="false"
+                  title="Materials, colormaps, scale bar, boundaries, vessels, exact viewpoint and axis limits"><span
+                  class="caret">&#9656;</span> Display &amp; context</button>
+          <!-- The render technique is the one setting reached for constantly,
+               so it sits in the toolbar next to the disclosure arrow rather
+               than behind it. Collapsed, changing it applies straight to the
+               selected cells; expanded, the panel below is in charge. -->
+          <span class="quick-render">
+            <button id="toggle-render" class="panel-toggle arrow-only"
+                    aria-expanded="false" aria-controls="panel-render"
+                    title="Show every render parameter">&#9650;</button>
+            <select id="quick-technique"
+                    title="Render technique — applied to the selected cells as soon as you pick one"></select>
+          </span>
+
+          <span class="tool-divider" aria-hidden="true"></span>
+
+          <label class="check"><input type="checkbox" id="show-axes" checked> Axes</label>
+          <label class="check"><input type="checkbox" id="ortho"> Orthographic</label>
+          <button id="undo-btn" disabled
+                  title="Undo (⌘Z / Ctrl+Z) — steps back through everything: settings, cells, colors, and the viewport">Undo</button>
+          <button id="redo-btn" disabled
+                  title="Redo (⇧⌘Z / Ctrl+Y)">Redo</button>
+          <button id="reset-view">Reset view</button>
+          <span class="view-presets">
+            <button data-viewpoint="xy1" title="Look down Z from +Z, the section plane face on: X to the right, Y up. Keeps what is in view and its zoom — press Reset view first for the whole scene">XY1</button><button
+                    data-viewpoint="xy2" title="The same face from behind, from −Z: X to the left, Y up. Keeps what is in view and its zoom">XY2</button><button
+                    data-viewpoint="xz1" title="Side on, along Y from −Y: X to the right, Z up. Keeps what is in view and its zoom">XZ1</button><button
+                    data-viewpoint="xz2" title="The same side from behind, from +Y: X to the left, Z up. Keeps what is in view and its zoom">XZ2</button><button
+                    data-viewpoint="yz1" title="Side on, along X from +X: Y to the right, Z up. Keeps what is in view and its zoom">YZ1</button><button
+                    data-viewpoint="yz2" title="The same side from behind, from −X: Y to the left, Z up. Keeps what is in view and its zoom">YZ2</button><button
+                    data-viewpoint="3d" title="The oblique 3-D direction (Reset view's). Keeps what is in view and its zoom">3D</button>
+          </span>
+          <button id="snapshot">Snapshot</button>
+          <button id="video-btn" title="Record the view to a video file">Video…</button>
+          <span id="render-scope" class="scope-inline" hidden></span>
+          <!-- Last, and pushed to the right end of whichever row it lands on
+               (app.css): entering and leaving full screen is the same button
+               in the same place. -->
+          <button id="fullscreen-btn" type="button"
+                  title="Fill the screen: the title bar goes and the cell list folds away behind ≡ Cells (f). The browser's own full screen (F11, ⌃⌘F) does the same">Full screen</button>
+        </div>
+        </div>
+      </div>
+
+      <div class="view" id="view-compare">
+        <div id="compare-grid" class="compare-grid panes-4"></div>
+        <!-- The same footer as the 3D render's: the options panel rises from it over
+             the panes (it never resizes them), above the shift settings and the
+             toolbar. -->
+        <div class="view-footer">
+        <div class="tool-panels">
+          <!-- The render options of the focused pane: the controls, the cost and the
+               More menu are built by compare.js from the render schema, with the
+               same renderform.js the 3D render panel uses. -->
+          <div id="panel-compare-options" class="tool-panel" hidden></div>
+        </div>
+        <!-- One row of settings for the Position shift every pane with its box
+             ticked draws; shown only while some pane has one (compare.js). -->
+        <div id="compare-shifts" class="viewport-tools compare-shifts" hidden></div>
+        <div class="viewport-tools compare-tools">
+          <label class="field">Cell
+            <select id="compare-cell"></select>
+          </label>
+          <label class="field" title="How many panes to compare side by side. Panes are added and taken away at the end, so the ones you keep keep their layers and settings">Panes
+            <select id="compare-panes">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4" selected>4</option>
+              <option value="5">5</option>
+              <option value="6">6</option>
+            </select>
+          </label>
+          <button id="compare-build" class="primary" data-help-delay="2000"
+                  data-help="Builds every layer that is not up to date, up to three panes at a time and the layers of a pane one after another, and measures the layers that have error ticked. A Difference waits for the layers it measures. Layers already built with their current settings are left alone. While anything is running this button reads Stop all and stops it all: a build already running on the server finishes there and its result is kept.">Compare</button>
+          <label class="check" title="Orbiting one pane orbits all of them">
+            <input type="checkbox" id="compare-sync" checked> Sync cameras
+          </label>
+          <!-- Error paint on every solid surface layer of every pane, and back (compare.js);
+               half-ticked when only some layers have it. -->
+          <label class="check" data-help-delay="2000"
+                 data-help="Show the error every solid render layer is scored by: the surface colored by its distance from the nearest annotation, and points along each annotation's rim colored by their distance from the surface. Ticks or clears the error box of every layer in every pane; half-ticked when only some have it. Measured on the surface each layer holds; Compare measures the ones that need it.">
+            <input type="checkbox" id="compare-error"> Error
+          </label>
+          <!-- Every pane at a glance while work runs: "3 of 6 panes ready,
+               pane 4 measuring, 41 s" (compare.js), then the status line.  One line
+               high whatever they say (app.css), so that the words never resize the
+               panes; whatever is cut off is their tooltip (app.js). -->
+          <div class="compare-texts">
+            <span id="compare-summary" class="compare-summary"></span>
+            <span id="compare-status" class="muted"></span>
+          </div>
+        </div>
+        </div>
+      </div>
+
+      <div class="view" id="view-network">
+        <div id="cy"></div>
+        <div class="viewport-tools">
+          <!-- One network per volume: cells in different volumes cannot be
+               connected, so the build takes the loaded cells of one. -->
+          <label class="field">Volume <select id="net-source"></select></label>
+          <button id="net-refresh">Build network</button>
+          <label class="field">Layout
+            <select id="net-layout">
+              <option value="cose">Force (cose)</option>
+              <option value="concentric">Concentric</option>
+              <option value="breadthfirst">Layered</option>
+              <option value="circle">Circle</option>
+              <option value="grid">Grid</option>
+            </select>
+          </label>
+          <label class="field">Min weight <input id="net-minweight" type="number" min="1" value="1" title="Hide connections with fewer synapses than this; partners left without a connection go too"></label>
+          <label class="field">Names
+            <select id="net-labels" title="What to write beside each node">
+              <option value="both">ID and label</option>
+              <option value="label">Label</option>
+              <option value="id">ID</option>
+            </select>
+          </label>
+          <span id="net-summary" class="muted"></span>
+          <span id="net-hover" class="muted net-hover"></span>
+        </div>
+        <div id="net-legend" class="net-legend" hidden></div>
+      </div>
+
+      <!-- Graffinity's connectivity matrix and intermediate node table
+           (Kerzner et al., EuroVis 2017), over Viking's synapse links. -->
+      <div class="view" id="view-connectivity">
+        <form class="cx-query" id="cx-form">
+          <div class="cx-row">
+            <label class="field">Volume <select id="cx-source"></select></label>
+            <label class="field">Direction
+              <select id="cx-direction" title="Downstream follows synapses out of the anchors; upstream follows them in — what a ganglion cell needs, since all its synapses are inputs">
+                <option value="downstream">Downstream: anchors → partners</option>
+                <option value="upstream">Upstream: partners → anchors</option>
+              </select>
+            </label>
+            <label class="field">Path length
+              <select id="cx-hops">
+                <option value="1">1</option><option value="2" selected>2</option>
+                <option value="3">3</option><option value="4">4</option>
+              </select>
+            </label>
+            <label class="check" title="Also keep paths that reach a matching end node in fewer hops"><input type="checkbox" id="cx-shorter"> Include shorter paths</label>
+            <label class="field">Anchors
+              <select id="cx-anchor-mode">
+                <option value="loaded">Loaded cells</option>
+                <option value="pattern">Cells whose label matches</option>
+              </select>
+            </label>
+            <span id="cx-anchor-note" class="muted"></span>
+          </div>
+          <div class="cx-row cx-patterns" id="cx-patterns"></div>
+          <datalist id="cx-edge-types"></datalist>
+          <div class="cx-row">
+            <button type="submit" class="primary" id="cx-run">Run query</button>
+            <details class="cx-advanced">
+              <summary class="muted">Limits</summary>
+              <label class="field">Max paths <input id="cx-max-paths" type="number" min="1" max="200000" value="20000"></label>
+              <label class="field">Neurons per hop <input id="cx-max-frontier" type="number" min="1" max="2000" value="300" title="How many neurons' links are fetched at each hop before the search is cut short"></label>
+              <label class="check" title="Let a cell appear more than once in a path, as Graffinity's search did — how a cell linked to itself shows up"><input type="checkbox" id="cx-repeats"> Allow repeats</label>
+              <label class="check"><input type="checkbox" id="cx-refresh"> Re-fetch links from Viking</label>
+            </details>
+            <span id="cx-status" class="muted"></span>
+          </div>
+        </form>
+        <div class="cx-body">
+          <section class="cx-pane cx-matrix-pane">
+            <div class="cx-pane-head">
+              <h3>Connectivity matrix</h3>
+              <label class="field">Metric
+                <select id="cx-metric">
+                  <option value="paths">Path count</option>
+                  <option value="min_length">Min length</option>
+                  <option value="synapses">Synapse count</option>
+                </select>
+              </label>
+              <label class="field">Scale
+                <select id="cx-scale"><option value="linear">Linear</option><option value="log">Log</option></select>
+              </label>
+              <label class="field">Bins <input id="cx-bins" type="number" min="2" max="12" value="6" title="Color steps between 1 and the maximum"></label>
+              <label class="field">Max <input id="cx-max" type="number" min="1" placeholder="auto" title="Top of the color scale; cells above it take the darkest step. Blank follows the data"></label>
+              <label class="check"><input type="checkbox" id="cx-agg-rows"> Group rows by label</label>
+              <label class="check"><input type="checkbox" id="cx-agg-cols"> Group columns by label</label>
+              <label class="field">Order
+                <select id="cx-order">
+                  <option value="query">As found</option><option value="label">By label</option><option value="total">By total</option>
+                </select>
+              </label>
+              <button type="button" id="cx-matrix-csv" title="Download the matrix as drawn">Matrix .csv</button>
+            </div>
+            <div class="cx-scroll" id="cx-matrix"><p class="empty">Run a query to see which cells connect to which, and through what.</p></div>
+          </section>
+          <section class="cx-pane cx-nodes-pane">
+            <div class="cx-pane-head">
+              <h3>Intermediate nodes</h3>
+              <label class="check"><input type="checkbox" id="cx-agg-nodes"> Group by label</label>
+            </div>
+            <div class="cx-scroll" id="cx-nodes"></div>
+          </section>
+        </div>
+        <section class="cx-paths-pane">
+          <div class="cx-pane-head">
+            <h3 id="cx-paths-title">Paths</h3>
+            <span id="cx-paths-note" class="muted"></span>
+            <button type="button" id="cx-clear" title="Unpin the selected cell (Escape does too)" hidden>✕ Clear selection</button>
+            <label class="field">List
+              <select id="cx-list" title="One row per cell sequence with its synapse-type combinations beneath, or every path on its own line">
+                <option value="grouped">By cell sequence</option>
+                <option value="flat">Every path</option>
+              </select>
+            </label>
+            <button type="button" id="cx-paths-csv" title="Download the listed paths, one per row, with their synapse structure IDs">Paths .csv</button>
+          </div>
+          <div class="cx-scroll" id="cx-paths"></div>
+        </section>
+        <div class="viewport-tools">
+          <span class="muted">Connectivity matrix and intermediate node table after Kerzner, Lex, Sigulinsky, Urness, Jones, Marc and Meyer, <em>Graffinity: Visualizing Connectivity in Large Graphs</em> (EuroVis 2017). Patterns are whole-string regular expressions; synapse types use this tool's names (ConvPre, RibbonPre, GapJunction…). Hover a cell to see its paths in the other view; click to list them.</span>
+        </div>
+      </div>
+
+      <div class="view" id="view-strata">
+        <div class="chart-wrap"><div id="strata-chart"></div></div>
+        <div class="viewport-tools">
+          <label class="field">Bins <input id="strata-bins" type="number" min="4" max="100" value="20"></label>
+          <label class="check"><input type="checkbox" id="strata-soma" checked> Include soma</label>
+          <label class="check"><input type="checkbox" id="strata-outliers" checked> Omit outliers</label>
+          <button id="strata-refresh">Compute</button>
+        </div>
+        <div id="strata-stats" class="stats-grid"></div>
+      </div>
+
+      <div class="view" id="view-table">
+        <div class="table-tools">
+          <label class="field">Neuron <select id="table-neuron"></select></label>
+          <label class="check"><input type="checkbox" id="table-cellonly" checked> Cell body only</label>
+          <input id="table-filter" type="search" placeholder="Filter by location ID…">
+          <span id="table-count" class="muted"></span>
+        </div>
+        <div class="table-scroll"><table id="node-table"><thead></thead><tbody></tbody></table></div>
+      </div>
+
+      <div class="view" id="view-stats">
+        <div id="analysis-cards" class="cards"></div>
+      </div>
+
+      <div class="view" id="view-settings">
+        <div id="settings-panel" class="cards settings-panel"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<dialog id="save-dialog" class="dlg dlg-wide">
+  <form method="dialog" class="dlg-body">
+    <h2>Save on the server</h2>
+
+    <div class="browser">
+      <div class="browser-pane browser-folders">
+        <div class="browser-head">Folders</div>
+        <ul id="save-folder-list" class="folder-list"></ul>
+        <div class="row browser-new">
+          <input id="save-new-folder" type="text" placeholder="New folder name" autocomplete="off" data-enter="save-create-folder">
+          <button id="save-create-folder" type="button">Create</button>
+        </div>
+      </div>
+      <div class="browser-pane browser-files">
+        <div class="browser-head">Documents <span id="save-file-count"></span></div>
+        <ul id="save-file-list" class="file-list"></ul>
+      </div>
+    </div>
+
+    <label class="field">Name
+      <input id="save-name" type="text" autocomplete="off" placeholder="e.g. ipRGC survey">
+    </label>
+    <label class="check"
+           title="Also store the camera position and zoom. Opening the document then returns the view to exactly this viewpoint; without it, the opened workspace frames the cells instead.">
+      <input type="checkbox" id="save-camera" checked> Capture current viewport
+    </label>
+    <p class="dlg-note" id="save-summary"></p>
+
+    <p class="dlg-error" id="save-error" hidden></p>
+    <div class="dlg-actions">
+      <button type="button" data-dialog-cancel>Cancel</button>
+      <button id="save-confirm" type="button" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="open-dialog" class="dlg dlg-wide">
+  <form method="dialog" class="dlg-body">
+    <h2>Open from the server</h2>
+
+    <div class="browser">
+      <div class="browser-pane browser-folders">
+        <div class="browser-head">Folders</div>
+        <ul id="open-folder-list" class="folder-list"></ul>
+      </div>
+      <div class="browser-pane browser-files">
+        <div class="browser-head">Documents <span id="open-file-count"></span></div>
+        <ul id="open-file-list" class="file-list"></ul>
+      </div>
+    </div>
+
+    <p class="dlg-note" id="open-details">Select a document to see what is in it.</p>
+    <p class="dlg-error" id="open-error" hidden></p>
+    <div class="dlg-actions">
+      <button type="button" data-dialog-cancel>Cancel</button>
+      <button id="open-confirm" type="button" class="primary" disabled>Open</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="video-dialog" class="dlg">
+  <form method="dialog" class="dlg-body">
+    <h2>Record a video</h2>
+    <p class="dlg-note">The canvas is captured as it is drawn, so the file shows
+      exactly what is on screen at the size the viewport is now.</p>
+
+    <label class="field">Motion
+      <select id="video-mode">
+        <option value="auto">Auto-rotate, then stop</option>
+        <option value="free">Free — I'll rotate it myself</option>
+      </select>
+    </label>
+
+    <div id="video-auto-fields">
+      <label class="field">Spin about
+        <select id="video-axis">
+          <option value="y">the screen-vertical axis (turntable)</option>
+          <option value="x">the screen-horizontal axis (tumble)</option>
+          <option value="roll">the view axis (roll)</option>
+        </select>
+      </label>
+      <label class="field">Duration (s)
+        <input id="video-seconds" type="number" min="1" max="120" step="1" value="10">
+      </label>
+      <label class="field" title="Full revolutions over the duration">Turns
+        <input id="video-turns" type="number" min="0.25" max="10" step="0.25" value="1">
+      </label>
+    </div>
+
+    <label class="field">Quality
+      <select id="video-quality">
+        <option value="low">low (2.5 Mbps)</option>
+        <option value="medium">medium (8 Mbps)</option>
+        <option value="high" selected>high (16 Mbps)</option>
+        <option value="max">max (40 Mbps)</option>
+      </select>
+    </label>
+    <label class="field">Format <select id="video-format"></select></label>
+    <label class="field">Frame rate
+      <select id="video-fps">
+        <option value="24">24 fps</option>
+        <option value="30" selected>30 fps</option>
+        <option value="60">60 fps</option>
+      </select>
+    </label>
+
+    <p class="dlg-error" id="video-error" hidden></p>
+    <div class="dlg-actions">
+      <button type="button" data-dialog-cancel>Cancel</button>
+      <button id="video-start" type="button" class="primary">Start recording</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="context-menu" class="context-menu" role="menu" hidden>
+  <button type="button" id="ctx-show-location" role="menuitem">Show location on render</button>
+</div>
+
+<script type="module" src="/static/js/app.js?v=__SBFSEM_VERSION__"></script>
+</body>
+</html>

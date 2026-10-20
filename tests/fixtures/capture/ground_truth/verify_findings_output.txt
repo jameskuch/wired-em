@@ -1,0 +1,61 @@
+
+== crash-on-first-use findings ==
+  CONFIRMED       F001 StructureTypes.isBoundaryMarker names a member that does not exist
+                  -> Unable to resolve the name 'StructureTypes.CHBoundary'.
+  CONFIRMED       F145 sbfsem.builtin.BloodVessel does not load
+                  -> Error: File: ~/Documents/MATLAB/SBFSEM-port-to-python/SBFSEM-tools/+sbfsem/+builtin/BloodVessel.m Line: 33 Column: 8 Calling the superclass constructor 'sbfsem.core.StructureAPI' that is not an immediate superclass of a constructor is not supported.
+  CONFIRMED       F146 sbfsem.builtin.Nucleolus does not load
+                  -> File: ~/Documents/MATLAB/SBFSEM-port-to-python/SBFSEM-tools/+sbfsem/+builtin/Nucleolus.m Line: 70 Column: 68 Invalid expression. When calling a function or indexing a variable, use parentheses. Otherwise, check for mismatched delimiters.
+  CONFIRMED       F164 sbfsem.image.ConeOutline does not load
+                  -> Undefined function 'addParameter' for input arguments of type 'function_handle'.
+Clipping out 2 vertices
+  CONFIRMED       F089 clipMeshByVertices references an undefined cutVerts
+                  -> Unrecognized function or variable 'cutVerts'.
+  CONFIRMED       F142 gauss2 references an undefined x
+                  -> Unrecognized function or variable 'x'.
+-----c943-----
+c943 has 4 child structures. Fetching data
+
+
+
+== NeuronGraph (F002-F006) ==
+  CONFIRMED       F004 NeuronGraph never assigns obj.neuron
+                  -> Dot indexing is not supported for variables of this type.
+
+== StructureAPI.graph (F007) ==
+  CONFIRMED       F007 graph('Synapses', true) indexes a column with a table
+                  -> A table row subscript must be a numeric array containing real positive integers, a logical array, a character vector, a string array, a cell array of character vectors, or a pattern scalar.
+
+== Neuron.getSynapses called twice (F014) ==
+c943 has 4 child structures. Fetching data
+  CONFIRMED       F014 second getSynapses concatenates mismatched tables
+                  -> All tables being vertically concatenated must have the same number of variables.
+
+== COLLADA (F038) ==
+  CONFIRMED       F038 COLLADA constructor rejects a real Neuron
+                  -> Must provide Neuron object or axes handle
+
+== ieRatio on a synapse-free neuron (F127) ==
+-----c7161-----
+
+
+c7161 has 0 child structures. Fetching data
+c7161 has 0 child structures. Fetching data
+c7161 has 0 child structures. Fetching data
+  CONFIRMED       F127 ieRatio dereferences an empty synapse table
+                  -> Dot indexing is not supported for variables of this type.
+
+== Mitochondria.getVolume formula (F147) ==
+  radii [0.1 0.2 0.3], 0.09 um sections
+  MATLAB formula 2*pi*(sum r)^2*dz = 0.203575 um3
+  correct  sum(pi*r^2)*dz          = 0.039584 um3   (5.1x inflated)
+
+== micron2ipl grid, the near-duplicates that establish intent (F214) ==
+  micron2ipl.m        meshgrid(GCL.newXPts, GCL.newYPts)
+  micron2ipl.m        meshgrid(INL.newYPts, INL.newYPts)
+  stratificationMap.m meshgrid(INL.newXPts, INL.newYPts)
+  stratificationMap.m meshgrid(GCL.newXPts, GCL.newYPts)
+  getStrataCData.m    meshgrid(GCL.newXPts, GCL.newYPts)
+  getStrataCData.m    meshgrid(INL.newXPts, INL.newYPts)
+
+done

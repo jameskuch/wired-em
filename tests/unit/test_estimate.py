@@ -1,0 +1,427 @@
+"""The preflight estimate of a Closed curve or Hybrid render (sbfsem.service.estimate).
+
+Held to real builds of the closed-curve fixture (a traced structure of three
+outlines) and the disc-traced c943: the raster's voxels are exact, its exposed
+faces follow the 1 / pixel and 1 / pixel^2 laws from a raster at another
+pixel, the finest Voxel size that fits is the one the server's own refusal
+names, and builds feed later estimates.  The route answers for the page's copy
+of the cell, behind the volume guard, outside the build queue.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from sbfsem.geometry.closed_curve import surface_fitting_pixel
+from sbfsem.io.legacy_json import read_legacy_json
+from sbfsem.service import estimate
+from sbfsem.service.estimate import (
+    CURVE_RASTER_META,
+    RasterCount,
+    finest_by,
+)
+from sbfsem.service.facade import SbfsemService, _curve_outlines
+from sbfsem_web.app import create_app
+
+FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "i90000_closedcurve.json"
+CELL, SOURCE = 90000, "i"
+
+
+@pytest.fixture(autouse=True)
+def _no_reference_in_flight():
+    """A head start a test left running (one raster at a time, process-wide) must not make
+    the next test's first estimate pending: wait for it before and after."""
+    assert estimate._REFERENCE_SLOT.acquire(timeout=120)
+    estimate._REFERENCE_SLOT.release()
+    yield
+    assert estimate._REFERENCE_SLOT.acquire(timeout=120)
+    estimate._REFERENCE_SLOT.release()
+
+
+@pytest.fixture
+def service():
+    svc = SbfsemService(offline=True)
+    svc.add_neuron(read_legacy_json(FIXTURE))
+    yield svc
+    svc.close()
+
+
+def _estimate(svc, pixel, *, memory=9000.0, **options):
+    return svc.render_estimate(CELL, SOURCE, memory_limit_mb=memory,
+                               **{"method": "closedcurve", "pixel_size_um": pixel, **options})
+
+
+def _built(svc, pixel):
+    mesh = svc.mesh_for(svc.neuron(CELL, SOURCE), {"method": "closedcurve", "pixel_size_um": pixel})
+    return mesh, RasterCount.from_meta(mesh.meta[CURVE_RASTER_META])
+
+
+def test_a_raster_count_scales_in_plane_as_one_over_the_pixel_and_across_as_its_square():
+    count = RasterCount(0.1, plane=1000, across=500)
+    assert count.faces_at(0.1) == 1500
+    assert count.faces_at(0.05) == pytest.approx(2000 + 2000)
+    assert count.faces_at(0.025) == pytest.approx(4000 + 8000)
+    assert RasterCount.from_meta(count.to_meta()) == RasterCount(0.1, 1000, 500, built=True)
+    assert RasterCount.from_meta({"pixel_um": 0.1}) is None
+    assert RasterCount.from_meta("nonsense") is None
+
+
+def test_finest_by_finds_the_first_thousandth_that_fits():
+    assert finest_by(lambda px: px >= 0.0213) == 0.022
+    assert finest_by(lambda px: True) == 0.005
+    assert finest_by(lambda px: False) is None
+
+
+def test_a_build_leaves_its_raster_cost_in_the_mesh(service):
+    mesh, count = _built(service, 0.05)
+    assert count is not None and count.built
+    assert count.pixel_um == 0.05
+    assert count.triangles == len(mesh.faces)
+    assert count.plane > 0 and count.across > 0
+    # The count is the build's own raster's: what the limit was checked against.
+    annotations, how = _curve_outlines(service.neuron(CELL, SOURCE), discs=True)
+    from sbfsem.geometry.closed_curve import build_curve_volume, curve_grid_voxels
+
+    volume = build_curve_volume(annotations, volume_scale=service.neuron(CELL, SOURCE).volume_scale,
+                                pixel_size_um=0.05, **how)
+    assert volume.exposed == (count.plane, count.across)
+    assert count.voxels == curve_grid_voxels(
+        annotations, volume_scale=service.neuron(CELL, SOURCE).volume_scale, pixel_size_um=0.05, **how)
+
+
+def test_the_estimate_matches_the_builds_it_was_not_given(service):
+    """Cold: no build of the cell yet, so a raster at 0.1 um is made and scaled."""
+    answers = {px: _estimate(service, px) for px in (0.05, 0.02)}
+    assert all(a["basis"] == {"kind": "reference", "pixel_um": 0.1} for a in answers.values())
+    for px, answer in answers.items():
+        mesh, count = _built(service, px)
+        assert answer["voxels"] == count.voxels, "the voxels are counted exactly"
+        assert answer["faces"] == pytest.approx(count.faces, rel=0.02)
+        assert answer["triangles"] == pytest.approx(len(mesh.faces), rel=0.10)
+        assert answer["over"] == []
+
+
+def test_a_build_of_the_cell_is_what_later_estimates_scale(service):
+    first = _estimate(service, 0.02)
+    assert first["basis"]["kind"] == "reference"
+    mesh, count = _built(service, 0.02)
+    # The answer kept for 0.02 was scaled from less, and is not served again.
+    again = _estimate(service, 0.02)
+    assert again["basis"] == {"kind": "built", "pixel_um": 0.02}
+    assert again["faces"] == count.faces
+    assert again["triangles"] == len(mesh.faces)
+    finer = _estimate(service, 0.015)
+    assert finer["basis"] == {"kind": "built", "pixel_um": 0.02}
+    assert finer["triangles_per_face"] == pytest.approx(len(mesh.faces) / count.faces, rel=0.05)
+
+
+def test_the_finest_size_is_the_one_the_servers_refusal_names(service, monkeypatch):
+    """With the face limit lowered under the cell, the estimate is over it and names the
+    pixel the build would name: the same law, the same 5 % to spare."""
+    _mesh, count = _built(service, 0.02)
+    limit = count.faces // 2
+    monkeypatch.setattr(estimate, "MAX_SURFACE", limit)
+    answer = _estimate(service, 0.02)
+    assert answer["over"] == ["faces"]
+    assert answer["limits"]["faces"] == limit
+    assert answer["binding"] == "faces"
+    assert answer["finest_um"] == surface_fitting_pixel(0.02, count.plane, count.across, limit)
+    assert answer["finest_um"] > 0.02
+    # And at that size the estimate is under the limit.
+    assert _estimate(service, answer["finest_um"])["over"] == []
+
+
+def test_the_server_memory_limit_is_the_builds_budget_and_coarsens_too(service):
+    tight = _estimate(service, 0.005, memory=900)
+    assert "memory" in tight["over"]
+    assert tight["limits"]["memory_mb"] == 900
+    assert tight["finest_um"] > 0.005
+    fits = _estimate(service, tight["finest_um"], memory=900)
+    assert fits["over"] == []
+    assert fits["server_mb"] <= 0.95 * 900 + 1
+    # The same size on a server that gives builds more is not over.
+    assert _estimate(service, 0.005)["over"] == []
+
+
+def test_the_page_limit_is_the_longest_string_a_tab_parses(service, monkeypatch):
+    monkeypatch.setattr(estimate, "PAGE_JSON_LIMIT_MB", 1.0)
+    answer = _estimate(service, 0.01)
+    assert "page" in answer["over"]
+    assert answer["json_mb"] > 1.0
+    assert _estimate(service, answer["finest_um"])["json_mb"] <= 0.95
+
+
+def test_averaging_costs_memory_and_time(service):
+    plain = _estimate(service, 0.02)
+    averaged = _estimate(service, 0.02, curve_avg_paths=0.25)
+    assert averaged["averaging"] and not plain["averaging"]
+    assert averaged["peak_mb"] > plain["peak_mb"]
+    assert averaged["seconds"] > plain["seconds"]
+    assert averaged["faces"] == plain["faces"]
+
+
+def test_joining_bodies_costs_memory_and_time_under_closed_curve_alone(service):
+    """The viewer joins a Closed curve surface's bodies by default (2.6.2): the chip and the
+    per-cell fit must count what that adds, about 260 bytes a triangle and a third more time
+    (``estimate.JOIN_BYTES_PER_TRIANGLE``, ``JOIN_TIME``); Hybrid does not join, so it pays
+    nothing."""
+    plain = _estimate(service, 0.02, curve_tie_um=0.0)
+    joined = _estimate(service, 0.02, curve_tie_um=5.0)
+    assert joined["joins"] and not plain["joins"]
+    assert joined["faces"] == plain["faces"] and joined["triangles"] == plain["triangles"]
+    extra = estimate.JOIN_BYTES_PER_TRIANGLE * plain["triangles"] / 1e6
+    assert abs((joined["peak_mb"] - plain["peak_mb"]) - extra) <= 1.0
+    assert joined["seconds"] > plain["seconds"]
+    hybrid = _estimate(service, 0.02, method="hybrid", curve_tie_um=5.0)
+    assert not hybrid["joins"]
+    assert hybrid["peak_mb"] == _estimate(service, 0.02, method="hybrid", curve_tie_um=0.0)["peak_mb"]
+
+
+def test_other_methods_get_only_the_build_gates_memory(service):
+    answer = _estimate(service, 0.05, method="cylinder")
+    assert answer["applies"] is False
+    assert answer["peak_mb"] == service.estimate_peak_mb(CELL, SOURCE, method="cylinder")
+    assert "faces" not in answer
+
+
+def test_a_disc_traced_cell_is_estimated_from_its_discs(c943):
+    svc = SbfsemService(offline=True)
+    try:
+        svc.add_neuron(c943)
+        answer = svc.render_estimate(943, "i", memory_limit_mb=9000, method="closedcurve",
+                                     pixel_size_um=0.1)
+        assert answer["applies"] and not answer.get("empty")
+        assert answer["outlines"] > 100
+        mesh = svc.mesh_for(svc.neuron(943, "i"), {"method": "closedcurve", "pixel_size_um": 0.1})
+        assert answer["triangles"] == pytest.approx(len(mesh.faces), rel=0.02)
+        # Hybrid on a cell with no traced outlines has no outline half to estimate.
+        hybrid = svc.render_estimate(943, "i", memory_limit_mb=9000, method="hybrid",
+                                     pixel_size_um=0.1)
+        assert hybrid["empty"] is True
+    finally:
+        svc.close()
+
+
+def test_an_estimate_at_a_coarse_size_makes_the_finer_reference_ahead(service):
+    """A cell drawn at 0.25 um has only that count; the 0.1 um raster a finer size needs
+    is made in the background as soon as anyone looks at an estimate of it."""
+    import time
+
+    coarse = _estimate(service, 0.25)
+    assert coarse["basis"]["pixel_um"] == 0.25
+    cells = service._estimator._cells
+    deadline = time.time() + 60
+    while time.time() < deadline and not any(
+            0.1 in cell.counts for cell in cells.values()):
+        time.sleep(0.05)
+    assert any(0.1 in cell.counts for cell in cells.values()), "the 0.1 um reference was not made"
+    fine = _estimate(service, 0.02)
+    assert fine["basis"] == {"kind": "reference", "pixel_um": 0.1}
+
+
+def _counting_rasters(monkeypatch) -> list[float]:
+    """Every reference raster the estimator makes, by pixel."""
+    made: list[float] = []
+    real = estimate.build_curve_volume
+
+    def counted(*args, **kwargs):
+        made.append(kwargs["pixel_size_um"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(estimate, "build_curve_volume", counted)
+    return made
+
+
+def test_one_reference_raster_at_a_time_and_nobody_waits_for_it(service, monkeypatch):
+    """Review 2026-10-16: every estimate of a cell without a fine count started a raster in
+    the web process, as many at once as cells were asked about, and a request could wait on
+    another's.  Now one at a time in the whole process: while it is taken, a cell with no
+    count is pending, a cell with a coarse count is answered from it, approximate, and the
+    head start is skipped, never queued; none of these is kept, and none waits."""
+    import time
+
+    made = _counting_rasters(monkeypatch)
+    assert estimate._REFERENCE_SLOT.acquire(blocking=False)
+    try:
+        t0 = time.perf_counter()
+        pending = _estimate(service, 0.02)
+        assert time.perf_counter() - t0 < 2.0, "the request did not wait for the raster"
+        assert pending["pending"] is True and pending["approximate"] is True
+        assert pending["finest_um"] is None and pending["over"] == []
+        assert pending["voxels"] > 0, "the voxels are counted all the same"
+        assert made == []
+        assert _estimate(service, 0.02)["pending"] is True, "not kept: asked again"
+        _built(service, 0.25)                       # a coarse count, as a traced cell's load makes
+        approximate = _estimate(service, 0.02)
+        assert approximate["approximate"] is True and not approximate.get("pending")
+        assert approximate["basis"] == {"kind": "built", "pixel_um": 0.25}
+        time.sleep(0.3)
+        assert made == [], "the head start was skipped, not queued"
+    finally:
+        estimate._REFERENCE_SLOT.release()
+    exact = _estimate(service, 0.02)
+    assert exact["approximate"] is False and exact["basis"] == {"kind": "reference", "pixel_um": 0.1}
+    assert made == [0.1]
+    assert _estimate(service, 0.02) == exact, "kept once exact"
+
+
+def test_a_capped_reference_is_final_for_the_cell(service, monkeypatch):
+    """Review 2026-10-16: a cell whose 0.1 um raster passed the voxel cap was rasterized at a
+    coarser pixel, never counted as having its reference, and rasterized again on every new
+    estimate (twice: the request and the head start)."""
+    import time
+
+    made = _counting_rasters(monkeypatch)
+    monkeypatch.setattr(estimate, "REFERENCE_MAX_VOXELS", 10_000)
+    first = _estimate(service, 0.02)
+    assert len(made) == 1 and made[0] > 0.1, made
+    assert first["basis"]["pixel_um"] == made[0]
+    for pixel in (0.015, 0.03, 0.05, 0.25):
+        assert _estimate(service, pixel)["approximate"] is False
+    time.sleep(0.3)
+    assert len(made) == 1, f"rasterized again: {made}"
+
+
+def test_an_estimate_below_the_floor_is_refused_not_overflowed(service, client):
+    with pytest.raises(ValueError, match="between 0.005 and 1"):
+        _estimate(service, 1e-200)
+    local, _app = client
+    got = local.get(f"/api/neurons/{SOURCE}/{CELL}/render-estimate"
+                    "?method=closedcurve&pixel_size_um=1e-200")
+    assert got.status_code == 422 and "0.005" in got.json()["detail"]
+    assert local.get(f"/api/neurons/{SOURCE}/{CELL}/render-estimate"
+                     "?method=closedcurve&pixel_size_um=0.005").status_code == 200
+
+
+def test_answers_are_kept_and_a_second_estimate_is_quick(service):
+    first = _estimate(service, 0.03)
+    second = _estimate(service, 0.03)
+    assert second == first
+    assert second["estimate_s"] == first["estimate_s"], "the kept answer, not a new one"
+
+
+# -- the Fine voxel the server used --------------------------------------------------
+
+
+def test_the_page_hears_which_fine_voxel_was_used_and_why(c943):
+    """The whole-cell grid's voxel and why it came out coarser reach the page with the
+    mesh (they were in the mesh's meta only, and nothing in the viewer read them)."""
+    svc = SbfsemService(offline=True)
+    try:
+        svc.add_neuron(c943)
+        typed = svc.render_mesh(943, "i", pathway="voxel2", voxel2_um=0.01)
+        assert typed.voxel2_asked_um == pytest.approx(0.01)
+        assert typed.voxel2_coarsened is True
+        assert typed.voxel2_um > 0.01
+        assert typed.voxel2_reason in ("floor", "faces", "work")
+        auto = svc.render_mesh(943, "i", pathway="voxel2")
+        assert auto.voxel2_um is not None and auto.voxel2_asked_um > 0
+        other = svc.render_mesh(943, "i", pathway="adaptive_taubin")
+        assert other.voxel2_um is None and other.voxel2_coarsened is None
+        # The JSON the page reads carries them.
+        assert '"voxel2_reason"' in typed.model_dump_json()
+    finally:
+        svc.close()
+
+
+def test_a_fine_voxel_typed_under_the_old_floor_has_a_key_of_its_own():
+    """A typed Fine voxel under 0.04 um was built at 0.04 until 2026-10-16 and stored under
+    its own options; it is honored down to 0.02 now, so its key names the new floor and the
+    old surface is not served.  Every other key, the automatic voxel's above all, is as it was
+    (the geometry fingerprint is untouched)."""
+    key = SbfsemService._options_key
+    grid = {**SbfsemService._mesh_options(), "pathway": "voxel2"}
+    for method in ("cylinder", "hybrid", None):
+        assert key({**grid, "voxel2_um": 0.03}, method)[-1] == ("voxel2_floor", 0.02), method
+        assert key({**grid, "voxel2_um": 0.01}, method)[-1] == ("voxel2_floor", 0.02), method
+    for pathway in ("convolution", "ultraliser"):
+        assert key({**grid, "pathway": pathway, "voxel2_um": 0.03}, "cylinder")[-1] == (
+            "voxel2_floor", 0.02)
+    off = SbfsemService.UNKEYED_AT_OFF
+
+    def unkeyed(k, v) -> bool:
+        # An option a stored surface was built without is left out at the value it was built with.
+        return k in off and ((not v) if not off[k] else v == off[k])
+
+    def before(options) -> tuple:
+        return tuple(sorted((k, v) for k, v in options.items() if not unkeyed(k, v)))
+
+    for unchanged in (0.0, 0.04, 0.05, 0.3):
+        options = {**grid, "voxel2_um": unchanged}
+        assert key(options, "cylinder") == before(options), unchanged
+    # Only a surface the whole-cell grid makes reads the Fine voxel: every other keeps its key
+    # whatever is typed there (review 2026-10-16: the entry was added for every method).
+    for method, pathway in (("cylinder", "original"), ("cylinder", "voxel"), ("curvemesh", "original"),
+                            ("closedcurve", "voxel2"), ("hybrid", "adaptive_taubin")):
+        options = {**grid, "pathway": pathway, "voxel2_um": 0.03}
+        assert key(options, method) == before(options), (method, pathway)
+
+
+def test_the_build_gate_prices_a_fine_voxel_typed_under_the_old_floor(c943):
+    """Temporal c106 typed at 0.02 um peaked at 931 MB and was priced 511: a typed Fine voxel
+    under 0.04 um is priced at the sheet its raw budget allows (review 2026-10-16)."""
+    from sbfsem.geometry.unify import raw_budget
+    from sbfsem.service import facade
+
+    svc = SbfsemService(offline=True)
+    try:
+        svc.add_neuron(c943)
+
+        def peak(**kw):
+            return svc.estimate_peak_mb(943, "i", method="cylinder", pathway="voxel2", **kw)
+
+        auto = peak()
+        assert peak(voxel2_um=0.05) == auto and peak(voxel2_um=0.04) == auto, "unchanged from 0.04 up"
+        capped = peak(voxel2_um=0.02)
+        sheet = facade.FIELD_SHEET_BASE_MB + raw_budget(400_000) * (
+            facade.FIELD_SHEET_BYTES_PER_FACE + facade.FIELD_SHEET_BYTES_PER_DECIMATED_FACE) / 1e6
+        assert capped == round(sheet) and capped > 931, capped
+        assert peak(voxel2_um=0.02, voxel2_faces=0) > capped, "no cap: the whole 10 million"
+        # Other pathways do not read it.
+        assert svc.estimate_peak_mb(943, "i", pathway="voxel", voxel2_um=0.02) == svc.estimate_peak_mb(
+            943, "i", pathway="voxel")
+    finally:
+        svc.close()
+
+
+# -- the route ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def client():
+    app = create_app()
+    with TestClient(app) as local:
+        app.state.service.offline = True
+        app.state.service.add_neuron(read_legacy_json(FIXTURE))
+        yield local, app
+
+
+def test_the_route_answers_for_the_cell_and_its_options(client):
+    local, app = client
+    got = local.get(f"/api/neurons/{SOURCE}/{CELL}/render-estimate"
+                    "?method=closedcurve&pixel_size_um=0.02&clip_ipl=0.5")
+    assert got.status_code == 200, got.text
+    body = got.json()
+    assert body["applies"] is True
+    assert body["pixel_size_um"] == 0.02
+    assert body["cell"] == CELL and body["copy"]
+    assert body["limits"]["memory_mb"] == app.state.mesh_jobs.memory_mb
+    assert {"voxels", "faces", "triangles", "peak_mb", "serve_mb", "server_mb", "seconds",
+            "json_mb", "tab_mb", "over", "finest_um", "binding", "basis"} <= set(body)
+    # It is not a build: nothing was queued.
+    assert app.state.mesh_jobs.load()["running"] == 0
+    assert app.state.mesh_jobs.load()["by_kind"] == {}
+
+
+def test_the_route_validates_like_the_mesh_route_and_names_missing_cells(client):
+    local, _app = client
+    base = f"/api/neurons/{SOURCE}/{CELL}/render-estimate"
+    assert local.get(f"{base}?pixel_size_um=0").status_code == 422
+    assert local.get(f"{base}?pixel_size_um=2").status_code == 422
+    assert local.get(f"{base}?method=nonsense").status_code == 400
+    assert local.get(f"/api/neurons/{SOURCE}/1/render-estimate").status_code == 404
+    # The copy is the page's: one that is not held is not answered from another.
+    assert local.get(f"{base}?method=closedcurve&copy=curvefit.1").status_code == 404

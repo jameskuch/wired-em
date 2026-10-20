@@ -1,0 +1,54 @@
+# Runs on the public copy at github.com/jameskuch/wired-em, which
+# tools/publish_public.py publishes from the private repository at each release.
+# The checks that gate a deploy are the ones in deploy/redeploy.sh: pytest, ruff
+# on src and tests, and mypy. GitHub's Ubuntu and macOS runners carry node, which
+# tests/unit/test_js.py needs (it skips without it). Windows joins the matrix
+# once the suite has been run there.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python-version: "3.13"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: pip install -e ".[web,dev]"
+      - name: Lint
+        run: ruff check src tests
+      - name: Type check
+        run: mypy src/sbfsem src/sbfsem_web
+        if: matrix.python-version != '3.11'  # numpy stubs need a 3.12 target
+      - name: Test
+        run: pytest -q --cov=sbfsem --cov=sbfsem_web --cov-report=term-missing
+
+  headless:
+    name: Backend runs without a display
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      # Deliberately no `web` extra: the backend must not need FastAPI, and
+      # nothing under sbfsem/ may import a GUI toolkit.
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/unit/test_service.py tests/parity -q
+        env:
+          DISPLAY: ""

@@ -1,0 +1,1 @@
+{"url": "https://websvc.codepharm.net/NeitzInferiorMonkey/OData/StructureLinks?$filter=TargetID in (5247)&$expand=Source($select=ID,ParentID,TypeID),Target($select=ID,ParentID,TypeID)", "data": {"@odata.context": "https://websvc.codepharm.net/NeitzInferiorMonkey/OData/$metadata#StructureLinks(Source(ID,ParentID,TypeID),Target(ID,ParentID,TypeID))", "value": []}}

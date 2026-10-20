@@ -1,0 +1,1 @@
+{"url": "https://websvc.codepharm.net/NeitzInferiorMonkey/OData/Scale", "data": {"@odata.context": "https://websvc.codepharm.net/NeitzInferiorMonkey/OData/$metadata#ConnectomeODataV4.Scale", "X": {"Units": "nm", "Value": 7.5}, "Y": {"Units": "nm", "Value": 7.5}, "Z": {"Units": "nm", "Value": 90.0}}}

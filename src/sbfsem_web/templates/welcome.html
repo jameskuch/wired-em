@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Welcome — SBFSEM-pytools</title>
+<!-- Self-contained on purpose: every other asset sits behind the login. -->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #16191d; --muted: #6b7280;
+    --line: #dfe3e8; --accent: #2f6fed; --accent-ink: #ffffff; --danger: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16191d; --panel: #1e2227; --ink: #e8eaed; --muted: #9aa3ad;
+      --line: #2e343b; --accent: #6b9bff; --accent-ink: #10131a; --danger: #ff7b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--ink);
+    display: grid; place-items: center; padding: 24px;
+  }
+  .card {
+    width: min(340px, 100%); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 24px;
+  }
+  h1 { margin: 0 0 4px; font-size: 18px; }
+  h1 span { color: var(--muted); font-weight: 400; }
+  p.sub { margin: 0 0 16px; color: var(--muted); }
+  label { display: block; margin: 12px 0 4px; color: var(--muted); }
+  input {
+    width: 100%; padding: 8px 10px; font: inherit; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button {
+    width: 100%; margin-top: 18px; padding: 9px 10px; font: inherit; font-weight: 600;
+    color: var(--accent-ink); background: var(--accent);
+    border: 0; border-radius: 6px; cursor: pointer;
+  }
+  .error { color: var(--danger); margin: 12px 0 0; min-height: 1.4em; }
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>SBFSEM<span>-pytools</span></h1>
+  <p class="sub">__GREETING__</p>
+  <form method="post" action="/welcome" __FORM_STATE__>
+    <input type="hidden" name="code" value="__CODE__">
+    <label for="password">Choose a password <small>(at least 8 characters)</small></label>
+    <input id="password" name="password" type="password" minlength="8"
+           autocomplete="new-password" autofocus required>
+    <label for="confirm">Repeat it</label>
+    <input id="confirm" name="confirm" type="password" minlength="8"
+           autocomplete="new-password" required>
+    <p class="error" role="alert">__ERROR__</p>
+    <button type="submit">Set password and sign in</button>
+  </form>
+</main>
+<script>
+  // Catch a typo before the round trip; the server checks again regardless.
+  const form = document.querySelector("form");
+  form.addEventListener("submit", (event) => {
+    const error = document.querySelector(".error");
+    if (form.password.value !== form.confirm.value) {
+      event.preventDefault();
+      error.textContent = "Those passwords do not match.";
+    }
+  });
+</script>
+</body>
+</html>

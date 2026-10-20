@@ -1,0 +1,2264 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --ink: #16191d;
+  --muted: #6b7280;
+  --line: #dfe3e8;
+  /* A row under the pointer, or the one the walk is on (menus and lists). */
+  --hover: #e8ecf1;
+  --accent: #2f6fed;
+  --accent-ink: #ffffff;
+  --danger: #c0392b;
+  --warn: #a15c07;
+  --viewport: #101418;
+  --radius: 8px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16191d;
+    --panel: #1e2227;
+    --ink: #e8eaed;
+    --muted: #9aa3ad;
+    --line: #2e343b;
+    --hover: #2a3138;
+    --accent: #6b9bff;
+    --accent-ink: #10131a;
+    --warn: #f0b44c;
+    --viewport: #0b0e11;
+  }
+}
+
+* { box-sizing: border-box; }
+/* A class selector beats the UA [hidden] rule, so restate it with weight. */
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; padding: 10px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.topbar h1 { font-size: 16px; margin: 0; letter-spacing: 0.2px; flex: none; }
+.topbar h1 span { color: var(--muted); font-weight: 400; }
+.topbar-meta {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+  flex: 1; min-width: 0;
+}
+/* One line, always: a long message used to wrap, which made the bar taller
+   and moved and resized the render under the pointer (a 150-character
+   "Selected: ..." at 1024 px: bar 17 -> 35 px, viewport 559 -> 535 px).  The
+   full text is the element's tooltip (app.js). */
+.status {
+  font-size: 12px; color: var(--muted); font-family: var(--mono);
+  flex: 0 1 auto; min-width: 0; text-align: right;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.status.busy { color: var(--accent); }
+.status.error { color: var(--danger); }
+/* An answer of "no" that nothing else marks: red, a swell, and back to the
+   usual gray in under two and a half seconds (asked for 2026-09-22 for
+   "Viking client can only be run on Windows", where no window opens, no tab
+   appears and there is no error to notice).  `transform`, never `font-size`:
+   a taller top bar moves the render down under the pointer, which is the
+   fault the one-line status was made to fix.  The right edge is the anchor
+   because the status sits at the right end of the bar, in the tab strip
+   too. */
+@keyframes status-flare {
+  0%   { transform: scale(1);    color: var(--danger); }
+  20%  { transform: scale(1.28); color: var(--danger); }
+  45%  { transform: scale(1);    color: var(--danger); }
+  70%  { transform: scale(1);    color: var(--danger); }
+  100% { transform: scale(1);    color: var(--muted); }
+}
+@keyframes status-flare-still {
+  0%, 70% { color: var(--danger); }
+  100%    { color: var(--muted); }
+}
+.status.flare { animation: status-flare 2.4s ease-out both; transform-origin: right center; }
+@media (prefers-reduced-motion: reduce) {
+  .status.flare { animation-name: status-flare-still; }
+}
+.whoami {
+  font-size: 12px; color: var(--muted);
+  padding-left: 10px; border-left: 1px solid var(--line);
+}
+.signout { font-size: 12px; color: var(--accent); text-decoration: none; }
+.signout:hover { text-decoration: underline; }
+
+/* The cell panel's width is a variable the resizer drags; 300px is the floor. */
+.layout {
+  flex: 1; display: grid; min-height: 0;
+  grid-template-columns: var(--sidebar-w, 300px) 6px 1fr;
+}
+.sidebar-resizer { cursor: col-resize; position: relative; background: transparent; }
+.sidebar-resizer::after {
+  content: ""; position: absolute; inset: 0 2px; border-radius: 2px;
+  background: transparent; transition: background .12s ease;
+}
+.sidebar-resizer:hover::after, .sidebar-resizer.dragging::after {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.sidebar {
+  border-right: 1px solid var(--line); background: var(--panel);
+  overflow-y: auto; display: flex; flex-direction: column;
+}
+.panel { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.panel.grow {
+  flex: 1; min-height: 180px;
+  /* A column so the list takes the slack and scrolls, leaving the Apply row
+     anchored instead of overflowing the next panel. */
+  display: flex; flex-direction: column; min-width: 0;
+}
+.panel.grow > .neuron-list { flex: 1; overflow-y: auto; min-height: 150px; }
+/* An expanded cell panel needs real room; let the whole sidebar scroll
+   rather than squeezing the list into a two-row porthole. */
+.panel.grow { flex: 1 0 auto; }
+.panel h2 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted); margin: 0 0 8px;
+}
+.pill {
+  background: var(--line); border-radius: 999px; padding: 1px 7px;
+  font-size: 11px; color: var(--ink);
+}
+
+.row { display: flex; gap: 6px; margin-bottom: 8px; }
+.row input { flex: 1; min-width: 0; }
+input, select, button, output {
+  font: inherit; color: inherit;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); padding: 5px 8px;
+}
+input[type=range] { padding: 0; }
+button { cursor: pointer; background: var(--panel); }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.wide { width: 100%; margin-top: 8px; }
+.check { display: flex; align-items: center; gap: 6px; margin: 6px 0; font-size: 13px; }
+.field {
+  display: flex; align-items: center; gap: 6px; margin: 6px 0;
+  font-size: 13px; color: var(--muted); flex-wrap: wrap;
+}
+.field input, .field select { flex: 1; min-width: 70px; color: var(--ink); }
+.filebtn {
+  display: block; text-align: center; margin-top: 8px; padding: 5px;
+  border: 1px dashed var(--line); border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.filebtn:hover { border-color: var(--accent); }
+
+/* Labelled groupbox (JSON import / open / save). */
+fieldset.groupbox {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  margin: 10px 0 0; padding: 6px 10px 10px; min-width: 0;
+}
+fieldset.groupbox legend {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted); padding: 0 4px;
+}
+.json-row { margin-bottom: 0; }
+.json-row .filebtn, .json-row button {
+  flex: 1; min-width: 0; margin: 0; padding: 5px 6px;
+  text-align: center; white-space: nowrap;
+}
+
+.search-results { list-style: none; margin: 0 0 8px; padding: 0; max-height: 160px; overflow-y: auto; }
+.search-results li {
+  padding: 4px 6px; border-radius: 4px; cursor: pointer;
+  display: flex; justify-content: space-between; gap: 8px; font-size: 13px;
+}
+.search-results li:hover { background: var(--bg); }
+.search-results .id { font-family: var(--mono); color: var(--muted); }
+
+.neuron-list { list-style: none; margin: 0; padding: 0; min-width: 0; }
+.neuron-item { border-bottom: 1px solid var(--line); }
+/* The whole header is the hit target for expand/collapse; the checkbox and the
+   unload button opt out in JS so they keep their own behavior. */
+.neuron-head {
+  /* chevron, eye, color dot, name, volume tag, refresh, select, spacer, unload;
+     an open row adds a second line spanning every column. */
+  display: grid;
+  grid-template-columns: 16px 18px auto 1fr auto 20px 16px 9px 18px;
+  gap: 1px 4px;
+  align-items: center; padding: 2px 4px 2px 2px; cursor: pointer;
+  user-select: none; min-height: 24px;
+}
+.neuron-vol {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .04em;
+  color: var(--muted); text-transform: lowercase;
+}
+.neuron-sub {
+  grid-column: 1 / -1; display: flex; gap: 8px; align-items: baseline;
+  padding: 0 4px 3px 38px; font-size: 11px; color: var(--muted); min-width: 0;
+  font-weight: 400;
+}
+.neuron-sub span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* An open row's second line: the cell's look (vismenu.js). */
+.neuron-sub.vis-row { align-items: center; gap: 6px; padding-bottom: 4px; }
+.vis-row .vis-label { flex: none; }
+.vis-row .vis-select { flex: 1 1 auto; min-width: 0; max-width: 100%; font-size: 11px; padding: 1px 2px; }
+/* The right-click menu's follow-up: apply the look to every cell; any other click takes it away. */
+.vis-offer {
+  position: fixed; z-index: 60; padding: 4px; border-radius: 6px;
+  background: var(--panel); border: 1px solid var(--line); box-shadow: 0 6px 18px rgb(0 0 0 / 0.3);
+}
+.vis-offer button { font-size: 12px; padding: 3px 10px; }
+.vis-manager {
+  position: fixed; z-index: 60; width: min(360px, calc(100vw - 16px)); max-height: min(70vh, 520px);
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 10px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
+  font-size: 12px;
+}
+.vis-manager-title { display: flex; align-items: center; justify-content: space-between; font-weight: 600; }
+.vis-manager-list { overflow: auto; display: flex; flex-direction: column; gap: 2px; min-height: 0; }
+.vis-manager-row { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 1px 2px; border-radius: 4px; }
+.vis-manager-row:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.vis-manager-row span:nth-child(2) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vis-manager-kind { color: var(--muted); font-size: 10.5px; flex: none; }
+.vis-manager-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.vis-manager-hint { color: var(--muted); font-size: 11px; }
+.neuron-sub .sub-path { color: var(--ink); }
+/* Visibility is a view state, so it reads as an eye rather than a second
+   checkbox indistinguishable from the selection one. */
+.neuron-head .vis {
+  border: none; background: none; padding: 0; cursor: pointer;
+  color: var(--ink); display: flex; align-items: center; justify-content: center;
+  border-radius: 4px; width: 18px; height: 18px;
+}
+.neuron-head .vis.off { color: var(--muted); opacity: .55; }
+.neuron-head .vis:hover { background: color-mix(in srgb, var(--ink) 12%, transparent); }
+.neuron-head .vis:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Selection is an action target, so it keeps the accent. */
+.neuron-head .sel { accent-color: var(--accent); margin: 0; cursor: pointer; }
+/* Dead space between the selection box and the unload button: they sit next to
+   each other, and one of them is destructive. */
+.row-gap { display: block; }
+.neuron-head .unload {
+  opacity: .35; transition: opacity .12s ease, color .12s ease;
+  justify-self: end;
+}
+.neuron-item:hover .unload, .neuron-head .unload:focus-visible { opacity: 1; }
+.list-header {
+  display: grid;
+  grid-template-columns: 16px 18px auto 1fr auto 16px 9px 18px;
+  gap: 4px;
+  padding: 0 4px 3px 2px; font-size: 9px; letter-spacing: .04em;
+  color: var(--muted); text-transform: uppercase;
+}
+.list-header .hdr-vis { grid-column: 2; text-align: center; }
+.list-header .hdr-sel { grid-column: 6; text-align: center; }
+
+/* Undo, offered in the status line after an unload. */
+.undo-btn {
+  border: none; background: none; color: var(--accent); cursor: pointer;
+  font: inherit; text-decoration: underline; padding: 0 2px;
+}
+.undo-btn:hover { color: var(--ink); }
+.neuron-head:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.chev { color: var(--muted); font-size: 13px; width: 14px; text-align: center; }
+.row-dot {
+  width: 10px; height: 10px; border-radius: 3px; flex: none;
+  border: 1px solid color-mix(in srgb, var(--ink) 25%, transparent);
+}
+/* Selected is a state of the row, distinct from the visibility checkbox. */
+.neuron-item.selected { background: color-mix(in srgb, var(--accent) 13%, transparent); }
+.neuron-item.selected .neuron-head:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.neuron-item.primary > .neuron-head { box-shadow: inset 3px 0 0 var(--accent); }
+.neuron-item.expanded { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.neuron-item.expanded.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.swatch {
+  width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--line);
+  padding: 0; cursor: pointer;
+}
+.neuron-name { min-width: 0; cursor: pointer; }
+.neuron-name b { display: inline; font-family: var(--mono); font-size: 12px; }
+.neuron-name small { color: var(--muted); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.icon-btn { border: none; background: none; color: var(--muted); padding: 2px 4px; }
+.icon-btn:hover { color: var(--danger); }
+
+.content { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+/* Wraps to a second row on a narrow window rather than running off the edge. */
+.tabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 10px 0; background: var(--panel); border-bottom: 1px solid var(--line); }
+.tab {
+  border: 1px solid transparent; border-bottom: none;
+  border-radius: 6px 6px 0 0; padding: 6px 12px; background: none; color: var(--muted);
+}
+.tab.active { background: var(--bg); border-color: var(--line); color: var(--ink); }
+/* Settings sits apart from the work tabs, at the far end of the row. */
+.tab.tab-end { margin-left: auto; }
+
+.views { flex: 1; position: relative; min-height: 0; }
+.view { position: absolute; inset: 0; display: none; flex-direction: column; }
+.view.active { display: flex; }
+
+#viewport, #cy { flex: 1; min-height: 0; background: var(--viewport); position: relative; overflow: hidden; }
+#viewport canvas { display: block; width: 100% !important; height: 100% !important; }
+#cy { background: var(--panel); }
+.viewport-overlay {
+  position: absolute; top: 10px; left: 12px; right: 12px;
+  display: flex; justify-content: space-between; gap: 12px;
+  pointer-events: none; font-size: 12px; color: #cfd6de;
+  /* The readout and the hint share THIS width, which the sidebar's resizer
+     and full screen change independently of the window: the fold below asks
+     the overlay how wide it is, not the window. */
+  container: viewport-overlay / inline-size;
+}
+/* The readout and, under it, the marker table: one column at the overlay's left. */
+.readouts {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+  flex: 0 1 auto; min-width: min-content; max-width: 100%;
+}
+.picked {
+  font-family: var(--mono); background: rgba(0,0,0,0.45); padding: 4px 8px; border-radius: 6px;
+  display: flex; align-items: center; gap: 2px 8px; pointer-events: auto; max-width: 100%;
+  /* Wraps rather than running off the page.  Each field stays whole, but a
+     long readout -- "Inferior Monkey c1178 ... Location ID 1234567 (Inferior
+     Monkey)" -- breaks between fields instead of widening the whole page,
+     which is what naming the volume beside every ID started doing.  It gives
+     way to the hint only down to its widest field: with no floor the box
+     shrank under its own text, and at a 900px window "µm 38.19, 46.16, 87.44"
+     ran 11 to 42px into "drag orbits". */
+  flex: 0 1 auto; min-width: min-content; flex-wrap: wrap;
+}
+#pick-text { white-space: nowrap; }
+.pick-sep { color: rgba(207, 214, 222, 0.45); }
+/* The two Viking fields are buttons: a click copies, a right-click edits. */
+.pick-field {
+  font: inherit; color: inherit; background: none; border: none; padding: 0 3px;
+  border-radius: 3px; cursor: copy; white-space: nowrap;
+}
+.pick-field:hover { background: rgba(255, 255, 255, 0.14); }
+.pick-field:focus-visible { outline: 1px solid var(--accent); }
+.pick-field.copied { color: var(--accent); }
+/* The markers: red above the yellow selection, blue below it, a row each in
+   its marker's color (--mk, set from the renderer, which picks it), with the
+   numbers in columns.  The copy buttons look like the readout's fields. */
+.marker-table {
+  font-family: var(--mono); background: rgba(0,0,0,0.45); padding: 3px 6px; border-radius: 6px;
+  pointer-events: auto; max-width: 100%; overflow-x: auto;
+}
+.mk-table { border-collapse: collapse; white-space: nowrap; }
+.mk-table th {
+  font-weight: 400; font-size: 10px; color: rgba(207, 214, 222, 0.6); text-align: left;
+  padding: 0 4px 1px; cursor: help;
+}
+.mk-table td { padding: 1px 4px; color: var(--mk); }
+.mk-row { font-weight: 600; }
+.mk-table td.mk-num { text-align: right; font-variant-numeric: tabular-nums; }
+.mk-table td.mk-lead { padding-left: 0; }
+.mk-table button {
+  font: inherit; color: inherit; background: none; border: none; padding: 0 3px;
+  border-radius: 3px; cursor: pointer; line-height: inherit;
+}
+.mk-table button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.14); }
+.mk-table button:focus-visible { outline: 1px solid var(--accent); }
+.mk-table button:disabled { opacity: 0.3; cursor: default; }
+.mk-table .mk-copy { cursor: copy; }
+.mk-table .mk-copy.copied { color: var(--accent); }
+.mk-table .mk-dot { font-size: 14px; padding: 0 2px; }
+.mk-table .mk-step { font-size: 10px; padding: 0 2px; }
+.mk-table .mk-close { color: rgba(207, 214, 222, 0.55); font-weight: 400; }
+.mk-table .mk-close:hover { color: #fff; }
+.mk-table .mk-move { font-size: 12px; }
+.mk-table .mk-viking { cursor: pointer; font-weight: 700; margin-left: 2px; padding: 0 3px; color: inherit; }
+
+/* Moving an annotation by hand (movecontrol.js): under the marker table, in the
+   moved marker's color (--mv). */
+.move-panel {
+  font-family: var(--mono); font-size: 11px; background: rgba(0,0,0,0.62); color: #e3e8ee;
+  padding: 5px 8px 6px; border-radius: 6px; pointer-events: auto; max-width: min(100%, 470px);
+  border-left: 3px solid var(--mv, #ffc107); display: flex; flex-direction: column; gap: 3px;
+}
+.move-panel[hidden] { display: none; }
+.move-panel button {
+  font: inherit; color: inherit; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 4px; padding: 1px 6px; cursor: pointer;
+}
+.move-panel button:hover:not(:disabled) { border-color: var(--accent); }
+.move-panel button:disabled { opacity: 0.4; cursor: default; }
+.move-panel button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.move-panel select {
+  font: inherit; padding: 0 2px; color: inherit; background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.18); border-radius: 4px;
+}
+.move-panel option { color: #16191d; background: #fff; }
+.mv-head { display: flex; align-items: center; gap: 8px; }
+.mv-title { font-weight: 600; color: var(--mv, #ffc107); }
+.mv-head .mv-close { margin-left: auto; border: none; background: none; color: rgba(207,214,222,0.7); }
+.mv-where, .mv-moved { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.mv-moved.pending { color: #ffd479; }
+.mv-body { display: flex; gap: 8px; align-items: flex-start; }
+.mv-gizmo { width: 76px; height: 76px; flex: none; }
+.mv-gz-frame { fill: rgba(255,255,255,0.04); stroke: rgba(255,255,255,0.18); }
+.mv-gz-screen { fill: rgba(207,214,222,0.55); font-size: 8px; }
+.mv-gz-axis { stroke-width: 2; stroke-linecap: round; }
+.mv-gz-axis.on { stroke-width: 4; }
+.mv-gz-x { stroke: #ff5a5a; fill: #ff5a5a; }
+.mv-gz-y { stroke: #4cd964; fill: #4cd964; }
+.mv-gz-z { stroke: #5aa0ff; fill: #5aa0ff; }
+.mv-gz-label { stroke: none; font-size: 9px; font-weight: 700; }
+.mv-gz-origin { fill: #e3e8ee; }
+.mv-controls { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.mv-axes { display: flex; flex-wrap: wrap; gap: 3px; }
+.mv-axis.on { background: var(--mv, #ffc107); border-color: var(--mv, #ffc107); color: #111; font-weight: 700; }
+.mv-axis.mv-view { font-style: italic; }
+.mv-note { color: rgba(207,214,222,0.8); font-size: 10.5px; }
+.mv-steps { display: flex; gap: 4px; align-items: center; }
+.mv-foot { display: flex; gap: 6px; }
+.mv-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; }
+.mv-scope-label { color: rgba(207,214,222,0.7); margin-right: 2px; }
+.mv-scope-btn.on { background: var(--mv, #ffc107); border-color: var(--mv, #ffc107); color: #111; font-weight: 700; }
+.mv-range { display: inline-flex; align-items: center; gap: 3px; }
+.mv-range[hidden] { display: none; }
+.move-panel input.mv-sec {
+  width: 5.2em; font: inherit; color: inherit; background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.18); border-radius: 4px; padding: 0 3px;
+}
+.mv-count { color: rgba(207,214,222,0.85); font-size: 10.5px; }
+.mv-table td.mv-secpick { cursor: pointer; text-decoration: underline dotted; }
+.mv-kept { color: rgba(207,214,222,0.6); font-size: 10px; white-space: normal; }
+/* The cell panel's Manual moves list: each part the panel's whole width. */
+.section-body .mv-under, .section-body .mv-none, .section-body .mv-table-wrap,
+.section-body .mv-actions { grid-column: 1 / -1; min-width: 0; }
+.mv-under { font-size: 11px; color: var(--muted); margin: 2px 0 4px; }
+.mv-none { font-size: 11px; color: var(--muted); margin: 2px 0 6px; }
+.mv-table-wrap { max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; }
+.mv-table { border-collapse: collapse; width: 100%; font-size: 10.5px; font-family: var(--mono); }
+.mv-table th { position: sticky; top: 0; background: var(--panel); font-weight: 400; color: var(--muted);
+  text-align: right; padding: 1px 3px; cursor: help; }
+.mv-table td { padding: 1px 3px; }
+.mv-table input[type="checkbox"] { margin: 0; }
+.mv-table td.mv-num { text-align: right; font-variant-numeric: tabular-nums; }
+.mv-table tr.mv-gone { opacity: 0.5; }
+.mv-table .mv-id, .mv-table .mv-del {
+  font: inherit; background: none; border: none; padding: 0 2px; color: var(--accent); cursor: pointer;
+}
+.mv-table .mv-del { color: var(--muted); }
+.mv-table .mv-del:hover { color: inherit; }
+.mv-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.pick-input {
+  font: inherit; color: #fff; background: rgba(0, 0, 0, 0.7);
+  border: 1px solid var(--accent); border-radius: 3px; padding: 0 4px; width: 24ch;
+}
+.hint { background: rgba(0,0,0,0.35); padding: 4px 8px; border-radius: 6px; }
+/* The hint is 814px on one line (worded to sit beside a one-line RPC1
+   readout, 681 to 761px, in the 1590px a 1920px window leaves; it was 1037px)
+   and the readout's widest field reaches about 400px ("Cone pedicles (cped)
+   c12345  µm 123.45, ..."), so under 760px of overlay -- a window of about
+   1090px with the sidebar at its default -- the hint is left a tall column.
+   There it folds into a "?" that opens it under the readout, across the full
+   width. */
+.hint-toggle {
+  display: none; flex: none; align-self: flex-start; pointer-events: auto;
+  font-size: 12px; line-height: inherit; color: inherit; min-width: 24px;
+  background: rgba(0,0,0,0.35); border: none; border-radius: 6px; padding: 4px 8px;
+}
+.hint-toggle:hover { background: rgba(0,0,0,0.6); color: #fff; }
+.hint-toggle:focus-visible { outline: 1px solid var(--accent); }
+.hint-toggle[aria-expanded="true"] { background: rgba(0,0,0,0.6); color: #fff; }
+@container viewport-overlay (max-width: 760px) {
+  .hint-toggle { display: block; }
+  .hint {
+    display: none; position: absolute; top: calc(100% + 6px); left: 0; right: 0;
+    /* Opened over the render, so it needs more of a ground than it does in
+       the corner. */
+    background: rgba(0,0,0,0.6);
+  }
+  .hint-toggle[aria-expanded="true"] + .hint { display: block; }
+}
+kbd {
+  font-family: var(--mono); font-size: 11px; background: rgba(255,255,255,0.14);
+  border-radius: 3px; padding: 0 4px;
+}
+.viewport-tools, .table-tools {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  padding: 8px 12px; background: var(--panel); border-top: 1px solid var(--line);
+}
+/* The render toolbar is a fixed row of view actions -- toggles, undo, named
+   viewpoints, snapshot, video -- so it stays one line on a normal display no
+   matter how many render parameters exist (those live in the panels above). */
+#view-render .viewport-tools {
+  flex-wrap: wrap; gap: 8px 10px; row-gap: 8px;
+}
+#view-render .viewport-tools > * { flex: none; }
+/* Full screen (and Exit full screen: the same button) sits at the right end
+   of the bar, on whichever row the wrap leaves it. */
+#view-render .viewport-tools > #fullscreen-btn { margin-left: auto; }
+.viewport-tools .field, .table-tools .field { margin: 0; }
+.tool-divider {
+  width: 1px; align-self: stretch; margin: 0 2px;
+  background: var(--line);
+}
+.muted { color: var(--muted); font-size: 12px; }
+
+.chart-wrap { flex: 1; min-height: 0; padding: 12px; overflow: auto; }
+#strata-chart svg { width: 100%; height: auto; max-height: 100%; }
+.stats-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px; padding: 10px 12px; background: var(--panel); border-top: 1px solid var(--line);
+}
+.stat { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 9px; }
+.stat dt { font-size: 11px; color: var(--muted); }
+.stat dd { margin: 2px 0 0; font-family: var(--mono); font-size: 14px; }
+
+.table-scroll { flex: 1; overflow: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; font-family: var(--mono); }
+th, td { text-align: right; padding: 3px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--panel); text-align: right; z-index: 1; }
+tbody tr:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
+/* A flex child of the absolutely positioned view: without flex: 1 and
+   min-height: 0 the grid grows to its content and the pane cannot scroll to
+   the cards below the fold (the Analyses tab, reported 2026-09-17). */
+/* Cards are at least 340px wide (one column when the pane is narrower than
+   that), and their tables wrap: the global nowrap rule let a key/value table
+   grow past its card, where the next card painted over the values -- what a
+   1140px window with four 260px columns showed (Crystal, 2026-09-17). */
+.cards { flex: 1; min-height: 0; padding: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); grid-auto-rows: max-content; gap: 12px; overflow: auto; align-content: start; }
+/* No overflow: hidden here: it would zero the card's automatic minimum
+   height and let the pane's fixed height shrink every row. Rows are sized
+   to their content (grid-auto-rows) and the pane scrolls. */
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; min-width: 0; }
+.card h3 { margin: 0 0 8px; font-size: 13px; }
+.card table { font-size: 12px; width: 100%; }
+.card td, .card th { white-space: normal; overflow-wrap: anywhere; padding: 3px 6px; vertical-align: top; }
+.card td:first-child, .card th:first-child { text-align: left; padding-left: 0; }
+.card td:last-child { padding-right: 0; }
+/* Charts scale with their card instead of overflowing it. */
+.card svg { display: block; width: 100%; height: auto; }
+
+/* The Settings tab (settings.js): debug tools, in the Analyses cards' grid. */
+.settings-panel { grid-template-columns: repeat(auto-fill, minmax(min(440px, 100%), 1fr)); }
+.settings-panel .settings-note,
+.settings-panel .settings-server { grid-column: 1 / -1; }
+.settings-note { font-size: 12px; border-color: var(--accent); }
+.settings-text { margin: 0 0 6px; font-size: 12px; line-height: 1.45; }
+.settings-text[data-state="differs"] { color: var(--warn); font-weight: 600; }
+.settings-actions { flex-wrap: wrap; margin: 8px 0 0; }
+/* Words, not the data tables' right-aligned figures. */
+.settings-table { font-family: inherit; }
+.settings-table th, .settings-table td { text-align: left; white-space: normal; vertical-align: top; }
+.settings-table th { font-weight: 600; white-space: nowrap; padding-left: 0; }
+.settings-table td:first-child { padding-left: 0; }
+.settings-table td.num { white-space: nowrap; text-align: right; font-family: var(--mono); }
+.settings-table .settings-where { white-space: nowrap; }
+.settings-table input[type="checkbox"] { margin: 2px 0 0; }
+.settings-panel button.danger { color: var(--danger); }
+.settings-panel button.danger:disabled { color: var(--muted); }
+.card .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+/* A metric with a definition behind it: dotted, and the cursor says so. */
+.card td.help { cursor: help; text-decoration: underline dotted; text-decoration-color: var(--muted); text-underline-offset: 2px; }
+.card details.how { margin-top: 8px; font-size: 12px; color: var(--muted); }
+.card details.how summary { cursor: pointer; }
+.card details.how p { margin: 4px 0; line-height: 1.4; }
+.card details.how b { color: var(--ink); font-weight: 600; }
+.card table.metrics { border-collapse: collapse; width: auto; min-width: 100%; }
+.card table.metrics th, .card table.metrics td { padding: 2px 8px 2px 0; white-space: nowrap; }
+.card .report-scroll table.report th, .card .report-scroll table.report td { white-space: nowrap; }
+.card .card-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.empty { color: var(--muted); padding: 24px; text-align: center; }
+
+/* -- deploy notification --------------------------------------------------- */
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 13px;
+}
+.update-banner[hidden] { display: none; }
+
+/* A failed render announces itself over the viewport, not from the 12px
+   status corner: floating top-center, danger-colored, dismissable. */
+.render-error {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  z-index: 6; max-width: min(640px, 92%);
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 9px 12px;
+  background: var(--danger); color: #fff;
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.35);
+  font-size: 13px; line-height: 1.4;
+}
+.render-error[hidden] { display: none; }
+/* A default the app changed on the user's behalf: top-right, warning-edged,
+   gone after a while.  Below the overlay row so the hint stays readable. */
+.render-notice {
+  position: absolute; top: 48px; right: 12px;
+  z-index: 6; max-width: min(380px, calc(100% - 24px));
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 9px 12px;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--warn); border-left: 4px solid var(--warn);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.35);
+  font-size: 13px; line-height: 1.4;
+}
+.render-notice[hidden] { display: none; }
+/* The load strip (loadprogress.js): top center, under the overlay row, out
+   of the way of picking -- it takes no pointer events. */
+.load-progress {
+  position: absolute; top: 48px; left: 50%; transform: translateX(-50%);
+  z-index: 5; width: min(420px, calc(100% - 24px));
+  padding: 8px 12px 9px;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-left: 4px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.25);
+  font-size: 12px; line-height: 1.4;
+  pointer-events: none;
+}
+.load-progress[hidden] { display: none; }
+.load-progress.finished { border-left-color: var(--muted); }
+.load-progress.has-failures { border-left-color: var(--danger); }
+.load-progress .load-head { display: flex; align-items: center; gap: 8px; }
+.load-progress .load-title {
+  flex: 1; min-width: 0;
+  font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* The one control on a strip that otherwise lets every click through. */
+.load-progress .load-stop {
+  flex: none; pointer-events: auto; cursor: pointer;
+  padding: 1px 10px; font: inherit; font-size: 12px;
+  color: var(--ink); background: transparent;
+  border: 1px solid var(--line); border-radius: var(--radius);
+}
+.load-progress .load-stop:hover { border-color: var(--danger); color: var(--danger); }
+.load-progress .load-stop[hidden] { display: none; }
+.load-progress progress {
+  display: block; width: 100%; height: 6px; margin: 6px 0 2px;
+  appearance: none; -webkit-appearance: none;
+  border: none; border-radius: 3px; overflow: hidden;
+  background: var(--line); accent-color: var(--accent);
+}
+.load-progress progress[hidden] { display: none; }
+.load-progress progress::-webkit-progress-bar { background: var(--line); }
+.load-progress progress::-webkit-progress-value { background: var(--accent); transition: width 0.2s; }
+.load-progress progress::-moz-progress-bar { background: var(--accent); }
+.load-progress .load-cells { list-style: none; margin: 4px 0 0; padding: 0; }
+.load-progress .load-cells:empty { display: none; }
+.load-progress .load-cells li {
+  display: flex; gap: 8px; justify-content: space-between;
+  white-space: nowrap; color: var(--muted);
+}
+.load-progress .load-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--mono); color: var(--ink);
+}
+.load-progress .load-name:empty { display: none; }
+.load-progress .load-stage { flex: none; }
+.render-notice strong { color: var(--warn); font-weight: 700; }
+.render-notice .icon-btn {
+  background: transparent; border: none; color: inherit;
+  cursor: pointer; font-size: 13px; padding: 0 2px;
+}
+.render-error .icon-btn {
+  background: transparent; border: none; color: inherit;
+  cursor: pointer; font-size: 13px; padding: 0 2px; align-self: center;
+}
+.update-banner button.primary {
+  background: var(--accent-ink);
+  color: var(--accent);
+  border-color: var(--accent-ink);
+}
+.update-banner .icon-btn { color: var(--accent-ink); margin-left: auto; }
+.update-banner .icon-btn:hover { color: var(--accent-ink); opacity: 0.7; }
+/* The cells a page load would bring back, listed before any is fetched. */
+.restore-banner #restore-text { flex: 1; min-width: 0; line-height: 1.4; }
+.restore-banner button { flex: none; }
+.restore-banner button:not(.primary) {
+  background: transparent;
+  color: var(--accent-ink);
+  border-color: var(--accent-ink);
+}
+
+/* -- per-neuron render settings -------------------------------------------- */
+/* The Loaded heading and its selection controls: one row that stays at the
+   top of the sidebar while hundreds of cells scroll under it (2026-10-09). */
+.loaded-head {
+  position: sticky; top: 0; z-index: 3;
+  background: var(--panel);
+  margin: -12px -14px 0; padding: 12px 14px 0;
+}
+.loaded-title {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px;
+  margin-bottom: 8px;
+}
+.loaded-title h2 { margin: 0; }
+.list-actions {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  margin-left: auto; font-size: 12px;
+}
+.list-actions .refresh-all {
+  color: var(--accent); font-size: 15px; line-height: 1; padding: 0 5px; border-radius: 4px;
+}
+.list-actions .refresh-all:hover:not(:disabled) {
+  color: var(--ink); background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+.list-actions .refresh-all:disabled { color: var(--muted); }
+.list-actions .clear-all { margin-left: auto; color: var(--danger); }
+.list-actions .clear-all:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.selection-count { text-align: center; margin: 4px 0 0; font-size: 12px; line-height: 1.3; }
+.linkish {
+  border: none; background: none; color: var(--accent); cursor: pointer;
+  padding: 2px 4px; font-size: 12px; border-radius: 4px;
+}
+.linkish:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.linkish:disabled { color: var(--muted); cursor: default; }
+
+
+/* -- per-cell display panel ------------------------------------------------ */
+.cell-panel {
+  display: flex; flex-direction: column;
+  gap: 0;
+  /* Indented under the row header so the panel reads as the row's children;
+     the section heads' rail sits on this left edge. */
+  margin: 2px 0 2px 14px;
+  padding: 2px 4px 6px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+  font-size: 12px;
+}
+.cell-panel .full { grid-column: 1 / -1; }
+.cell-panel label.check { margin: 0; }
+.cell-panel input[type="range"] { width: 100%; }
+.cell-panel input[type="color"] {
+  width: 28px; height: 20px; padding: 0; border: 1px solid var(--line);
+  border-radius: 3px; cursor: pointer;
+}
+/* `:not(.numbox)` matters: this rule is more specific than `.numbox`, so
+   without it the number box takes the full flex row and squeezes its own
+   label to zero width. */
+.cell-panel select,
+.cell-panel input[type="number"]:not(.numbox) { width: 100%; font-size: 12px; }
+.cell-panel .note { grid-column: 1 / -1; color: var(--muted); font-size: 11px; margin: 0; }
+.cell-panel label.check.disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* -- annotations context menu --------------------------------------------- */
+.context-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 190px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
+}
+.context-menu[hidden] { display: none; }
+.context-menu button {
+  display: block; width: 100%; text-align: left;
+  border: none; background: none; color: var(--ink);
+  padding: 7px 10px; font-size: 13px; border-radius: 4px; cursor: pointer;
+}
+.context-menu button:hover { background: var(--accent); color: var(--accent-ink); }
+tr.ctx-target { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+/* -- narrow viewports ------------------------------------------------------ */
+/* -- full screen ----------------------------------------------------------
+   body.fullscreen: the browser is full screen (F11, ⌃⌘F, Firefox's ⌘⇧F, the
+   toolbar's Full screen button, or f). The title bar goes; the status line
+   floats over the empty right end of the tab strip; the cell list folds away
+   behind ≡ Cells (body.fs-sidebar brings it back). The renderer follows its
+   container, so the viewport grows by the bar and the list. */
+body.fullscreen .topbar { display: none; }
+/* The status line moves into the tab strip (app.js), last in the row and
+   pushed right; on a narrow screen it wraps under the tabs instead of
+   covering them. */
+body.fullscreen .tabs .status {
+  margin-left: auto; align-self: center; padding: 0 4px 6px; flex: 1 1 16ch;
+}
+/* One column: with the list and its handle out of the flow, the content is
+   the first grid item, and a `0 0 1fr` template would put it in the 0 track. */
+body.fullscreen:not(.fs-sidebar) .layout { grid-template-columns: 1fr; }
+body.fullscreen:not(.fs-sidebar) .sidebar,
+body.fullscreen:not(.fs-sidebar) .sidebar-resizer { display: none; }
+#fs-cells { display: none; position: fixed; top: 6px; left: 8px; z-index: 7; font-size: 12px; padding: 4px 9px; }
+body.fullscreen #fs-cells { display: inline-flex; align-items: center; gap: 4px; }
+body.fullscreen #fs-cells[aria-pressed="true"] { border-color: var(--accent); color: var(--ink); }
+body.fullscreen .tabs { padding-left: 88px; }
+/* The banners above the tabs clear it too (the redeploy and restore ones). */
+body.fullscreen .update-banner { padding-left: 100px; }
+
+/* The sidebar is a fixed 300px track, so below about 420px the grid overflows
+   and the whole page renders as a squeezed column with a horizontal scrollbar.
+   That shows up transiently whenever the page paints before the container has
+   its real width (a background tab, an embedded pane), not only on a phone. */
+@media (max-width: 720px) {
+  /* The grid has three children (list, drag handle, content).  Two columns
+     put the handle in the second and the content in a second row (measured
+     at 700 px: handle 465 px wide, render 220 x 0 px).  The list is a fixed
+     220 px here, so there is nothing for the handle to drag: it is left out
+     and the two children fill the two columns. */
+  .layout { grid-template-columns: 220px 1fr; }
+  .sidebar-resizer { display: none; }
+}
+@media (max-width: 480px) {
+  .layout { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  /* Full screen without the cell list leaves the content as the only child: its row is the 1fr one. */
+  body.fullscreen:not(.fs-sidebar) .layout { grid-template-rows: 1fr; }
+  .sidebar {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    max-height: 45vh;
+  }
+  .topbar { flex-wrap: wrap; gap: 6px; }
+}
+
+/* -- per-synapse-type rows ------------------------------------------------- */
+.type-row {
+  grid-column: 1 / -1;
+  padding: 5px 0;
+  border-top: 1px solid var(--line);
+}
+.type-row:first-of-type { border-top: none; }
+.type-head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px;
+}
+.type-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--ink) 25%, transparent);
+  flex: none;
+}
+.type-name {
+  font-family: var(--mono); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.type-count {
+  margin-left: auto; color: var(--muted); font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.type-reset { font-size: 13px; line-height: 1; flex: none; }
+.type-reset:disabled { opacity: 0.3; cursor: default; }
+.type-reset:not(:disabled):hover { color: var(--accent); }
+.type-grid {
+  display: grid; grid-template-columns: auto 1fr; gap: 4px 8px;
+  align-items: center; margin: 5px 0 2px 16px;
+}
+.type-grid label { font-size: 11px; color: var(--muted); }
+.type-grid input[type="range"] { width: 100%; }
+.type-grid select { font-size: 11px; }
+.type-grid input[type="color"] {
+  width: 26px; height: 18px; padding: 0;
+  border: 1px solid var(--line); border-radius: 3px; cursor: pointer;
+}
+
+/* -- slider + number box --------------------------------------------------- */
+/* The slider is for reaching a value, the box for stating one. Sub-0.1 µm
+   synapse sizes are simply not addressable by dragging a 150px track. */
+/* Full width of whatever grid it lands in: label + box on one line, track
+   beneath. Side by side, the track collapses to a few pixels in the sidebar. */
+.slider-field { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.slider-label { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+.slider-label > span:first-child { flex: 1; min-width: 0; }
+.slider-field input[type="range"] { width: 100%; margin: 0; }
+.numbox {
+  width: 62px; flex: none; font-size: 11px; padding: 2px 5px;
+  font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 4px;
+}
+.numbox:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.slider-label .unit { font-size: 10px; color: var(--muted); flex: none; width: 16px; }
+
+/* -- per-cell apply actions ------------------------------------------------ */
+/* A heading naming the action, then the two targets side by side. */
+.panel-actions {
+  grid-column: 1 / -1;
+  display: flex; flex-direction: column; gap: 7px;
+  margin-top: 9px; padding-top: 10px; border-top: 1px solid var(--line);
+}
+.panel-actions-title { font-size: 12px; font-weight: 500; color: var(--ink); }
+.panel-actions-row { display: flex; gap: 6px; }
+.panel-actions-row button {
+  flex: 1; min-width: 0; font-size: 12px; padding: 5px 8px;
+}
+.panel-actions-row button:disabled { opacity: 0.45; cursor: default; }
+
+/* The unload button fades in on row hover; honour a reduced-motion preference. */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+  .neuron-head .unload { opacity: 1; }
+}
+
+/* -- render controls the chosen method ignores ------------------------------ */
+/* A control the chosen method ignores: shown, but plainly inert, rather than
+   silently doing nothing. */
+.field.inert { opacity: .4; }
+.field.inert input, .field.inert output, .field.inert select { pointer-events: none; }
+
+/* -- deferred help panel --------------------------------------------------- */
+/* Fixed rather than absolute: the toolbar scrolls sideways, and a panel
+   anchored inside it would scroll out of view with its control. */
+.help-pop {
+  position: fixed; z-index: 60; max-width: 340px;
+  padding: 9px 12px; font-size: 12px; line-height: 1.5;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 0.28);
+  pointer-events: none;   /* never steals the hover that opened it */
+  white-space: pre-wrap;
+  column-gap: 18px;       /* a long help is laid out in columns (showHelp) */
+}
+/* Only in a window too small for the longest help even in columns: it scrolls,
+   so it has to take the pointer. */
+.help-pop.scroll { pointer-events: auto; overflow-y: auto; overscroll-behavior: contain; }
+
+/* -- color picker (colorpicker.js) ----------------------------------------- */
+/* The same popup in every browser, in place of each one's own. Fixed and
+   above everything: it opens from the sidebar, the panels and a context menu. */
+.color-pop {
+  position: fixed; z-index: 80; width: 216px; padding: 12px;
+  display: flex; flex-direction: column; gap: 10px;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 10px 34px rgb(0 0 0 / 0.35);
+  font-size: 12px;
+}
+.cp-wheel-box { position: relative; width: 184px; height: 184px; align-self: center; }
+.cp-wheel { width: 184px; height: 184px; border-radius: 50%; cursor: crosshair; touch-action: none; display: block; }
+.cp-wheel:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.cp-marker {
+  position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+  border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px rgb(0 0 0 / 0.55);
+  pointer-events: none;
+}
+.cp-value {
+  -webkit-appearance: none; appearance: none; width: 100%; height: 14px; margin: 0;
+  border-radius: 7px; border: 1px solid var(--line); cursor: pointer;
+  background: linear-gradient(to right, #000, var(--cp-full, #fff));
+}
+.cp-value::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 18px; border-radius: 5px;
+  background: #fff; border: 1px solid rgb(0 0 0 / 0.55); box-shadow: 0 1px 3px rgb(0 0 0 / 0.4);
+}
+.cp-value::-moz-range-thumb {
+  width: 12px; height: 16px; border-radius: 5px;
+  background: #fff; border: 1px solid rgb(0 0 0 / 0.55);
+}
+.cp-value::-moz-range-track { background: transparent; }
+.cp-row { display: flex; align-items: center; gap: 6px; }
+.cp-chip { width: 26px; height: 22px; border: 1px solid var(--line); padding: 0; flex: none; }
+.cp-before { border-radius: 6px 0 0 6px; cursor: pointer; }
+.cp-after { border-radius: 0 6px 6px 0; margin-left: -7px; }
+.cp-hex {
+  flex: 1 1 0; min-width: 0; font-family: var(--mono); font-size: 12px; padding: 3px 6px;
+  text-transform: lowercase;
+}
+.cp-tool { flex: none; width: 24px; height: 24px; padding: 0; line-height: 1; font-size: 14px; }
+.cp-rgb label { display: flex; align-items: center; gap: 4px; flex: 1 1 0; color: var(--muted); font-size: 11px; }
+.cp-channel { width: 100%; min-width: 0; padding: 2px 4px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.cp-swatch-groups { display: flex; flex-direction: column; gap: 6px; }
+.cp-swatches { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.cp-swatches-title { flex: 0 0 100%; font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.cp-swatch {
+  width: 16px; height: 16px; padding: 0; border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--ink) 25%, transparent); cursor: pointer;
+}
+.cp-swatch:hover, .cp-swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* -- build-cost chip ------------------------------------------------------- */
+.cost-chip {
+  font-size: 11.5px; font-variant-numeric: tabular-nums;
+  padding: 3px 8px; border-radius: 999px; white-space: nowrap;
+  border: 1px solid var(--line); color: var(--muted); cursor: help;
+}
+.cost-chip[hidden] { display: none; }
+/* Amber: a long wait or a large share of the memory; red: past a limit. */
+.cost-chip.warn {
+  border-color: var(--warn); color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+.cost-chip.over {
+  border-color: var(--danger); color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+.scope-inline {
+  font-size: 11.5px; color: var(--muted); white-space: nowrap; cursor: help;
+}
+.scope-inline.pending { color: var(--accent); }
+
+/* -- volume selector, now at the top of the sidebar ------------------------ */
+.volume-panel { padding-block: 10px; }
+.volume-panel .field { margin: 0; }
+.volume-panel select { flex: 1; }
+
+/* -- save / open dialogs --------------------------------------------------- */
+.dlg {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel); color: var(--ink);
+  padding: 0; width: min(420px, calc(100vw - 32px));
+  box-shadow: 0 18px 48px rgb(0 0 0 / 0.4);
+}
+.dlg::backdrop { background: rgb(0 0 0 / 0.45); }
+.dlg-body { display: flex; flex-direction: column; gap: 10px; padding: 18px 20px 16px; }
+.dlg h2 { font-size: 15px; margin: 0; }
+.dlg .field { margin: 0; }
+.dlg .field select, .dlg .field input { flex: 1; }
+.dlg-note { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+.dlg-error {
+  margin: 0; font-size: 12px; color: var(--danger);
+  border-left: 2px solid var(--danger); padding-left: 8px;
+}
+.dlg-error[hidden] { display: none; }
+.dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+/* The Open/Save file browser: folders on the left, documents on the right. */
+.dlg-wide { width: min(720px, calc(100vw - 32px)); }
+.browser {
+  display: grid; grid-template-columns: 200px 1fr; gap: 10px;
+}
+.browser-pane {
+  display: flex; flex-direction: column; min-width: 0;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  overflow: hidden; background: var(--bg);
+}
+.browser-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 10px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--muted);
+  border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.folder-list, .file-list {
+  list-style: none; margin: 0; padding: 4px; flex: 1;
+  overflow-y: auto; min-height: 200px; max-height: 300px;
+}
+.folder-list li, .file-list li {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: 5px; cursor: pointer; font-size: 13px;
+}
+.folder-list li:hover, .file-list li:hover {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+}
+.folder-list li.active, .file-list li.active {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.folder-list .folder-name, .file-list .doc-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.folder-list .count { color: var(--muted); font-size: 11px; }
+.file-list .doc-meta {
+  color: var(--muted); font-size: 11px; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.folder-list .empty, .file-list .empty {
+  color: var(--muted); cursor: default; justify-content: center;
+  padding: 16px 8px; font-size: 12px;
+}
+.folder-list .empty:hover, .file-list .empty:hover { background: none; }
+.browser-new { margin: 0; padding: 6px; border-top: 1px solid var(--line); }
+.browser-new input { min-width: 0; font-size: 12px; }
+/* On a phone the two panes stack rather than fighting over 300px. */
+@media (max-width: 560px) {
+  .browser { grid-template-columns: 1fr; }
+  .folder-list { min-height: 90px; max-height: 130px; }
+}
+
+/* -- cell panel as a tree -------------------------------------------------- */
+/* An open cell is unmistakable: an accent rail down the whole row, a filled
+   chevron, and a tinted ground that the closed rows do not have. */
+.neuron-item.expanded > .neuron-head { box-shadow: inset 2px 0 0 var(--accent); }
+.neuron-item.expanded .neuron-head { font-weight: 500; }
+.neuron-item.expanded .chev { color: var(--accent); }
+
+.cell-section { display: flex; flex-direction: column; }
+.section-head {
+  display: flex; align-items: baseline; gap: 6px;
+  width: 100%; text-align: left; cursor: pointer;
+  background: none; border: none; padding: 3px 6px 3px 6px;
+  color: var(--ink); font-size: 13px; border-radius: 0 4px 4px 0;
+  /* The accent rail follows the tree: a segment beside every section head
+     at this depth, and a deeper one beside an open section's body, so the
+     line steps in and out with the indentation instead of running down
+     the whole row. */
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.section-head:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.section-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sec-chev { color: var(--muted); font-size: 10px; width: 14px; flex: none; }
+.cell-section.open > .section-head > .sec-chev { color: var(--accent); }
+.sec-name { font-weight: 500; white-space: nowrap; }
+/* A shut section still says what is inside it. */
+.sec-summary {
+  margin-left: auto; color: var(--muted); font-size: 11px;
+  font-family: var(--mono); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+/* The guide line is the indent: it makes the nesting depth readable at a
+   glance rather than implied by whitespace alone. */
+.section-body {
+  display: grid; grid-template-columns: auto 1fr; gap: 3px 8px;
+  align-items: center;
+  margin: 1px 0 3px 14px; padding: 3px 0 3px 10px;
+  border-left: 2px solid var(--accent);
+}
+.section-body .check { margin: 1px 0; }
+.section-body > label:not(.check) { color: var(--muted); font-size: 11px; }
+.section-body .check, .section-body .note, .section-body .slider-field,
+.section-body .type-row, .section-body > button { grid-column: 1 / -1; }
+.section-body .type-row { border-top-color: var(--line); }
+/* One more level of guide for the per-type controls. */
+.section-body .type-grid {
+  margin-left: 6px; padding-left: 8px; border-left: 1px solid var(--line);
+}
+
+/* -- expandable tool panels ------------------------------------------------ */
+/* The toolbar stays a fixed row of view actions; everything that changes how
+   a cell is built or drawn lives in a panel above it, so adding a render knob
+   never rearranges the buttons the hand already knows. */
+/* Vertical columns above the toolbar: each is only as wide as its controls
+   need and grows upward, so an open panel costs a strip of the viewport's
+   width instead of a band across its height. Two open sit side by side. */
+.view-footer { position: relative; flex: none; }
+.tool-panels {
+  /* Anchored to the top edge of the toolbar and growing upward, over the
+     viewport: the render keeps its size whether a panel is open or not. */
+  position: absolute; bottom: 100%; left: 0; right: 0; z-index: 5;
+  display: flex; align-items: flex-end;
+  max-height: 72vh;
+  pointer-events: none;
+}
+.tool-panel {
+  display: flex; flex-direction: column; gap: 9px;
+  width: 236px; flex: none;
+  max-height: 72vh;
+  padding: 10px 12px;
+  overflow-y: auto;
+  pointer-events: auto;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  box-shadow: 0 -6px 18px rgb(0 0 0 / 0.28);
+}
+.tool-panel[hidden] { display: none; }
+/* Display & context sits left of Render options, matching its toggle. */
+#panel-display { order: 1; }
+#panel-render { order: 2; }
+/* The render panel is a horizontal strip just above the toolbar (user
+   request 2026-08-30, reversing the earlier vertical column): one band the
+   full remaining width, controls flowing left to right and wrapping. The
+   display panel stays a column beside it. */
+#panel-render,
+#panel-compare-options {
+  flex-direction: row; flex-wrap: wrap; align-items: center;
+  width: auto; flex: 1; min-width: 0;
+  row-gap: 8px; column-gap: 8px;
+  max-height: 34vh;
+  border-right: none;
+}
+/* In a column the fields read as label-then-control rows. */
+.tool-panel .field {
+  margin: 0; font-size: 12px; gap: 6px; flex-wrap: nowrap;
+  justify-content: space-between; white-space: nowrap;
+}
+.tool-panel .field select { flex: 1; min-width: 0; }
+.tool-panel .field input[type="number"] { width: 68px; flex: none; }
+.tool-panel .field input[type="range"] { flex: 1; min-width: 0; }
+.tool-panel .check { margin: 0; font-size: 12px; }
+.tool-panel button { font-size: 12px; }
+/* The horizontal separators become rules between stacked sections. */
+.tool-panel .tool-divider {
+  width: auto; height: 1px; align-self: stretch; margin: 2px 0;
+}
+/* Flowing in a row, each field is only as wide as its own control, and the
+   divider goes back to being a vertical rule between groups. */
+#panel-render .field,
+#panel-compare-options .field { flex: none; }
+#panel-render .field select,
+#panel-compare-options .field select { flex: none; width: auto; }
+#panel-render .field input[type="number"],
+#panel-compare-options .field input[type="number"] { width: 54px; }
+#panel-render .field input[type="range"],
+#panel-compare-options .field input[type="range"] { flex: none; width: 70px; }
+#panel-render #reduce-out,
+#panel-compare-options [data-key="reduce_fraction"] output { min-width: 38px; }
+/* Inside the More menu the clip field reads as a normal row. */
+.menu-pop .field { display: flex; gap: 6px; font-size: 12px; padding: 2px 4px; }
+.menu-pop .field input[type="number"] { width: 60px; }
+#panel-render .tool-divider,
+#panel-compare-options .tool-divider {
+  width: 1px; height: 22px; align-self: center; margin: 0;
+}
+#panel-render button,
+#panel-compare-options button { flex: none; }
+/* Compact enough that the strip is one row on a normal monitor. */
+#panel-render > button, #panel-render .menu > button,
+#panel-compare-options > button, #panel-compare-options .menu > button {
+  font-size: 11.5px; padding: 3px 9px;
+}
+
+/* -- a button that opens a small menu (the Defaults group) ----------------- */
+.menu { position: relative; display: inline-flex; }
+.menu-pop {
+  /* Fixed, positioned by script when opened: the render strip scrolls
+     (overflow-y: auto), and an absolutely positioned popup inside a scroll
+     container is clipped at the strip's edge — invisibly. */
+  position: fixed; z-index: 7;
+  display: flex; flex-direction: column; align-items: stretch; gap: 2px;
+  min-width: 190px; padding: 5px;
+  background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.35);
+}
+.menu-pop[hidden] { display: none; }
+.menu-pop button {
+  text-align: left; border: none; background: transparent;
+  padding: 5px 8px; border-radius: 5px;
+}
+.menu-pop button:hover { background: var(--bg); }
+.menu-pop hr {
+  border: none; border-top: 1px solid var(--line); margin: 2px 0; width: 100%;
+}
+#panel-render #reduce-out,
+#panel-compare-options [data-key="reduce_fraction"] output {
+  min-width: 46px; text-align: right; font-variant-numeric: tabular-nums;
+}
+#panel-render #smooth-iter,
+#panel-compare-options [data-key="smooth_iterations"] input { width: 54px; }
+
+.panel-group {
+  display: flex; flex-direction: column; gap: 5px;
+  padding-bottom: 9px; border-bottom: 1px solid var(--line);
+}
+.panel-group:last-child { padding-bottom: 0; border-bottom: none; }
+.panel-group h4 {
+  margin: 0 0 2px; font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.07em; color: var(--muted); font-weight: 600;
+}
+.panel-group .check, .panel-group .field { margin: 0; font-size: 12px; }
+/* Volume offsets: one row per volume, three short micron fields. */
+.vol-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 4px 0; }
+.vol-name { min-width: 9ch; font-size: 12px; color: var(--ink); }
+.vol-row input[type="number"] { width: 7ch; }
+.vol-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.panel-note { margin: 2px 0 0; font-size: 10.5px; color: var(--muted); line-height: 1.35; }
+.panel-row { display: flex; gap: 5px; margin-top: 2px; }
+.panel-row button { flex: 1; font-size: 11.5px; padding: 3px 6px; }
+.lim-grid {
+  display: grid; grid-template-columns: auto 1fr 1fr; gap: 3px 5px;
+  align-items: center; font-size: 11px;
+}
+.lim-grid input {
+  width: 100%; min-width: 0; font-size: 11px; padding: 2px 4px;
+  font-variant-numeric: tabular-nums;
+}
+.panel-toggle { font-size: 12px; white-space: nowrap; }
+.panel-toggle.open { border-color: var(--accent); color: var(--accent); }
+/* Disclosure arrow ganged to the technique picker, so the pair reads as one
+   control: the arrow opens the detail, the box is the setting. */
+.quick-render { display: inline-flex; }
+.panel-toggle.arrow-only {
+  padding: 5px 7px; font-size: 10px; line-height: 1;
+  border-radius: 6px 0 0 6px; border-right: none;
+}
+.quick-render select {
+  border-radius: 0 6px 6px 0; font-size: 12px; padding: 5px 6px;
+  max-width: 168px;
+}
+.quick-render select:hover, .panel-toggle.arrow-only:hover { border-color: var(--accent); }
+
+/* Named viewpoints, ganged so they read as one control. */
+.view-presets { display: inline-flex; }
+.view-presets button {
+  font-size: 11px; padding: 5px 7px; border-radius: 0; margin-left: -1px;
+  font-family: var(--mono);
+}
+.view-presets button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.view-presets button:last-child { border-radius: 0 6px 6px 0; }
+.view-presets button:hover { position: relative; z-index: 1; }
+
+/* -- viewport overlays ----------------------------------------------------- */
+.scale-bar {
+  position: absolute; left: 14px; bottom: 14px;
+  height: 16px; border: 2px solid #e8eaed; border-top: none;
+  color: #e8eaed; font-size: 11px; font-family: var(--mono);
+  text-align: center; line-height: 1.6;
+  text-shadow: 0 1px 3px rgb(0 0 0 / 0.9);
+  pointer-events: none;
+}
+#viewport.inverted .scale-bar {
+  border-color: #16191d; color: #16191d; text-shadow: 0 1px 3px rgb(255 255 255 / 0.9);
+}
+.colorbar {
+  position: absolute; right: 14px; bottom: 14px; width: 190px;
+  padding: 5px 7px; border-radius: 6px;
+  background: rgb(0 0 0 / 0.45); pointer-events: none;
+}
+#viewport.inverted .colorbar { background: rgb(255 255 255 / 0.7); }
+.cbar-gradient { height: 9px; border-radius: 3px; }
+.cbar-labels {
+  display: flex; justify-content: space-between; margin-top: 2px;
+  font-size: 9.5px; font-family: var(--mono); color: #dfe5ec;
+}
+#viewport.inverted .cbar-labels { color: #16191d; }
+.rec-indicator {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px; border-radius: 999px;
+  background: rgb(0 0 0 / 0.6); color: #fff; font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.rec-indicator[hidden] { display: none; }
+.rec-dot {
+  width: 9px; height: 9px; border-radius: 50%; background: #e0483a;
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+.rec-indicator button {
+  padding: 2px 8px; font-size: 11px; background: transparent; color: #fff;
+  border-color: rgb(255 255 255 / 0.5);
+}
+/* Below the hint line, which the recording chip is short enough to clear. */
+.rec-indicator.ready { top: 48px; background: rgb(0 0 0 / 0.8); }
+.rec-indicator.ready button.primary {
+  background: var(--accent); color: var(--accent-ink); border-color: var(--accent);
+}
+@keyframes rec-pulse { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .rec-dot { animation: none; } }
+
+/* -- Render compare -------------------------------------------------------- */
+/* A grid of independent viewports over the same cell.  A pane header carries
+   the technique, the display toggles and the arrow that opens the pane's render
+   options (one panel under the focused pane, not in the header). */
+.compare-grid {
+  flex: 1; min-height: 0;
+  display: grid; gap: 2px; background: var(--line);
+}
+.compare-grid.panes-1 { grid-template-columns: 1fr; }
+.compare-grid.panes-2 { grid-template-columns: 1fr 1fr; }
+.compare-grid.panes-3 { grid-template-columns: 1fr 1fr 1fr; }
+.compare-grid.panes-4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.compare-grid.panes-5,
+.compare-grid.panes-6 { grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr 1fr; }
+/* One pane fills the grid (double-click its number); the others stay alive, hidden and paused. */
+.compare-grid.has-maximized { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.compare-pane {
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  background: var(--viewport); position: relative;
+}
+.compare-head {
+  /* The popovers (layer editor, + menu, tools menu) hang from the header.  The controls sit on
+     its first line while the layer chips wrap beside them. */
+  position: relative;
+  display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap;
+  padding: 3px 8px; font-size: 11px; min-height: 26px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.compare-head select, .compare-head input[type="number"] {
+  font-size: 11px; padding: 2px 4px;
+}
+/* The longest technique name ("Voxel remesh + MeshLab isotropic") is wider
+   than a pane at six panes on a small window: let the box shrink to the pane
+   instead of pushing the page sideways. */
+.compare-head select { min-width: 0; max-width: 100%; }
+/* The header's controls sit at the top of its first line: nudged to meet the chips' middle. */
+.compare-head > .compare-num, .compare-head > .compare-check { margin-top: 2px; }
+.compare-head > .compare-add, .compare-head > .compare-more, .compare-head > .compare-opts { margin-top: 1px; }
+/* The pane's number: what a Difference pane's "pane N" refers to. */
+.compare-num {
+  flex: 0 0 auto; min-width: 16px; height: 16px; padding: 0 2px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 8px; background: var(--line); color: var(--ink);
+  font-weight: 600; cursor: default;
+}
+.compare-head input[type="number"] { width: 52px; }
+.compare-check {
+  display: inline-flex; align-items: center; gap: 3px;
+  color: var(--muted); cursor: pointer; white-space: nowrap;
+}
+.compare-param {
+  display: inline-flex; align-items: center; gap: 3px;
+  color: var(--muted); white-space: nowrap;
+}
+/* The pane the options panel shows: the accent on its number and the foot of its
+   header, which take no room, so focusing a pane never moves anything. */
+.compare-pane.focused .compare-num { background: var(--accent); color: var(--accent-ink); }
+.compare-pane.focused .compare-head { box-shadow: inset 0 -2px 0 var(--accent); }
+/* The arrow that opens the pane's render options: as small as the number badge. */
+.compare-opts {
+  flex: 0 0 auto; min-width: 20px; height: 18px; padding: 0 5px;
+  font-size: 9px; line-height: 16px; border-radius: 9px;
+}
+.compare-opts[aria-expanded="true"] {
+  border-color: var(--accent); color: var(--accent);
+}
+
+/* -- layers: chips in the header, popovers under them --------------------- */
+/* One layer: its chip sits on the first line, between the badge and the buttons.  Several: the buttons keep
+   the first line and the chips take a line of their own under it.  Either way the chips stay on ONE line,
+   whatever words they carry, and the pane's state chip is the first of them.  A layer going from "not built"
+   to "building" to ready, or the pane from idle to "out of date", changes the width of what is in this
+   element; if it wrapped, or if the state chip were a flex item of the header, each change could add or take
+   a line from the header, and the header's share of the pane would change with it every time a layer
+   started, finished or was edited.  This element's own width is what is left on the header's first line (a
+   basis of 0), whatever it holds, so the buttons never move.  When the chips do not all fit, the state words
+   give way first (and the pane's chip is a dot where it has several layers to say it), then the names, down
+   to a floor of 3 em; where even that does not fit compare.js marks the pane `tight` (_fitChips) and every
+   chip is a dot and a small arrow, as in a narrow pane.  The dot, the tooltip and the editor keep what a
+   name said. */
+.compare-layers {
+  display: flex; flex-wrap: nowrap; align-items: center; gap: 4px;
+  flex: 1 1 0; min-width: 2.5em; overflow: hidden;
+}
+.compare-pane:not([data-layers="1"]) .compare-layers, .compare-pane.narrow .compare-layers { order: 9; flex: 1 0 100%; }
+/* Compact chips hold no word and no name, so how many fit a line depends on the counts alone, never on a state:
+   they may wrap, and nothing is out of reach. */
+.compare-pane:is(.narrow, .tight) .compare-layers { flex-wrap: wrap; }
+.layer-chip button:focus-visible { outline-offset: -2px; }       /* inside the chip, which may clip an outline drawn outside it */
+.compare-head > .compare-add { margin-left: auto; }
+.layer-chip {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  /* The least a chip is: border and padding 12, the dot 13, the gap 4 before the name, the name 3 em, the gap
+     4 before the state word (which gives way to nothing).  _fitChips measures with these. */
+  min-width: calc(3em + 33px);
+  flex: 0 1 auto; overflow: hidden;
+  height: 20px; padding: 0 7px 0 3px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
+  font-size: 11px; line-height: 18px;
+}
+.layer-chip.editing { border-color: var(--accent); }
+.layer-chip.off .layer-name { opacity: 0.55; font-style: italic; }
+.layer-chip.stale { border-style: dashed; }
+.layer-chip.failed { background: #8c1c13; border-color: #8c1c13; color: #fff; }
+.layer-chip.failed .layer-state { color: #fff; }
+/* The dot is the layer's swatch and its visibility switch; hollow when the layer is hidden. */
+.layer-dot {
+  flex: 0 0 auto; width: 13px; height: 13px; min-width: 0; padding: 0;
+  border: 2px solid #ffd400; border-radius: 50%; background: #ffd400;
+}
+.layer-name {
+  min-width: 0; max-width: 11em; padding: 0; border: none; background: transparent;
+  font: inherit; line-height: 18px; color: inherit; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.layer-name:hover:not(:disabled) { border: none; text-decoration: underline; }
+.layer-name.static { cursor: default; text-decoration: none; }
+/* In a crowded line the word shrinks (very much faster than the name does) before the name loses anything. */
+.layer-state {
+  flex: 0 20 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  font-size: 10px; color: var(--muted); white-space: nowrap;
+}
+/* A narrow or tight pane keeps the dots and a small arrow that opens the editor: the names are in
+   the tooltips and the editor's title. */
+.compare-pane:is(.narrow, .tight) .layer-state, .compare-pane:is(.narrow, .tight) .layer-name.static { display: none; }
+/* (font-size 0 makes the name's own max-width in em 0 too, so it is set again here.) */
+.compare-pane:is(.narrow, .tight) .layer-name:not(.static) {
+  width: 14px; max-width: 14px; font-size: 0; text-align: center; overflow: visible;
+}
+.compare-pane:is(.narrow, .tight) .layer-name:not(.static)::after { content: "▾"; font-size: 11px; }
+.compare-pane:is(.narrow, .tight) .layer-chip { min-width: 0; padding-right: 2px; }
+/* Only the box: its name is in the tooltip. */
+.compare-pane.narrow .compare-head > .compare-check { font-size: 0; gap: 0; }
+/* The pane's state as a dot in the state's color, its word in the tooltip (compare.js _fitChips says where:
+   a pane with several layers, a narrow pane, and a line of under 215 px).  In a line of compact chips, which
+   may wrap, it keeps its place when it has no state (empty), so that it cannot change where they wrap. */
+.compare-pane:is(.narrow, .tight) .compare-chip.dot[hidden] { display: block; visibility: hidden; }
+.compare-chip.dot {
+  box-sizing: border-box; width: 9px; height: 9px; padding: 0; font-size: 0; line-height: 0; border-radius: 50%;
+  background: var(--muted); border-color: var(--muted);
+}
+.compare-chip.dot.stale { background: var(--warn); border-color: var(--warn); }
+.compare-chip.dot.error-build, .compare-chip.dot.error-measure { background: #8c1c13; border-color: #8c1c13; }
+@media (prefers-color-scheme: dark) {
+  /* #8c1c13 is under 2:1 on the dark header; this red is 8:1 */
+  .compare-chip.dot.error-build, .compare-chip.dot.error-measure { background: #ff9e94; border-color: #ff9e94; }
+}
+.compare-add, .compare-more {
+  flex: 0 0 auto; min-width: 20px; height: 18px; padding: 0 6px;
+  font-size: 12px; line-height: 14px; border-radius: 9px;
+}
+.compare-more.active { border-color: var(--accent); color: var(--accent); }
+.compare-pop {
+  position: absolute; top: calc(100% + 2px); left: 0; z-index: 9;
+  width: 270px; max-width: calc(100vw - 16px); padding: 8px;
+  display: flex; flex-direction: column; gap: 6px; font-size: 12px;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.35);
+}
+.compare-pop select, .compare-pop input[type="number"], .compare-pop button { font-size: 12px; }
+.compare-pop input[type="number"] { width: 62px; padding: 2px 4px; }
+.compare-pop select { flex: 1; min-width: 0; max-width: 100%; padding: 2px 4px; }
+.compare-pop .layer-color { width: 44px; height: 24px; padding: 1px 2px; cursor: pointer; }
+.pop-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 600; }
+.pop-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pop-close { padding: 0 6px; line-height: 1.2; }
+.pop-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.pop-label { flex: 0 0 3.6em; color: var(--muted); }
+.compare-menu { width: 200px; gap: 2px; }
+.compare-menu > button { text-align: left; border: none; background: transparent; padding: 5px 8px; border-radius: 5px; }
+.compare-menu > button:hover:not(:disabled) { background: var(--bg); }
+.compare-zrange {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap; padding: 4px 8px 2px;
+  color: var(--muted);
+}
+.compare-zrange .compare-z { width: 58px; }
+.compare-zrange button { padding: 1px 6px; }
+.compare-viewport { flex: 1; min-height: 0; position: relative; overflow: hidden; }
+.compare-viewport canvas { display: block; width: 100% !important; height: 100% !important; }
+.error-scale {
+  width: 5.2em; padding: 0 3px; font: inherit; color: inherit;
+  background: transparent; border: 1px solid rgb(255 255 255 / 0.25); border-radius: 4px;
+}
+/* The pane's state, when it needs a word: waiting, out of date, stopped,
+   failed.  Small, in the header, never over the render. */
+.compare-chip {
+  flex: 0 0 auto; padding: 0 6px; border-radius: 8px;
+  font-size: 10.5px; font-weight: 600; line-height: 16px; cursor: default;
+  color: var(--muted); border: 1px solid var(--line);
+}
+.compare-chip.stale {
+  /* --warn is 4.3:1 on its own tint in the light theme; this is 5.3:1. */
+  color: #8a4f05; border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+}
+.compare-chip.error-build, .compare-chip.error-measure {
+  color: #fff; background: #8c1c13; border-color: #8c1c13;
+}
+/* The text under the grid: the summary of a run ("3 of 6 panes ready, pane 4 measuring, 41 s") and the
+   status line.  They used to be two more items of the toolbar's wrapping row, so whatever they said could
+   wrap it, and each wrapped line took 29 px from the grid and resized every render in it (c943 at a
+   900 px window: the grid 678 px idle, 649 after a Compare, 620 while one ran, 598 after a failure, 546
+   under a long server message).  They are one item now and one line high whatever they say: beside the
+   controls where 760 px are left for them (about 1650 px of window, with the cell list at its usual
+   width), in a row of their own under the controls where not.  The basis, not the words, decides where the
+   row breaks, so a window breaks at the same width idle and running.  What does not fit is cut with an
+   ellipsis, and the whole of it is the text's tooltip (app.js). */
+.compare-tools { row-gap: 8px; }
+/* "Compare" turns into "Stop all", which is 10 px wider: the controls must not change the width the
+   text gets, nor move the ones after the button. */
+.compare-tools #compare-build { min-width: 6em; }
+.compare-texts {
+  flex: 1 1 760px; min-width: 0;
+  font-size: 12px; height: 1.85em;
+  display: flex; align-items: center; gap: 12px;
+  white-space: nowrap; overflow: hidden;
+}
+.compare-texts > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The summary keeps its words (the clock is at their end) and the status line gives way first. */
+.compare-summary {
+  flex: 0 0 auto; max-width: 100%;
+  font-size: 12px; font-variant-numeric: tabular-nums; color: var(--ink);
+}
+.compare-texts > #compare-status { flex: 0 1 auto; }
+.compare-summary:empty { display: none; }
+.compare-summary.has-failures { color: var(--danger); font-weight: 700; }
+@media (prefers-color-scheme: dark) {
+  /* --danger is about 3:1 on the dark panel; this red is above 7:1. */
+  .compare-summary.has-failures { color: #ff9e94; }
+  .compare-chip.stale { color: var(--warn); }
+  .job-card .job-stop:hover:not([aria-disabled="true"]) { color: #ff9e94; border-color: #ff9e94; }
+  .skel-check .skel-facts.error { color: #ff9e94; }
+}
+/* A status that is an error must be readable in both themes: --danger alone
+   is about 3:1 on the dark panel. */
+#compare-status.error {
+  color: #fff; background: #8c1c13; font-weight: 700;
+  padding: 2px 8px; border-radius: 6px;
+}
+#compare-build.is-stop { background: #8c1c13; border-color: #8c1c13; color: #fff; }
+#compare-build.is-stop:hover:not(:disabled) { border-color: #fff; }
+/* A legend whose numbers predate the current settings. */
+/* One section per layer with a map; the ramp and its scale box show once, on the first. */
+.legend-section.stale { opacity: 0.45; }
+.legend-section.stale::before {
+  content: "Out of date — press Compare to re-measure:";
+  display: block; font-size: 11px; color: var(--muted);
+}
+.legend-section:not(.lead) .diff-bar,
+.legend-section:not(.lead) .diff-labels { display: none; }
+/* The options panel rises over the panes like the 3D render's, above their progress
+   cards and banners (z 6), below the help text (60). */
+#view-compare .tool-panels { z-index: 8; }
+.compare-opts-title { flex: none; font-size: 12px; font-weight: 600; white-space: nowrap; cursor: help; }
+#panel-compare-options .compare-opts-close {
+  margin-left: auto; padding: 1px 7px; line-height: 1.2;
+}
+/* The difference pane's scale bar and honest numbers. */
+.compare-legend {
+  position: absolute; left: 8px; right: 8px; bottom: 6px;
+  padding: 5px 8px; border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55); color: #dfe5ec;
+  font-size: 10.5px; pointer-events: none;
+}
+/* The legend is click-through so orbiting works under the color bar, but the
+   scale box and the lines that carry a tooltip must be reachable. */
+.compare-legend .error-scale,
+.compare-legend .diff-stats[data-help] { pointer-events: auto; }
+.diff-bar {
+  height: 8px; border-radius: 4px;
+  background: linear-gradient(to right, #3b73eb, #ffffff, #db3838);
+}
+.diff-labels {
+  display: flex; justify-content: space-between;
+  font-family: var(--mono); margin-top: 1px;
+}
+.diff-stats { margin-top: 2px; font-family: var(--mono); color: #b8c2cd; }
+.muted.error { color: var(--danger); }
+
+/* -- Job card and banner (jobcard.js) --------------------------------------- */
+/* Laid over a positioned host: a compare pane's viewport today.  The layer
+   lets every click through to the render; the card and the banner take theirs. */
+.job-layer {
+  position: absolute; inset: 0; z-index: 6; pointer-events: none;
+  display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+  padding: 8px; min-width: 0;
+}
+.job-card {
+  align-self: center; pointer-events: auto;
+  width: min(380px, 100%); padding: 7px 10px 8px;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-left: 4px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.3);
+  font-size: 12px; line-height: 1.4;
+}
+.job-card[hidden], .job-banner[hidden] { display: none; }
+.job-card.reconnecting { border-left-color: var(--warn); }
+.job-card .job-head { display: flex; align-items: center; gap: 8px; }
+.job-card .job-title {
+  flex: 1; min-width: 0; font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.job-card .job-stop {
+  flex: none; padding: 1px 10px; font: inherit; font-size: 12px;
+  color: var(--ink); background: transparent;
+  border: 1px solid var(--line); border-radius: var(--radius);
+}
+.job-card .job-stop:hover:not([aria-disabled="true"]) { border-color: var(--danger); color: var(--danger); }
+.job-card .job-stop[aria-disabled="true"] { opacity: 0.5; cursor: default; }
+/* The card's spoken twin: read by screen readers, never seen. */
+.job-announce {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}
+.job-card .job-stage { margin-top: 2px; color: var(--muted); overflow-wrap: anywhere; }
+.job-card .job-bar {
+  display: block; width: 100%; height: 8px; margin: 6px 0 3px;
+  accent-color: var(--accent);
+}
+.job-card .job-meta {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-variant-numeric: tabular-nums; color: var(--muted);
+}
+.job-card .job-retrying { color: var(--warn); font-weight: 600; text-align: right; }
+.job-card .job-retrying:empty { display: none; }
+/* The failure: solid dark red, white bold text (about 9:1), in both themes,
+   until it is dismissed. */
+.job-banner {
+  /* The text takes the pane's full width and the buttons sit under it: a
+     side-by-side column left 68 px for the words at six panes on 900 px. */
+  pointer-events: auto; max-height: 100%; overflow: auto;
+  display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+  padding: 8px 10px; border-radius: var(--radius);
+  background: #8c1c13; color: #fff; border: 1px solid #fff;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.45);
+  font-size: 12.5px; font-weight: 700; line-height: 1.4;
+}
+.job-banner .job-banner-body { min-width: 0; overflow-wrap: anywhere; }
+.job-banner .job-banner-title { font-size: 12.5px; }
+.job-banner .job-banner-message { margin-top: 2px; }
+.job-banner .job-banner-stage { margin-top: 2px; font-weight: 600; }
+/* Pinned to the bottom of the banner's own scroll box: on a small pane a long
+   message scrolls above the buttons instead of pushing them out of reach. */
+.job-banner .job-banner-actions {
+  flex: none; display: flex; flex-direction: row; gap: 6px;
+  position: sticky; bottom: 0; padding-top: 4px; background: #8c1c13;
+}
+.job-banner button {
+  padding: 2px 12px; font: inherit; font-size: 12px; font-weight: 700;
+  color: #fff; background: rgb(255 255 255 / 0.16);
+  border: 1px solid rgb(255 255 255 / 0.8); border-radius: 6px;
+}
+.job-banner button:hover { background: rgb(255 255 255 / 0.3); }
+.job-banner button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.job-banner button[hidden] { display: none; }
+
+/* Right-click context menu on rendered cells (the RenderApp menu, ported). */
+.ctx-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 190px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+}
+.ctx-title {
+  padding: 5px 10px 6px;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 3px;
+}
+/* What is under the pointer, above the menu's own items (app.js underThePointer).
+   Its rows scroll inside it: the menu's submenus are positioned outside, and a
+   scrolling menu would clip them. */
+.ctx-heading {
+  padding: 2px 10px 3px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.ctx-candidates {
+  max-height: min(36vh, 260px);
+  overflow-y: auto;
+  margin-bottom: 3px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--line);
+}
+.ctx-cand {
+  max-width: 420px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  border: 0;
+  background: none;
+  color: inherit;
+  border-radius: 5px;
+  cursor: pointer;
+  position: relative;
+}
+.ctx-item:hover { background: var(--hover); }
+.ctx-item:disabled { opacity: 0.45; cursor: default; }
+.ctx-item:disabled:hover { background: none; }
+/* A line of small print at the foot of a small menu (the Viking client question). */
+.ctx-note {
+  padding: 4px 10px 3px;
+  margin-top: 3px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+}
+.ctx-parent > .ctx-sub {
+  display: none;
+  position: absolute;
+  left: calc(100% - 4px);
+  top: -4px;
+  min-width: 180px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+.ctx-parent:hover > .ctx-sub { display: block; }
+
+/* -- Find results: tick and add ------------------------------------------- */
+.search-results li { display: flex; align-items: center; gap: 6px; }
+.search-results li input[type="checkbox"] { margin: 0; flex: none; }
+.search-results li .id { margin-left: auto; }
+.search-actions { align-items: center; gap: 6px; margin-top: 4px; }
+.search-actions .muted { flex: 1; font-size: 11px; }
+
+/* -- Cells edited in Viking since they were loaded -------------------------- */
+.icon-btn.refresh { font-size: 14px; line-height: 1; }
+.neuron-item.stale .icon-btn.refresh { color: #f0b429; }
+.stale-dot {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: #f0b429; margin-left: 4px; vertical-align: middle;
+}
+.refresh-all { text-align: center; line-height: 1; }
+
+/* -- Material and gradient editors ------------------------------------------ */
+/* The panel's 12 px (a gradient stop's row has no size of its own), and a 1.2 line height,
+   which keeps the editors about as compact as a stale button style (font 10 px, line height 1)
+   once made them by accident. */
+details.editor { margin-top: 6px; font-size: 12px; line-height: 1.2; }
+details.editor > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+details.editor[open] > summary { color: inherit; }
+.editor-fields { display: flex; flex-direction: column; gap: 2px; margin: 4px 0; }
+.editor-row { gap: 6px; align-items: center; margin-top: 4px; flex-wrap: wrap; }
+.editor-row .muted { font-size: 11px; }
+.grad-preview {
+  height: 14px; border-radius: 3px; margin: 6px 0 4px;
+  border: 1px solid rgba(255,255,255,0.12);
+}
+.grad-stop { display: grid; grid-template-columns: 1fr 64px 36px 22px; gap: 6px; align-items: center; }
+.grad-stop input[type="range"] { width: 100%; }
+.grad-stop input[type="number"] { width: 100%; }
+.grad-stop input[type="color"] { width: 36px; height: 22px; padding: 0; border: none; background: none; }
+.mat-field { display: grid; grid-template-columns: 1fr 88px 44px; gap: 6px; align-items: center; font-size: 11px; }
+.mat-field input[type="range"] { width: 100%; }
+.mat-field output { font-family: var(--mono); font-size: 11px; text-align: right; }
+.mat-field.color { grid-template-columns: 1fr 36px; }
+.mat-field input[type="color"] { width: 36px; height: 22px; padding: 0; border: none; background: none; justify-self: end; }
+.section-body .cell-material {
+  grid-column: 1 / -1; display: grid; grid-template-columns: auto minmax(0, 1fr);
+  gap: 5px 8px; align-items: center; font-size: 11px; color: var(--muted);
+}
+.cell-material select { width: 100%; min-width: 0; }
+.cell-material-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+.cell-material button { padding: 1px 6px; font-size: 11px; white-space: nowrap; }
+
+
+/* -- Analyses: the linked-neurons report ----------------------------------- */
+.card.wide { grid-column: 1 / -1; }
+.report-tools {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 8px;
+}
+.report-tools .field { margin: 0; }
+.report-tools input[type="search"] { width: 14ch; }
+.report-tools .actions { margin-top: 0; }
+.report-scroll { max-height: 60vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+table.report th { cursor: pointer; user-select: none; }
+/* Every heading sorts; say so before the first click. */
+table.report th[aria-sort="none"]::after { content: " ↕"; color: var(--muted); opacity: 0.5; }
+table.report th.text, table.report td.text { text-align: left; }
+/* Postsynapses whose Viking tags do not say what they are. */
+table.report tr.untagged td { color: var(--warn); }
+table.report tr.inferred td { font-style: italic; }
+.tag-flag { color: var(--warn); }
+table.report th[aria-sort="ascending"]::after { content: " ▲"; color: var(--accent); }
+table.report th[aria-sort="descending"]::after { content: " ▼"; color: var(--accent); }
+.report-details { margin-top: 10px; }
+.report-details summary { cursor: pointer; }
+.report-details .report-scroll { max-height: 40vh; margin-top: 6px; }
+
+/* -- Connectivity tab (Graffinity) ------------------------------------------ */
+.cx-query {
+  flex: none; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.cx-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.cx-row .field { margin: 0; }
+.cx-patterns { gap: 4px; font-size: 12px; }
+.cx-node-input, .cx-edge-input {
+  font: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--bg); color: var(--ink); width: 15ch;
+}
+.cx-edge-input { width: 13ch; font-family: var(--mono); }
+.cx-anchor-input { border-color: var(--accent); }
+.cx-arrow { color: var(--muted); }
+.cx-chip {
+  display: inline-block; padding: 3px 8px; border-radius: 12px; font-size: 12px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--ink);
+}
+.cx-advanced { display: inline-flex; align-items: center; gap: 10px; font-size: 12px; }
+.cx-advanced summary { cursor: pointer; }
+.cx-advanced[open] summary { margin-right: 4px; }
+.cx-advanced input[type="number"] { width: 9ch; }
+.cx-body { flex: 1; min-height: 0; display: flex; }
+.cx-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.cx-matrix-pane { flex: 3; border-right: 1px solid var(--line); }
+.cx-nodes-pane { flex: 2; }
+.cx-pane-head {
+  flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px;
+  padding: 6px 12px; background: var(--panel); border-bottom: 1px solid var(--line); font-size: 12px;
+}
+.cx-pane-head h3 { margin: 0; font-size: 13px; }
+.cx-pane-head .field { margin: 0; }
+.cx-scroll { flex: 1; min-height: 0; overflow: auto; padding: 8px 12px; }
+.cx-paths-pane { flex: none; display: flex; flex-direction: column; max-height: 30%; border-top: 1px solid var(--line); }
+.cx-paths-pane .cx-scroll { min-height: 60px; }
+table.cx-matrix { width: auto; font-family: var(--mono); font-size: 11px; border-collapse: separate; border-spacing: 1px; }
+table.cx-matrix th, table.cx-matrix td { border: none; padding: 0; }
+table.cx-matrix th.cx-corner {
+  position: sticky; top: 0; left: 0; z-index: 3; background: var(--panel); text-align: left;
+  vertical-align: bottom; padding: 2px 6px; font-weight: 400;
+}
+.cx-axis { color: var(--muted); font-size: 11px; white-space: nowrap; }
+table.cx-matrix th.cx-col {
+  position: sticky; top: 0; z-index: 2; background: var(--panel);
+  vertical-align: bottom; height: 120px; max-width: 24px; padding: 4px 2px;
+}
+table.cx-matrix th.cx-col .cx-head {
+  writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 4px; max-height: 112px; overflow: hidden;
+  font-weight: 400;
+}
+table.cx-matrix th.cx-col.cx-total { max-width: none; }
+table.cx-matrix th.cx-row {
+  position: sticky; left: 0; z-index: 1; background: var(--panel); text-align: left;
+  padding: 0 8px 0 4px; white-space: nowrap; font-weight: 400; max-width: 220px; overflow: hidden;
+}
+.cx-head { display: inline-flex; align-items: center; gap: 4px; }
+.cx-label { color: var(--muted); font-family: system-ui, sans-serif; overflow: hidden; text-overflow: ellipsis; }
+table.cx-matrix td.cx-cell {
+  width: 24px; min-width: 24px; height: 22px; text-align: center; vertical-align: middle;
+  background: color-mix(in srgb, var(--line) 45%, transparent); border-radius: 2px;
+  font-size: 10px; cursor: default;
+}
+table.cx-matrix td.cx-cell.cx-total { background: none; color: var(--muted); }
+table.cx-matrix td.cx-cell[title] { cursor: pointer; }
+table.cx-matrix td.cx-cell.linked { outline: 2px solid #f0a04b; outline-offset: -2px; }
+table.cx-matrix td.cx-cell.selected { outline: 2px solid var(--accent); outline-offset: -2px; }
+table.cx-matrix tr.cx-child th.cx-row { padding-left: 18px; }
+table.cx-matrix tr.cx-group th.cx-row, table.cx-matrix th.cx-col.cx-group { font-weight: 600; }
+table.cx-matrix tbody tr:hover { background: none; }
+table.cx-matrix tbody tr:hover th.cx-row { background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+.cx-toggle {
+  font: inherit; font-size: 10px; line-height: 1; padding: 1px 3px; border: none; background: none;
+  color: var(--accent); cursor: pointer;
+}
+.cx-id {
+  font: inherit; font-family: var(--mono); font-size: 11px; padding: 0 4px; border: none;
+  border-radius: 3px; background: none; color: var(--accent); cursor: pointer;
+}
+.cx-id:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); text-decoration: underline; }
+/* connectivity.js sets --cx-steps (how many) on each legend; the width of one is here. */
+.cx-legend { --cx-step: 44px; margin-top: 10px; font-size: 11px; }
+.cx-legend-title { font-weight: 600; margin-bottom: 3px; }
+.cx-legend-swatches { display: flex; }
+.cx-legend-swatch { display: inline-block; width: var(--cx-step); height: 12px; border-right: 1px solid var(--panel); }
+.cx-legend-swatch:last-child { border-right: none; }
+.cx-legend-ticks { position: relative; height: 14px; width: calc(var(--cx-steps, 1) * var(--cx-step)); }
+.cx-legend-tick { position: absolute; top: 1px; transform: translateX(-50%); color: var(--muted); font-family: var(--mono); }
+.cx-legend-tick.first { transform: none; }
+.cx-legend-tick.last { transform: translateX(-100%); }
+.cx-path {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; padding: 3px 0;
+  border-bottom: 1px solid var(--line); font-size: 12px;
+}
+.cx-path-node { display: inline-flex; align-items: center; gap: 4px; }
+.cx-path-edge {
+  font: inherit; font-family: var(--mono); font-size: 11px; border: none; background: none;
+  cursor: pointer; padding: 0 2px;
+}
+.cx-path-edge:hover { text-decoration: underline; }
+.cx-links { flex-basis: 100%; font-family: var(--mono); font-size: 11px; padding: 2px 0 2px 12px; }
+
+
+/* -- Network tab: legend and hover readout ---------------------------------- */
+.net-legend {
+  flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px;
+  padding: 6px 12px; background: var(--panel); border-top: 1px solid var(--line); font-size: 12px;
+}
+.net-type { display: inline-flex; align-items: center; gap: 4px; margin: 0; }
+.net-type .swatch { display: inline-block; width: 16px; height: 4px; border-radius: 2px; }
+.net-hover { font-family: var(--mono); }
+
+/* -- Connectivity: pinned links and the grouped path list ------------------- */
+table.cx-matrix td.cx-cell.selected.linked { outline-color: var(--accent); }
+table.cx-pathlist { width: auto; font-family: var(--mono); font-size: 11px; border-collapse: collapse; }
+table.cx-pathlist th, table.cx-pathlist td { padding: 3px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: top; }
+table.cx-pathlist th.text, table.cx-pathlist td.text { text-align: left; }
+table.cx-pathlist th { position: static; background: none; }
+table.cx-pathlist td.cx-freq { color: var(--accent); }
+.cx-sequence { display: flex; align-items: center; gap: 0; }
+.cx-box {
+  display: inline-flex; flex-direction: column; align-items: center; padding: 2px 6px;
+  border: 1px solid var(--line); border-radius: 4px; background: var(--bg); line-height: 1.2;
+}
+.cx-box .cx-id { padding: 0; }
+.cx-box-label { color: var(--muted); font-family: system-ui, sans-serif; font-size: 10px; max-width: 12ch; overflow: hidden; text-overflow: ellipsis; }
+.cx-link-line { display: inline-block; width: 14px; height: 1px; background: var(--muted); }
+tr.cx-group-detail > td { padding: 0 8px 6px 28px; }
+table.cx-edgetable { width: auto; font-family: var(--mono); font-size: 11px; border-collapse: collapse; }
+table.cx-edgetable th, table.cx-edgetable td { padding: 2px 10px 2px 0; border: none; text-align: left; white-space: nowrap; vertical-align: top; }
+table.cx-edgetable th { position: static; background: none; color: var(--muted); font-weight: 600; }
+table.cx-edgetable td.cx-links { color: var(--muted); padding-left: 0; }
+
+/* -- Skeleton check (skeletoncheck.js) ------------------------------------ */
+.section-body .skel-check { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 3px; }
+.skel-check .note { margin: 2px 0; }
+.skel-check .skel-facts { font-family: var(--mono); font-size: 11px; }
+.skel-check .skel-facts.error { color: var(--danger); }
+.skel-step { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+.skel-step button { padding: 1px 8px; }
+.skel-where { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.skel-kind, .skel-row {
+  display: block; width: 100%; text-align: left; background: none; border: 0;
+  color: var(--ink); font: inherit; font-size: 12px; padding: 3px 4px; cursor: pointer;
+  border-radius: 4px; white-space: normal;
+}
+.skel-kind { font-weight: 500; border-top: 1px solid var(--line); border-radius: 0; margin-top: 2px; }
+.skel-row { padding-left: 18px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.skel-kind:hover, .skel-row:hover { background: var(--hover); color: var(--ink); }
+.skel-row.current { color: var(--ink); background: var(--hover); box-shadow: inset 2px 0 0 var(--accent); }
+.skel-detail { padding: 2px 4px 6px 18px; font-size: 11px; color: var(--muted); }
+.skel-detail p { margin: 0 0 4px; }
+
+/* -- Annotators of a cell (annotators.js) --------------------------------- */
+/* A floating panel, not a sidebar section: it is opened from the render
+   window's context menu, at the pointer, and closes when the focus leaves. */
+.annot-pop {
+  position: fixed;
+  z-index: 61;                          /* above .ctx-menu, which it replaces */
+  max-width: min(680px, calc(100vw - 16px));
+  max-height: min(70vh, 640px);
+  overflow: auto;
+  padding: 0 0 6px;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+}
+.annot-pop:focus { outline: none; }
+.annot-head {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.annot-title { font-weight: 600; flex: 1; }
+.annot-copy { padding: 1px 10px; }
+.annot-shut {
+  padding: 1px 7px;
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+.annot-shut:hover { color: var(--ink); }
+.annot-body { padding: 6px 8px 0; }
+.annot-body .note { color: var(--muted); font-size: 11px; margin: 5px 0 0; }
+.annot-body .note.error { color: var(--danger); }
+table.annot-table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 11px; }
+table.annot-table th, table.annot-table td {
+  padding: 2px 10px 2px 0;
+  text-align: right;
+  white-space: nowrap;
+  border: 0;
+}
+table.annot-table th { color: var(--muted); font-weight: 600; text-align: right; }
+table.annot-table th:first-child, table.annot-table td.annot-name { text-align: left; }
+table.annot-table tbody tr:nth-child(odd) { background: color-mix(in srgb, var(--ink) 4%, transparent); }
+
+/* -- Position shift ---------------------------------------------------------
+   The cell panel's section, the chip over the viewport and the Render compare
+   strip.  Added at the end of the file: nothing above is changed. */
+.pick-shift { white-space: nowrap; }
+.shift-chip {
+  /* Centered by auto margins, not left: 50%: a shrink-to-fit box starting at the
+     middle of the viewport has only half of it to grow into and wraps at once. */
+  position: absolute; left: 12px; right: 12px; bottom: 40px;
+  width: fit-content; max-width: calc(100% - 24px); margin: 0 auto; box-sizing: border-box;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
+  gap: 4px 10px; padding: 5px 12px; border-radius: 14px;
+  background: rgb(0 0 0 / 0.62); color: #fff; font-size: 12px;
+  font-variant-numeric: tabular-nums; text-align: center;
+}
+.shift-chip[hidden] { display: none; }
+/* The colorbar (IPL depth colors) is 34px tall at the bottom edge: sit above it. */
+#colorbar:not([hidden]) ~ .shift-chip { bottom: 58px; }
+#viewport.inverted .shift-chip { background: rgb(255 255 255 / 0.82); color: #16191d; }
+.shift-chip-steps { display: inline-flex; align-items: center; gap: 6px; }
+.shift-chip-steps[hidden] { display: none; }
+.shift-chip-steps input[type="range"] { width: min(240px, 36vw); margin: 0; }
+.shift-chip button {
+  padding: 1px 8px; font-size: 11px; background: transparent; color: inherit;
+  border-color: rgb(127 127 127 / 0.55);
+}
+.shift-chip button:hover:not(:disabled) { border-color: var(--accent); }
+.shift-scale .slider-label { flex-wrap: nowrap; }
+.shift-fit { flex: none; padding: 0 7px; font-size: 11px; }
+.shift-fit:disabled { opacity: 0.45; cursor: default; }
+.section-body .shift-chart { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.shift-chart canvas { display: block; width: 100%; touch-action: none; cursor: crosshair; }
+.shift-chart-axis {
+  display: flex; justify-content: space-between;
+  font: 10px/1.2 var(--mono); color: var(--muted);
+}
+.section-body .shift-chips { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; }
+.shift-chips:empty { display: none; }
+.shift-chip-btn { padding: 1px 7px; font: 10.5px/1.4 var(--mono); }
+.section-body .shift-looks { grid-column: 1 / -1; display: flex; gap: 6px; }
+/* The Render compare strip: one wrapping row of the settings every pane shares. */
+.compare-shifts { gap: 6px 12px; font-size: 12px; }
+.compare-shifts[hidden] { display: none; }
+.compare-shifts .shift-strip-title { font-size: 12px; }
+.compare-shifts select, .compare-shifts input[type="number"] { font-size: 12px; padding: 2px 4px; }
+.compare-shifts .shift-num { width: 64px; }
+.compare-shifts .shift-num.narrow { width: 48px; }
+.compare-shifts .shift-num.wide { width: 104px; }
+.compare-shifts .shift-stepper { display: inline-flex; align-items: center; gap: 6px; }
+.compare-shifts .shift-stepper[hidden] { display: none; }
+.compare-shifts .shift-stepper input[type="range"] { width: 160px; margin: 0; }
+.compare-shifts button { padding: 1px 8px; font-size: 11px; }
+.compare-shifts .shift-facts { white-space: normal; }
+
+/* -- in-page dropdown list (selectpicker.js) ------------------------------- */
+/* The list that stands in for the browser's own select popup.  Both themes
+   follow prefers-color-scheme through the tokens; there is no manual toggle. */
+.sel-pop {
+  position: fixed; z-index: 59;   /* over .menu-pop and the context menu, under .help-pop (60) so a row's help shows */
+  box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain;
+  max-width: min(420px, calc(100vw - 16px));
+  padding: 3px; line-height: 1.35;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.35);
+}
+.sel-opt, .sel-head {
+  position: relative; padding: 4px 24px 4px 8px; border-radius: 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: default;
+}
+/* The tint alone is 1.23:1 (light) and 1.30:1 (dark) against the panel, below
+   the 3:1 non-text minimum; the 2 px bar is 4.5:1 and 5.9:1. */
+.sel-opt.active { background: color-mix(in srgb, var(--accent) 16%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+.sel-opt[aria-selected="true"]::after { content: "\2713"; position: absolute; right: 7px; color: var(--accent); }
+.sel-opt[aria-disabled="true"] { color: var(--muted); }
+.sel-head { font-size: .85em; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); padding-top: 6px; }
+.sel-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+select[aria-expanded="true"] { border-color: var(--accent); }
+@media (forced-colors: active) {
+  .sel-opt.active { background: Highlight; color: HighlightText; forced-color-adjust: none; }
+}
+
+/* -- Drawings in the hover help (helpfigures.js) ----------------------------
+   A figure sits above the words of a help pop and spans its columns.  Its
+   colors are the page's tokens, so it follows the theme; a mini viewport is
+   the render's dark ground in both. */
+.help-pop .help-fig { column-span: all; margin: 2px 0 8px; white-space: normal; }
+/* A render option's movie (helpmovies.js): real renders at a sweep of its values. */
+.help-pop .help-movie { column-span: all; margin: 2px 0 9px; white-space: normal; max-width: 340px; }
+.help-movie .hm-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; margin-bottom: 4px; }
+.help-movie .hm-title { font-weight: 600; }
+.help-movie .hm-view { color: var(--muted); font-size: 11px; text-align: right; }
+.help-movie .hm-stage { position: relative; width: 100%; border-radius: 5px; overflow: hidden; background: var(--viewport); }
+.help-movie .hm-stage .hm-frame { position: absolute; inset: 0; background-repeat: no-repeat; }
+.help-movie .hm-value {
+  position: absolute; left: 6px; top: 6px; padding: 1px 6px; border-radius: 4px;
+  background: rgb(0 0 0 / 0.55); color: #e8edf2; font-size: 11px; font-variant-numeric: tabular-nums;
+}
+.help-movie .hm-scale { display: flex; justify-content: space-between; gap: 4px; margin-top: 5px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.help-movie .hm-tick { padding: 0 3px; border-radius: 3px; border-bottom: 2px solid transparent; }
+.help-movie .hm-tick.on { color: var(--ink); border-bottom-color: var(--accent); }
+.help-movie .hm-tick.now::after, .help-movie .hm-thumb-label.now::after { content: " ●"; color: var(--accent); }
+.help-movie .hm-ends { display: flex; justify-content: space-between; gap: 10px; margin-top: 3px; font-size: 11px; color: var(--muted); line-height: 1.35; }
+.help-movie .hm-more { text-align: right; }
+.help-movie .hm-numbers { margin-top: 3px; font-size: 11px; color: var(--ink); font-variant-numeric: tabular-nums; }
+.help-movie .hm-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.help-movie .hm-thumb .hm-frame { width: 100%; border-radius: 3px; background-repeat: no-repeat; background-color: var(--viewport); }
+.help-movie .hm-thumb-label { font-size: 10.5px; color: var(--muted); text-align: center; }
+/* A chip's facts end with a URL or a server's message: it breaks rather than runs out of the box. */
+.help-pop { overflow-wrap: anywhere; }
+.help-fig svg { display: block; width: 100%; max-width: 316px; height: auto; margin: 0 auto; overflow: visible; }
+.help-fig text { font: 10px/1 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.help-fig .hf-label { fill: var(--ink); }
+.help-fig .hf-strong { font-weight: 600; }
+.help-fig .hf-small { fill: var(--muted); font-size: 9.5px; }
+.help-fig .hf-vp-label { fill: #cfd6de; }
+.help-fig .hf-vp { fill: var(--viewport); }
+.help-fig .hf-ink { stroke: var(--ink); stroke-width: 1.5; fill: none; }
+.help-fig .hf-ink-thin { stroke: var(--ink); stroke-width: 1.2; fill: none; }
+.help-fig .hf-ink-fill { fill: var(--ink); stroke: none; }
+.help-fig .hf-line { stroke: var(--line); stroke-width: 1; fill: none; }
+.help-fig .hf-line-dash { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 4 3; fill: none; }
+.help-fig .hf-muted { stroke: var(--muted); stroke-width: 1.2; fill: none; }
+.help-fig .hf-muted-thin { stroke: var(--muted); stroke-width: 0.8; fill: none; }
+.help-fig .hf-muted-dash { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 3 3; fill: none; }
+.help-fig .hf-accent { stroke: var(--accent); fill: none; }
+.help-fig .hf-accent-fill { fill: var(--accent); stroke: none; }
+.help-fig .hf-accent-dash { stroke: var(--accent); stroke-width: 1.4; stroke-dasharray: 5 3; fill: none; }
+.help-fig .hf-ring { stroke: var(--ink); stroke-width: 1.4; fill: var(--panel); }
+.help-fig .hf-dot { fill: var(--accent); stroke: none; }
+
+/* -- Status chips (Registration, Position shift) ------------------------------
+   What a switch did, as a word or a count beside it; the facts are its hover. */
+/* The switch's words and its chip flow as one line of text, so in a narrow
+   sidebar the chip follows the last word instead of squeezing the label into a
+   column of one word a line. */
+.section-body .switch-row { grid-column: 1 / -1; display: block; min-width: 0; margin: 1px 0; line-height: 20px; }
+.switch-row > label.check { display: inline; margin: 0; }
+.switch-row > label.check > input { margin: 0 6px 0 0; vertical-align: -2px; }
+.status-chip {
+  display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: 0; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px;
+  font: 10.5px/16px var(--mono); color: var(--muted); cursor: help;
+}
+.switch-row > .status-chip { margin-left: 6px; }
+.status-chip.warn {
+  /* --warn is 4.3:1 on its own tint in the light theme; this is 5.3:1. */
+  color: #8a4f05; border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  .status-chip.warn { color: var(--warn); }
+}
+.compare-shifts .status-chip { max-width: 40ch; }
+
+/* -- The Position shift legend (shiftlegend.js) --------------------------------
+   Over the render, like the chip: bottom right, above the chip's row so the two
+   never meet, and above the IPL colorbar when that is shown.  Click-through. */
+.shift-legend {
+  position: absolute; right: 12px; bottom: 76px; z-index: 2;
+  display: flex; flex-direction: column; gap: 6px;
+  width: 176px; padding: 6px 8px 5px; border-radius: 8px;
+  background: rgb(0 0 0 / 0.58); color: #e8eaed;
+  font-size: 11px; line-height: 1.3; pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+#colorbar:not([hidden]) ~ .shift-legend { bottom: 94px; }
+#viewport.inverted .shift-legend { background: rgb(255 255 255 / 0.84); color: #16191d; }
+.compare-viewport .shift-legend { top: 8px; bottom: auto; right: 8px; width: 160px; z-index: 5; }
+.shift-legend-block { display: flex; flex-direction: column; gap: 4px; }
+.shift-legend-block + .shift-legend-block { border-top: 1px solid rgb(127 127 127 / 0.4); padding-top: 5px; }
+.shift-legend-head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.shift-legend-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shift-legend-badge { margin-left: auto; font-family: var(--mono); font-weight: 600; flex: none; }
+.shift-legend-sub { font-size: 10px; opacity: 0.82; margin-top: -3px; }
+.shift-legend-ramp { height: 8px; border-radius: 3px; }
+.shift-legend-ticks { position: relative; height: 12px; margin-top: -2px; font: 9.5px/12px var(--mono); }
+.shift-legend-ticks span { position: absolute; top: 0; white-space: nowrap; }
+.shift-legend-wheel-row { display: flex; align-items: center; gap: 8px; }
+/* The direction wheel: a conic gradient (shiftlegend.js) with a hole in it. */
+.shift-legend-wheel {
+  width: 44px; height: 44px; flex: none; border-radius: 50%;
+  -webkit-mask: radial-gradient(circle, transparent 0 33%, #000 35%);
+  mask: radial-gradient(circle, transparent 0 33%, #000 35%);
+}
+.shift-legend-axes { font: 9.5px/1.4 var(--mono); white-space: pre; }
+.shift-legend-swatch {
+  width: 14px; height: 14px; border-radius: 3px; flex: none; border: 1px solid rgb(127 127 127 / 0.5);
+}
+
+/* -- a size typed or picked (renderform.js, `numchoice`: the Voxel size) ---- */
+/* The box takes a typed size; the narrow list beside it holds the named sizes
+   (in the page on Windows and Linux, selectpicker.js), showing only its arrow. */
+.field .numchoice { display: inline-flex; align-items: center; gap: 3px; flex: none; }
+.field .numchoice input {
+  flex: none; width: 62px; min-width: 0; font-variant-numeric: tabular-nums;
+}
+.field .numchoice select.numchoice-menu {
+  flex: none; width: 24px; min-width: 0; padding-left: 0; padding-right: 0;
+  /* Only a chevron, drawn here: the select's own text and arrow would be its
+     current option's label squeezed into 24 px (and on macOS its arrow takes the
+     text's color). */
+  appearance: none; -webkit-appearance: none; color: transparent; cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+                    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(50% - 2.5px) 55%, calc(50% + 2.5px) 55%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+.field .numchoice select.numchoice-menu:hover,
+.field .numchoice select.numchoice-menu:focus-visible { border-color: var(--accent); }
+.field .numchoice select.numchoice-menu option { color: var(--ink); background: var(--panel); }
+.numchoice-unit { color: var(--muted); font-size: 11.5px; }
+.field .numchoice input.invalid {
+  border-color: var(--danger); box-shadow: 0 0 0 1px var(--danger);
+}
+/* The render strips size every select to its widest option (#panel-render .field select). */
+#panel-render .field .numchoice select.numchoice-menu,
+#panel-compare-options .field .numchoice select.numchoice-menu { width: 24px; }

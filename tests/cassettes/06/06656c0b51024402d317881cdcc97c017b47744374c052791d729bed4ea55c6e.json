@@ -1,0 +1,1 @@
+{"url": "https://websvc.codepharm.net/NeitzInferiorMonkey/OData/Structures(7161)/LocationLinks/?$select=A,B", "data": {"@odata.context": "https://websvc.codepharm.net/NeitzInferiorMonkey/OData/$metadata#Structures(7161)/LocationLinks(A,B)", "value": [{"A": 176264, "B": 176265}, {"A": 176265, "B": 176266}]}}

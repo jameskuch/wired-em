@@ -1,0 +1,370 @@
+{
+ "cell": "c1178 (i, Inferior Monkey)",
+ "how": "two builds that differ only in `option` (a, b), the other options as in `extra`; `acts` is whether the two surfaces differ (sha256 of the vertices and faces)",
+ "rows": [
+  {
+   "method": "cylinder",
+   "pathway": "ultraliser",
+   "option": "smooth_iterations",
+   "a": 1,
+   "b": 6,
+   "extra": {},
+   "faces": [
+    400000,
+    400000
+   ],
+   "acts": false
+  },
+  {
+   "method": "cylinder",
+   "pathway": "ultraliser",
+   "option": "post_order",
+   "a": "smooth_first",
+   "b": "decimate_first",
+   "extra": {
+    "reduce_fraction": 0.1
+   },
+   "faces": [
+    84944,
+    84944
+   ],
+   "acts": false
+  },
+  {
+   "method": "cylinder",
+   "pathway": "ultraliser",
+   "option": "reduce_fraction",
+   "a": 1.0,
+   "b": 0.1,
+   "extra": {},
+   "faces": [
+    400000,
+    84944
+   ],
+   "acts": true
+  },
+  {
+   "method": "cylinder",
+   "pathway": "ultraliser",
+   "option": "voxel_smooth_um",
+   "a": 0.5,
+   "b": 1.5,
+   "extra": {},
+   "faces": [
+    400000,
+    400000
+   ],
+   "acts": true
+  },
+  {
+   "method": "cylinder",
+   "pathway": "ultraliser",
+   "option": "tie_um",
+   "a": 0.0,
+   "b": 20.0,
+   "extra": {},
+   "faces": [
+    400000,
+    400000
+   ],
+   "acts": true
+  },
+  {
+   "method": "cylinder",
+   "pathway": "voxel2",
+   "option": "smooth_iterations",
+   "a": 1,
+   "b": 6,
+   "extra": {},
+   "faces": [
+    400000,
+    400000
+   ],
+   "acts": true
+  },
+  {
+   "method": "cylinder",
+   "pathway": "voxel2",
+   "option": "post_order",
+   "a": "smooth_first",
+   "b": "decimate_first",
+   "extra": {
+    "reduce_fraction": 0.1
+   },
+   "faces": [
+    84882,
+    84882
+   ],
+   "acts": true
+  },
+  {
+   "method": "cylinder",
+   "pathway": "wrap",
+   "option": "voxel_smooth_um",
+   "a": 0.5,
+   "b": 1.5,
+   "extra": {},
+   "faces": [
+    306938,
+    322690
+   ],
+   "acts": true
+  },
+  {
+   "method": "cylinder",
+   "pathway": "wrap",
+   "option": "ring_arc_um",
+   "a": 0.35,
+   "b": 0.7,
+   "extra": {},
+   "faces": [
+    306938,
+    196392
+   ],
+   "acts": true
+  },
+  {
+   "method": "cylinder",
+   "pathway": "convolution",
+   "option": "tie_um",
+   "a": 0.0,
+   "b": 20.0,
+   "extra": {},
+   "faces": [
+    213320,
+    214856
+   ],
+   "acts": true
+  },
+  {
+   "method": "cylinder",
+   "pathway": "convolution",
+   "option": "voxel_smooth_um",
+   "a": 0.5,
+   "b": 1.5,
+   "extra": {},
+   "faces": [
+    214856,
+    214856
+   ],
+   "acts": false
+  },
+  {
+   "method": "hybrid",
+   "pathway": "ultraliser",
+   "option": "smooth_iterations",
+   "a": 1,
+   "b": 6,
+   "extra": {
+    "pixel_size_um": 0.25
+   },
+   "faces": [
+    519644,
+    519644
+   ],
+   "acts": false
+  },
+  {
+   "method": "hybrid",
+   "pathway": "voxel",
+   "option": "smooth_iterations",
+   "a": 1,
+   "b": 6,
+   "extra": {
+    "pixel_size_um": 0.25
+   },
+   "faces": [
+    316848,
+    316848
+   ],
+   "acts": true
+  },
+  {
+   "method": "curvemesh",
+   "pathway": "original",
+   "option": "smooth_iterations",
+   "a": 1,
+   "b": 5,
+   "extra": {},
+   "faces": [
+    77328,
+    77328
+   ],
+   "acts": false
+  },
+  {
+   "method": "curvemesh",
+   "pathway": "adaptive_taubin",
+   "option": "smooth_iterations",
+   "a": 1,
+   "b": 5,
+   "extra": {},
+   "faces": [
+    123614,
+    123614
+   ],
+   "acts": true
+  },
+  {
+   "method": "curvemesh",
+   "pathway": "voxel",
+   "option": "smooth_iterations",
+   "a": 1,
+   "b": 5,
+   "extra": {},
+   "faces": [
+    110916,
+    110916
+   ],
+   "acts": true
+  },
+  {
+   "method": "curvemesh",
+   "pathway": "wrap",
+   "option": "smooth_iterations",
+   "a": 1,
+   "b": 5,
+   "extra": {},
+   "faces": [
+    107050,
+    107050
+   ],
+   "acts": true
+  },
+  {
+   "method": "closedcurve",
+   "pathway": "original",
+   "option": "curve_avg_discs",
+   "a": 0.0,
+   "b": 1.0,
+   "extra": {
+    "pixel_size_um": 0.25
+   },
+   "faces": [
+    291646,
+    282856
+   ],
+   "acts": true
+  },
+  {
+   "method": "closedcurve",
+   "pathway": "original",
+   "option": "curve_avg_paths",
+   "a": 0.0,
+   "b": 0.5,
+   "extra": {
+    "pixel_size_um": 0.25
+   },
+   "faces": [
+    291646,
+    287190
+   ],
+   "acts": true
+  },
+  {
+   "method": "hybrid",
+   "pathway": "voxel",
+   "option": "curve_avg_discs",
+   "a": 0.0,
+   "b": 1.0,
+   "extra": {
+    "pixel_size_um": 0.25
+   },
+   "faces": [
+    316848,
+    315604
+   ],
+   "acts": true
+  },
+  {
+   "method": "hybrid",
+   "pathway": "voxel",
+   "option": "curve_avg_paths",
+   "a": 0.0,
+   "b": 0.5,
+   "extra": {
+    "pixel_size_um": 0.25
+   },
+   "faces": [
+    316848,
+    311440
+   ],
+   "acts": true
+  },
+  {
+   "method": "closedcurve",
+   "pathway": "original",
+   "option": "curve_links_um",
+   "a": 0.0,
+   "b": 1.0,
+   "extra": {
+    "pixel_size_um": 0.25
+   },
+   "faces": [
+    291646,
+    291844
+   ],
+   "acts": true
+  },
+  {
+   "method": "closedcurve",
+   "pathway": "original",
+   "option": "curve_tie_um",
+   "a": 0.0,
+   "b": 5.0,
+   "extra": {
+    "pixel_size_um": 0.25
+   },
+   "faces": [
+    291646,
+    305728
+   ],
+   "acts": true
+  },
+  {
+   "method": "closedcurve",
+   "pathway": "original",
+   "option": "curve_link_bridge_um",
+   "a": 5.0,
+   "b": 1.5,
+   "extra": {
+    "pixel_size_um": 0.25
+   },
+   "faces": [
+    291646,
+    287530
+   ],
+   "acts": true
+  },
+  {
+   "method": "hybrid",
+   "pathway": "voxel",
+   "option": "curve_links_um",
+   "a": 0.0,
+   "b": 1.0,
+   "extra": {
+    "pixel_size_um": 0.25
+   },
+   "faces": [
+    316848,
+    316848
+   ],
+   "acts": false
+  },
+  {
+   "method": "hybrid",
+   "pathway": "voxel",
+   "option": "curve_tie_um",
+   "a": 0.0,
+   "b": 5.0,
+   "extra": {
+    "pixel_size_um": 0.25
+   },
+   "faces": [
+    316848,
+    316848
+   ],
+   "acts": false
+  }
+ ]
+}

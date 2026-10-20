@@ -1,0 +1,1315 @@
+{
+ "conv_support": {
+  "key": "conv_support",
+  "variant": null,
+  "image": "conv_support.webp",
+  "frames": 4,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, the soma from the side",
+  "label": "Kernel R/d",
+  "values": [
+   1.2,
+   1.6,
+   2.0,
+   2.5
+  ],
+  "labels": [
+   "1.2",
+   "1.6",
+   "2",
+   "2.5"
+  ],
+  "faces": [
+   379012,
+   230428,
+   168884,
+   119184
+  ],
+  "seconds": [
+   4.1,
+   3.5,
+   3.4,
+   3.3
+  ],
+  "deviation_um": [
+   0.205,
+   0.193,
+   0.203,
+   0.308
+  ],
+  "less": "crisp, close to the annotations",
+  "more": "blended junctions; the soma shrinks",
+  "technique": "Cylinder, Convolution surface"
+ },
+ "curve_avg_discs": {
+  "key": "curve_avg_discs",
+  "variant": null,
+  "image": "curve_avg_discs.webp",
+  "frames": 4,
+  "width": 316,
+  "height": 178,
+  "view": "Inferior c1178, the process leaving the soma's left end",
+  "label": "Smooth discs ×r",
+  "values": [
+   0.0,
+   0.5,
+   1.0,
+   2.0
+  ],
+  "labels": [
+   "0",
+   "0.5",
+   "1",
+   "2"
+  ],
+  "faces": [
+   829988,
+   829988,
+   829988,
+   829988
+  ],
+  "seconds": [
+   6.8,
+   7.0,
+   7.2,
+   7.1
+  ],
+  "deviation_um": [
+   0.154,
+   0.145,
+   0.145,
+   0.147
+  ],
+  "less": "the union of every annotated wobble",
+  "more": "tubes through the discs, moved toward their neighbors",
+  "technique": "Hybrid, Voxel remesh"
+ },
+ "curve_avg_discs@closedcurve": {
+  "key": "curve_avg_discs",
+  "variant": "closedcurve",
+  "image": "curve_avg_discs_closedcurve.webp",
+  "frames": 4,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, the soma from the side",
+  "label": "Smooth discs ×r",
+  "values": [
+   0.0,
+   0.5,
+   1.0,
+   2.0
+  ],
+  "labels": [
+   "0",
+   "0.5",
+   "1",
+   "2"
+  ],
+  "faces": [
+   349288,
+   295808,
+   290164,
+   287446
+  ],
+  "seconds": [
+   2.1,
+   2.6,
+   2.6,
+   2.5
+  ],
+  "deviation_um": [
+   0.075,
+   0.09,
+   0.124,
+   0.146
+  ],
+  "less": "the stack of plates, as drawn",
+  "more": "the discs moved: the staircase averaged out",
+  "technique": "Closed curve"
+ },
+ "curve_avg_paths": {
+  "key": "curve_avg_paths",
+  "variant": null,
+  "image": "curve_avg_paths.webp",
+  "frames": 5,
+  "width": 316,
+  "height": 178,
+  "view": "Inferior c1178, the soma from the side",
+  "label": "Smooth outlines µm",
+  "values": [
+   0.0,
+   0.1,
+   0.25,
+   0.5,
+   1.0
+  ],
+  "labels": [
+   "0",
+   "0.1",
+   "0.25",
+   "0.5",
+   "1"
+  ],
+  "faces": [
+   1106248,
+   1096516,
+   1084232,
+   1079556,
+   1072876
+  ],
+  "seconds": [
+   4.4,
+   5.1,
+   5.7,
+   5.6,
+   5.6
+  ],
+  "deviation_um": [
+   0.076,
+   0.079,
+   0.087,
+   0.1,
+   0.13
+  ],
+  "less": "the traced outlines' staircase",
+  "more": "the outlines moved along their chain: smoothed",
+  "technique": "Closed curve"
+ },
+ "curve_links_um": {
+  "key": "curve_links_um",
+  "variant": null,
+  "image": "curve_links_um.webp",
+  "frames": 3,
+  "width": 316,
+  "height": 178,
+  "view": "Inferior c1178, two links across 22 untraced sections, from above",
+  "label": "Curve links µm",
+  "values": [
+   0.0,
+   1.0,
+   3.0
+  ],
+  "labels": [
+   "0 (straight)",
+   "1",
+   "3"
+  ],
+  "faces": [
+   1106248,
+   1107208,
+   1106864
+  ],
+  "seconds": [
+   4.4,
+   4.6,
+   4.4
+  ],
+  "deviation_um": [
+   0.076,
+   0.076,
+   0.076
+  ],
+  "less": "a straight band from disc to disc",
+  "more": "long links curve through the chain",
+  "technique": "Closed curve"
+ },
+ "curve_tie_um": {
+  "key": "curve_tie_um",
+  "variant": null,
+  "image": "curve_tie_um.webp",
+  "frames": 3,
+  "width": 316,
+  "height": 178,
+  "view": "Inferior c1178, two dendrites the Voxel size breaks",
+  "label": "Join bodies µm",
+  "values": [
+   0.0,
+   1.0,
+   5.0
+  ],
+  "labels": [
+   "0",
+   "1",
+   "5"
+  ],
+  "faces": [
+   291646,
+   298428,
+   305728
+  ],
+  "seconds": [
+   1.7,
+   2.1,
+   2.2
+  ],
+  "deviation_um": [
+   0.105,
+   0.105,
+   0.1
+  ],
+  "less": "separate bodies stay apart",
+  "more": "bodies this close are joined",
+  "technique": "Closed curve"
+ },
+ "exact_tube_deg": {
+  "key": "exact_tube_deg",
+  "variant": null,
+  "image": "exact_tube_deg.webp",
+  "frames": 3,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, a branch point",
+  "label": "Exact tubes °",
+  "values": [
+   0.0,
+   35.0,
+   50.0
+  ],
+  "labels": [
+   "0 (round cones)",
+   "35°",
+   "50°"
+  ],
+  "faces": [
+   400000,
+   400000,
+   400000
+  ],
+  "seconds": [
+   6.0,
+   5.5,
+   5.6
+  ],
+  "deviation_um": [
+   0.106,
+   0.104,
+   0.096
+  ],
+  "less": "round cones: the outer edge of every wobble",
+  "more": "steep stretches exact to each disc, with a ring at each section",
+  "technique": "Cylinder, Voxel remesh"
+ },
+ "meshlab": {
+  "key": "meshlab",
+  "variant": null,
+  "image": "meshlab.webp",
+  "frames": 4,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, a branch point",
+  "label": "MeshLab",
+  "values": [
+   "none",
+   "isotropic",
+   "qem",
+   "poisson"
+  ],
+  "labels": [
+   "none",
+   "isotropic",
+   "quadric",
+   "Poisson"
+  ],
+  "faces": [
+   400000,
+   49981,
+   100000,
+   340856
+  ],
+  "seconds": [
+   5.7,
+   27.9,
+   11.4,
+   16.3
+  ],
+  "deviation_um": [
+   0.106,
+   0.118,
+   0.115,
+   0.108
+  ],
+  "less": "the technique's own triangles",
+  "more": "a new surface fitted to the vertices",
+  "technique": "Cylinder, Voxel remesh"
+ },
+ "meshlab_edge_um": {
+  "key": "meshlab_edge_um",
+  "variant": null,
+  "image": "meshlab_edge_um.webp",
+  "frames": 3,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, a branch point",
+  "label": "Edge µm",
+  "values": [
+   0.1,
+   0.25,
+   0.5
+  ],
+  "labels": [
+   "0.1",
+   "0.25",
+   "0.5"
+  ],
+  "faces": [
+   219815,
+   49981,
+   22287
+  ],
+  "seconds": [
+   25.0,
+   26.9,
+   27.8
+  ],
+  "deviation_um": [
+   0.108,
+   0.118,
+   0.123
+  ],
+  "less": "short edges: many triangles",
+  "more": "long edges: few triangles",
+  "technique": "Cylinder, Voxel remesh"
+ },
+ "meshlab_fraction": {
+  "key": "meshlab_fraction",
+  "variant": null,
+  "image": "meshlab_fraction.webp",
+  "frames": 3,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, a branch point",
+  "label": "Keep",
+  "values": [
+   0.05,
+   0.25,
+   0.6
+  ],
+  "labels": [
+   "5%",
+   "25%",
+   "60%"
+  ],
+  "faces": [
+   20000,
+   100000,
+   240000
+  ],
+  "seconds": [
+   11.6,
+   10.9,
+   9.5
+  ],
+  "deviation_um": [
+   0.127,
+   0.115,
+   0.109
+  ],
+  "less": "few triangles kept",
+  "more": "most triangles kept",
+  "technique": "Cylinder, Voxel remesh"
+ },
+ "method": {
+  "key": "method",
+  "variant": null,
+  "image": "method.webp",
+  "frames": 4,
+  "width": 316,
+  "height": 178,
+  "view": "Inferior c1178, the soma's top: traced outlines below, discs above",
+  "label": "Method",
+  "values": [
+   "cylinder",
+   "curvemesh",
+   "closedcurve",
+   "hybrid"
+  ],
+  "labels": [
+   "Cylinder",
+   "Tube",
+   "Closed curve",
+   "Hybrid"
+  ],
+  "faces": [
+   400000,
+   400000,
+   1106248,
+   829988
+  ],
+  "seconds": [
+   5.3,
+   5.1,
+   4.2,
+   6.1
+  ],
+  "deviation_um": [
+   0.672,
+   0.672,
+   0.076,
+   0.154
+  ],
+  "less": "the discs alone (outlines read as discs of their stored radius)",
+  "more": "the traced outlines and the discs, one surface",
+  "technique": "Cylinder, Voxel remesh"
+ },
+ "pathway": {
+  "key": "pathway",
+  "variant": null,
+  "image": "pathway.webp",
+  "frames": 7,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, the soma from the side",
+  "label": "Pathway",
+  "values": [
+   "original",
+   "adaptive_taubin",
+   "voxel",
+   "voxel2",
+   "convolution",
+   "ultraliser",
+   "wrap"
+  ],
+  "labels": [
+   "Original",
+   "Adaptive",
+   "Voxel orig",
+   "Voxel remesh",
+   "Convolution",
+   "Ultraliser",
+   "Wrap"
+  ],
+  "faces": [
+   168360,
+   384056,
+   166828,
+   400000,
+   168884,
+   400000,
+   163320
+  ],
+  "seconds": [
+   3.4,
+   3.5,
+   5.7,
+   5.6,
+   3.2,
+   6.5,
+   6.7
+  ],
+  "deviation_um": [
+   0.148,
+   0.106,
+   0.095,
+   0.106,
+   0.203,
+   0.106,
+   0.144
+  ],
+  "less": "MATLAB's fixed rings: a faceted soma",
+  "more": "its cube fit over the tubes",
+  "technique": "Cylinder"
+ },
+ "pixel_size_um": {
+  "key": "pixel_size_um",
+  "variant": null,
+  "image": "pixel_size_um.webp",
+  "frames": 5,
+  "width": 316,
+  "height": 178,
+  "view": "Inferior c1178, the soma from the side",
+  "label": "Voxel",
+  "values": [
+   1.0,
+   0.5,
+   0.25,
+   0.1,
+   0.05
+  ],
+  "labels": [
+   "1",
+   "0.5",
+   "0.25",
+   "0.1",
+   "0.05"
+  ],
+  "faces": [
+   38216,
+   130436,
+   305728,
+   1106248,
+   3371608
+  ],
+  "seconds": [
+   1.1,
+   1.7,
+   2.2,
+   4.3,
+   10.5
+  ],
+  "deviation_um": [
+   2.023,
+   0.215,
+   0.1,
+   0.076,
+   0.066
+  ],
+  "less": "a coarse raster: blocky, fast",
+  "more": "a fine raster: section-by-section detail",
+  "technique": "Closed curve"
+ },
+ "post_order": {
+  "key": "post_order",
+  "variant": null,
+  "image": "post_order.webp",
+  "frames": 2,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, a branch point",
+  "label": "Order",
+  "values": [
+   "smooth_first",
+   "decimate_first"
+  ],
+  "labels": [
+   "smooth → decimate",
+   "decimate → smooth"
+  ],
+  "faces": [
+   288714,
+   288714
+  ],
+  "seconds": [
+   6.1,
+   5.5
+  ],
+  "deviation_um": [
+   0.107,
+   0.108
+  ],
+  "less": "smoothing on the full mesh",
+  "more": "cheaper, coarser facets",
+  "technique": "Cylinder, Voxel remesh"
+ },
+ "reduce_fraction": {
+  "key": "reduce_fraction",
+  "variant": null,
+  "image": "reduce_fraction.webp",
+  "frames": 4,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, a branch point",
+  "label": "Decimate",
+  "values": [
+   1.0,
+   0.3,
+   0.1,
+   0.03
+  ],
+  "labels": [
+   "100%",
+   "30%",
+   "10%",
+   "3%"
+  ],
+  "faces": [
+   400000,
+   288714,
+   96238,
+   28872
+  ],
+  "seconds": [
+   6.2,
+   5.9,
+   5.9,
+   6.1
+  ],
+  "deviation_um": [
+   0.106,
+   0.107,
+   0.114,
+   0.123
+  ],
+  "less": "every triangle",
+  "more": "fewer, larger triangles; the shape holds until ~10%",
+  "technique": "Cylinder, Voxel remesh"
+ },
+ "ring_arc_um": {
+  "key": "ring_arc_um",
+  "variant": null,
+  "image": "ring_arc_um.webp",
+  "frames": 4,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, a thin dendrite",
+  "label": "Ring detail",
+  "values": [
+   0.1,
+   0.35,
+   0.8,
+   1.5
+  ],
+  "labels": [
+   "0.1",
+   "0.35",
+   "0.8",
+   "1.5"
+  ],
+  "faces": [
+   700084,
+   384056,
+   227794,
+   174860
+  ],
+  "seconds": [
+   4.0,
+   3.7,
+   3.5,
+   3.5
+  ],
+  "deviation_um": [
+   0.099,
+   0.106,
+   0.112,
+   0.116
+  ],
+  "less": "many points per ring: fine facets",
+  "more": "few points per ring: coarse facets",
+  "technique": "Cylinder, Adaptive ring + Taubin"
+ },
+ "smooth_iterations": {
+  "key": "smooth_iterations",
+  "variant": null,
+  "image": "smooth_iterations.webp",
+  "frames": 5,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, a thin dendrite",
+  "label": "Passes",
+  "values": [
+   0,
+   1,
+   2,
+   5,
+   10
+  ],
+  "labels": [
+   "0",
+   "1",
+   "2",
+   "5",
+   "10"
+  ],
+  "faces": [
+   400000,
+   400000,
+   400000,
+   400000,
+   400000
+  ],
+  "seconds": [
+   5.1,
+   5.5,
+   5.8,
+   5.9,
+   6.0
+  ],
+  "deviation_um": [
+   0.107,
+   0.106,
+   0.106,
+   0.106,
+   0.106
+  ],
+  "less": "the contour as marched",
+  "more": "smoother facets; Taubin keeps the volume",
+  "technique": "Cylinder, Voxel remesh"
+ },
+ "surface_smooth_um": {
+  "key": "surface_smooth_um",
+  "variant": null,
+  "image": "surface_smooth_um.webp",
+  "frames": 5,
+  "width": 316,
+  "height": 178,
+  "view": "Inferior c1178, 3 µm of the soma's traced wall, close up",
+  "label": "Smooth surface µm",
+  "values": [
+   0.0,
+   0.1,
+   0.25,
+   0.5,
+   1.0
+  ],
+  "labels": [
+   "0",
+   "0.1",
+   "0.25",
+   "0.5",
+   "1"
+  ],
+  "faces": [
+   1106248,
+   1106248,
+   1106248,
+   1106248,
+   1106248
+  ],
+  "seconds": [
+   4.5,
+   8.0,
+   8.3,
+   8.7,
+   9.0
+  ],
+  "deviation_um": [
+   0.076,
+   0.076,
+   0.075,
+   0.076,
+   0.076
+  ],
+  "less": "the surface as the method drew it: a pixel-wide grain",
+  "more": "the grain smoothed, the traced steps kept; from ~0.65 µm at this Voxel, no further",
+  "technique": "Closed curve"
+ },
+ "tie_um": {
+  "key": "tie_um",
+  "variant": null,
+  "image": "tie_um.webp",
+  "frames": 3,
+  "width": 316,
+  "height": 178,
+  "view": "Inferior c1178, the gap between two pieces Viking never linked",
+  "label": "Tie gaps ≤",
+  "values": [
+   0.0,
+   0.5,
+   20.0
+  ],
+  "labels": [
+   "0",
+   "0.5",
+   "20"
+  ],
+  "faces": [
+   829988,
+   829988,
+   829988
+  ],
+  "seconds": [
+   6.6,
+   6.6,
+   6.5
+  ],
+  "deviation_um": [
+   0.154,
+   0.154,
+   0.154
+  ],
+  "less": "pieces Viking never linked stay apart",
+  "more": "gaps up to this wide are tied",
+  "technique": "Hybrid, Voxel remesh"
+ },
+ "ultra_inflate": {
+  "key": "ultra_inflate",
+  "variant": null,
+  "image": "ultra_inflate.webp",
+  "frames": 3,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, a thin dendrite",
+  "label": "Inflate",
+  "values": [
+   0.0,
+   0.52,
+   1.0
+  ],
+  "labels": [
+   "0",
+   "0.52",
+   "1"
+  ],
+  "faces": [
+   400000,
+   400000,
+   400000
+  ],
+  "seconds": [
+   6.2,
+   6.9,
+   7.0
+  ],
+  "deviation_um": [
+   0.104,
+   0.106,
+   0.103
+  ],
+  "less": "plain Laplacian: thin parts shrink",
+  "more": "past Smooth λ the re-inflation roughens it",
+  "technique": "Cylinder, Ultraliser"
+ },
+ "ultra_lambda": {
+  "key": "ultra_lambda",
+  "variant": null,
+  "image": "ultra_lambda.webp",
+  "frames": 3,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, a thin dendrite",
+  "label": "Smooth λ",
+  "values": [
+   0.3,
+   0.5,
+   0.9
+  ],
+  "labels": [
+   "0.3",
+   "0.5",
+   "0.9"
+  ],
+  "faces": [
+   400000,
+   400000,
+   400000
+  ],
+  "seconds": [
+   7.0,
+   6.7,
+   6.6
+  ],
+  "deviation_um": [
+   0.103,
+   0.106,
+   0.104
+  ],
+  "less": "under Inflate the re-inflation wins: rough",
+  "more": "large steps: smooth, thin parts shrink",
+  "technique": "Cylinder, Ultraliser"
+ },
+ "ultra_smooth": {
+  "key": "ultra_smooth",
+  "variant": null,
+  "image": "ultra_smooth.webp",
+  "frames": 4,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, a thin dendrite",
+  "label": "Smoothing",
+  "values": [
+   0,
+   5,
+   15,
+   40
+  ],
+  "labels": [
+   "0",
+   "5",
+   "15",
+   "40"
+  ],
+  "faces": [
+   400000,
+   400000,
+   400000,
+   400000
+  ],
+  "seconds": [
+   5.3,
+   6.2,
+   6.8,
+   8.6
+  ],
+  "deviation_um": [
+   0.105,
+   0.107,
+   0.106,
+   0.107
+  ],
+  "less": "the binary grid's staircase",
+  "more": "smooth; thin parts shrink unless Inflate keeps up",
+  "technique": "Cylinder, Ultraliser"
+ },
+ "ultra_soma": {
+  "key": "ultra_soma",
+  "variant": null,
+  "image": "ultra_soma.webp",
+  "frames": 2,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, the soma from the side",
+  "label": "Soma proxy",
+  "values": [
+   "discs",
+   "sphere"
+  ],
+  "labels": [
+   "discs",
+   "sphere"
+  ],
+  "faces": [
+   400000,
+   400000
+  ],
+  "seconds": [
+   6.8,
+   7.2
+  ],
+  "deviation_um": [
+   0.106,
+   0.328
+  ],
+  "less": "our disc-loft soma",
+  "more": "a ball of the soma's mean radius",
+  "technique": "Cylinder, Ultraliser"
+ },
+ "voxel2_blend_um": {
+  "key": "voxel2_blend_um",
+  "variant": null,
+  "image": "voxel2_blend_um.webp",
+  "frames": 4,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, a branch point",
+  "label": "Junction fillet",
+  "values": [
+   0.0,
+   0.2,
+   0.4,
+   0.8
+  ],
+  "labels": [
+   "0",
+   "0.2",
+   "0.4",
+   "0.8"
+  ],
+  "faces": [
+   400000,
+   400000,
+   400000,
+   295608
+  ],
+  "seconds": [
+   5.8,
+   8.0,
+   5.8,
+   4.5
+  ],
+  "deviation_um": [
+   0.106,
+   0.11,
+   0.122,
+   0.171
+  ],
+  "less": "an exact crease where branches meet",
+  "more": "a rounded fillet, the way tissue joins",
+  "technique": "Cylinder, Voxel remesh"
+ },
+ "voxel2_faces": {
+  "key": "voxel2_faces",
+  "variant": null,
+  "image": "voxel2_faces.webp",
+  "frames": 5,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, a branch point",
+  "label": "Face cap",
+  "values": [
+   25000,
+   60000,
+   150000,
+   400000,
+   0
+  ],
+  "labels": [
+   "25 k",
+   "60 k",
+   "150 k",
+   "400 k",
+   "no cap"
+  ],
+  "faces": [
+   25000,
+   60000,
+   150000,
+   400000,
+   1684640
+  ],
+  "seconds": [
+   3.2,
+   3.2,
+   3.1,
+   6.0,
+   9.9
+  ],
+  "deviation_um": [
+   0.125,
+   0.118,
+   0.111,
+   0.106,
+   0.102
+  ],
+  "less": "few triangles, kept where the shape bends",
+  "more": "every triangle the grid made",
+  "technique": "Cylinder, Voxel remesh"
+ },
+ "voxel2_um": {
+  "key": "voxel2_um",
+  "variant": null,
+  "image": "voxel2_um.webp",
+  "frames": 5,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, a thin dendrite",
+  "label": "Fine voxel",
+  "values": [
+   0.3,
+   0.2,
+   0.12,
+   0.08,
+   0.0
+  ],
+  "labels": [
+   "0.3",
+   "0.2",
+   "0.12",
+   "0.08",
+   "auto"
+  ],
+  "faces": [
+   31406,
+   72150,
+   186322,
+   400000,
+   400000
+  ],
+  "seconds": [
+   1.3,
+   1.4,
+   1.6,
+   2.7,
+   5.8
+  ],
+  "deviation_um": [
+   0.138,
+   0.128,
+   0.11,
+   0.106,
+   0.106
+  ],
+  "less": "a coarse grid: thin processes go lumpy",
+  "more": "a fine grid follows the thinnest discs",
+  "technique": "Cylinder, Voxel remesh"
+ },
+ "voxel_smooth_um": {
+  "key": "voxel_smooth_um",
+  "variant": null,
+  "image": "voxel_smooth_um.webp",
+  "frames": 5,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, the soma from the side",
+  "label": "Envelope σ",
+  "values": [
+   0.0,
+   0.25,
+   0.5,
+   1.0,
+   2.0
+  ],
+  "labels": [
+   "0",
+   "0.25",
+   "0.5",
+   "1",
+   "2"
+  ],
+  "faces": [
+   400000,
+   400000,
+   400000,
+   400000,
+   400000
+  ],
+  "seconds": [
+   6.6,
+   6.0,
+   5.8,
+   5.8,
+   6.1
+  ],
+  "deviation_um": [
+   0.166,
+   0.102,
+   0.106,
+   0.112,
+   0.135
+  ],
+  "less": "the literal disc stack: terraces",
+  "more": "a smooth envelope; past 1 µm features soften",
+  "technique": "Cylinder, Voxel remesh"
+ },
+ "wrap_blend": {
+  "key": "wrap_blend",
+  "variant": null,
+  "image": "wrap_blend.webp",
+  "frames": 4,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, the soma from the side",
+  "label": "Blend",
+  "values": [
+   1.2,
+   2.0,
+   4.0,
+   6.0
+  ],
+  "labels": [
+   "1.2",
+   "2",
+   "4",
+   "6"
+  ],
+  "faces": [
+   162768,
+   163320,
+   166676,
+   167626
+  ],
+  "seconds": [
+   6.7,
+   6.9,
+   7.9,
+   9.5
+  ],
+  "deviation_um": [
+   0.125,
+   0.144,
+   0.196,
+   0.248
+  ],
+  "less": "each cube looks close by",
+  "more": "each cube looks far: smoother",
+  "technique": "Cylinder, Wrap"
+ },
+ "wrap_passes": {
+  "key": "wrap_passes",
+  "variant": null,
+  "image": "wrap_passes.webp",
+  "frames": 3,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, the soma from the side",
+  "label": "Refits",
+  "values": [
+   0,
+   2,
+   6
+  ],
+  "labels": [
+   "0",
+   "2",
+   "6"
+  ],
+  "faces": [
+   163236,
+   163320,
+   163480
+  ],
+  "seconds": [
+   6.5,
+   6.7,
+   7.1
+  ],
+  "deviation_um": [
+   0.143,
+   0.144,
+   0.147
+  ],
+  "less": "no outlier rejection",
+  "more": "many reject-and-refit rounds",
+  "technique": "Cylinder, Wrap"
+ },
+ "wrap_reject_sigma": {
+  "key": "wrap_reject_sigma",
+  "variant": null,
+  "image": "wrap_reject_sigma.webp",
+  "frames": 3,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, the soma from the side",
+  "label": "Reject σ",
+  "values": [
+   0.5,
+   2.0,
+   6.0
+  ],
+  "labels": [
+   "0.5",
+   "2",
+   "6"
+  ],
+  "faces": [
+   163376,
+   163320,
+   163240
+  ],
+  "seconds": [
+   6.8,
+   6.9,
+   6.8
+  ],
+  "deviation_um": [
+   0.146,
+   0.144,
+   0.144
+  ],
+  "less": "outliers cut hard",
+  "more": "outliers kept",
+  "technique": "Cylinder, Wrap"
+ },
+ "wrap_spacing_um": {
+  "key": "wrap_spacing_um",
+  "variant": null,
+  "image": "wrap_spacing_um.webp",
+  "frames": 4,
+  "width": 316,
+  "height": 178,
+  "view": "Temporal c118, the soma from the side",
+  "label": "Cube size",
+  "values": [
+   0.15,
+   0.4,
+   1.0,
+   2.0
+  ],
+  "labels": [
+   "0.15",
+   "0.4",
+   "1",
+   "2"
+  ],
+  "faces": [
+   216550,
+   163320,
+   157440,
+   156536
+  ],
+  "seconds": [
+   8.7,
+   6.8,
+   6.5,
+   6.6
+  ],
+  "deviation_um": [
+   0.119,
+   0.144,
+   0.133,
+   0.167
+  ],
+  "less": "small cubes follow fine shape",
+  "more": "large cubes: a coarse wrap",
+  "technique": "Cylinder, Wrap"
+ }
+}

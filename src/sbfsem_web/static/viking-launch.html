@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<!--
+  The tab "Open in Viking" opens.  It exists to answer two questions the
+  identity server's launch page cannot, because by then the browser has left
+  our origin:
+
+  1. Is this Windows?  Viking is a Windows program; on macOS or Linux the
+     viking:// hand-off can only fail silently, so the launch is not attempted.
+  2. Did Viking start?  No browser API says whether a scheme has a handler, but
+     a launch takes the focus away from this page -- Chrome's "Open Viking?"
+     dialog does, and so does Viking's own window.  A page that still has the
+     focus after some seconds was handed viking:// and nothing happened, which
+     on Windows means the client is not installed.  The notice withdraws itself
+     if the focus goes later, so a slow first start is not called an absence.
+
+  Once the link has gone to Viking the tab closes itself, and the render it was
+  opened from is in front again (see done() below for when, and why not sooner).
+
+  Two programs answer to a link: the signed Viking (viking://) and the unsigned
+  "Viking Test" that installs beside it (viking-test://).  The page is told
+  which to try first and, when it can, the other: if the first leaves the page
+  focused for the whole wait, the message that nothing is installed comes with
+  a button for the other one (a machine with only the test build has no handler
+  for viking://, and that silence is how it is found).  It is a button because
+  Chrome refuses a launch a script starts seconds after the page loaded ("a
+  user gesture is required"; measured, Chrome for Testing 148): only the first
+  launch, made as the page loads, and a click are allowed.  What each launch
+  saw is kept (static/js/vikingclient.js), so the next click knows.  The message
+  that nothing is installed is the same either way.
+
+  Filled in by sbfsem_web/app.py: __SBFSEM_TARGET__ (the viking://open link, or
+  the identity server's CreateCode URL in launch mode "code"; the viking-test://
+  link when __SBFSEM_CLIENT__ is "test", whose name is __SBFSEM_CLIENT_NAME__),
+  __SBFSEM_THEN__ (the other program to try after it, with its name
+  __SBFSEM_THEN_NAME__ and link __SBFSEM_THEN_TARGET__; all empty for none),
+  __SBFSEM_WHERE__, __SBFSEM_INSTALL__, __SBFSEM_INSTALL_TEXT__.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Opening Viking</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f6f7f9; --panel: #fff; --ink: #16191d; --muted: #6b7280; --line: #dfe3e8; --accent: #2f6fed; --danger: #c0392b; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #16191d; --panel: #1e2227; --ink: #e8eaed; --muted: #9aa3ad; --line: #2e343b; --accent: #6b9bff; }
+  }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--ink);
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+  }
+  main {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 20px 22px; max-width: 34rem; width: 100%;
+  }
+  h1 { font-size: 17px; margin: 0 0 6px; }
+  p { margin: 8px 0 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+  a { color: var(--accent); }
+  .hide { display: none; }
+  button {
+    font: inherit; font-size: 13px; padding: 2px 10px;
+    background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  /* The two things this page exists to say, said so they cannot be missed:
+     red, a swell, and back to gray in under two and a half seconds.  The
+     same treatment as the render window's status line (app.css). */
+  @keyframes flare {
+    0%   { transform: scale(1);                        color: var(--danger); }
+    20%  { transform: scale(var(--flare-peak, 1.28));  color: var(--danger); }
+    45%  { transform: scale(1);                        color: var(--danger); }
+    70%  { transform: scale(1);                        color: var(--danger); }
+    100% { transform: scale(1);                        color: var(--muted); }
+  }
+  @keyframes flare-still {
+    0%, 70% { color: var(--danger); }
+    100%    { color: var(--muted); }
+  }
+  /* No `display` here: both things that flare are already blocks, and a
+     transform does not apply to a plain inline element. */
+  .flare { animation: flare 2.4s ease-out both; transform-origin: left center; }
+  /* The address gets a line of its own, so the button cannot be run over
+     while it swells, and a smaller swell, so 64 characters stay in the card. */
+  .url { display: block; margin: 6px 0 2px; word-break: break-all; --flare-peak: 1.1; }
+  @media (prefers-reduced-motion: reduce) { .flare { animation-name: flare-still; } }
+</style>
+</head>
+<body>
+<main id="main" data-target="__SBFSEM_TARGET__" data-install="__SBFSEM_INSTALL__"
+      data-client="__SBFSEM_CLIENT__" data-client-name="__SBFSEM_CLIENT_NAME__"
+      data-then="__SBFSEM_THEN__" data-then-name="__SBFSEM_THEN_NAME__"
+      data-then-target="__SBFSEM_THEN_TARGET__">
+  <h1 id="head">Starting __SBFSEM_CLIENT_NAME__…</h1>
+  <p id="where" class="muted">__SBFSEM_WHERE__</p>
+  <p id="says" class="muted">The browser may ask before it starts __SBFSEM_CLIENT_NAME__. This tab then closes
+    itself; the render you came from is untouched.</p>
+  <p id="install" class="hide">Install it from here:
+    <a id="installLink" class="url" href="__SBFSEM_INSTALL__">__SBFSEM_INSTALL_TEXT__</a>
+    <button id="copy" type="button">Copy address</button></p>
+  <p id="other" class="muted hide">Have <span id="otherName">__SBFSEM_THEN_NAME__</span> instead?
+    <button id="tryOther" type="button">Open in __SBFSEM_THEN_NAME__</button></p>
+  <p id="slow" class="muted hide">If Viking is installed and simply slow to start, this notice
+    clears as soon as it opens. <a id="again" href="#">Try again</a></p>
+  <noscript>
+    <p>This page needs JavaScript to hand the link to Viking.
+      <a href="__SBFSEM_TARGET__">Continue to the launch page</a>.</p>
+  </noscript>
+</main>
+<script>
+(function () {
+  var main = document.getElementById('main');
+  var target = main.dataset.target;
+  // The program the link above is for, and the one to try if nothing answers it.
+  var current = { id: main.dataset.client, name: main.dataset.clientName };
+  var fallback = main.dataset.then && main.dataset.thenTarget
+    ? { id: main.dataset.then, name: main.dataset.thenName, target: main.dataset.thenTarget } : null;
+  var head = document.getElementById('head');
+  var says = document.getElementById('says');
+  var install = document.getElementById('install');
+  var installLink = document.getElementById('installLink');
+  var copy = document.getElementById('copy');
+  var slow = document.getElementById('slow');
+  var other = document.getElementById('other');
+
+  /** Draw the eye to one element and let it settle (the .flare rules). */
+  function flare(el) {
+    el.classList.remove('flare');
+    void el.offsetWidth;                                // restart the animation
+    el.classList.add('flare');
+  }
+
+  // Wired up before the platform check below returns: the buttons belong to
+  // the page, not to one outcome of it, and a listener added after an early
+  // return is a listener that is never added (the Copy button did nothing on
+  // macOS, where the check returns first -- found 2026-09-22).
+  copy.addEventListener('click', function () {
+    var said = function (text) {
+      copy.textContent = text;
+      setTimeout(function () { copy.textContent = 'Copy address'; }, 2500);
+    };
+    // No clipboard (an old browser, a refused permission): select the address
+    // instead, so the keyboard shortcut still takes it.
+    var byHand = function () {
+      try {
+        var range = document.createRange();
+        range.selectNodeContents(installLink);
+        var chosen = window.getSelection();
+        chosen.removeAllRanges();
+        chosen.addRange(range);
+        said('Selected — press Ctrl-C');
+      } catch (error) {
+        said('Copy it by hand');
+      }
+    };
+    try {
+      navigator.clipboard.writeText(main.dataset.install).then(function () {
+        said('Copied');
+      }, byHand);
+    } catch (error) {
+      byHand();
+    }
+  });
+
+  document.getElementById('again').addEventListener('click', function (event) {
+    event.preventDefault();
+    location.reload();
+  });
+
+  // What each launch saw is kept for the next click (static/js/vikingclient.js).  The
+  // module loads beside the launch and never holds it up: without it (or without
+  // storage) the page launches as it always did and only forgets.
+  var memory = null;
+  var unreported = [];
+  function report(id, handled) {
+    if (!memory) { unreported.push([id, handled]); return; }
+    try { memory.recordFromLaunch(window.localStorage, id, handled); } catch (error) { /* not kept */ }
+  }
+  function loadMemory() {
+    try {
+      import('/static/js/vikingclient.js').then(function (loaded) {
+        memory = loaded;
+        unreported.splice(0).forEach(function (entry) { report(entry[0], entry[1]); });
+      }, function () { /* the launch does not need it */ });
+    } catch (error) { /* a browser without dynamic import: the same */ }
+  }
+
+  /** Windows is the only platform the Viking client runs on. */
+  function onWindows() {
+    var data = navigator.userAgentData;                 // Chromium; exact
+    if (data && typeof data.platform === 'string' && data.platform) {
+      return /^windows$/i.test(data.platform);
+    }
+    var text = (navigator.platform || '') + ' ' + (navigator.userAgent || '');
+    return /Win(dows NT|dows|32|64|CE)/i.test(text) && !/Windows Phone/i.test(text);
+  }
+
+  if (!onWindows()) {
+    flare(head);
+    head.textContent = 'Viking client can only be run on Windows.';
+    says.textContent = 'Nothing was opened. Viking is a Windows program; this browser is not '
+      + 'running on Windows, so the viking:// link has nothing to hand it to. The annotations '
+      + 'themselves are all here in SBFSEM-tools.';
+    document.title = 'Viking runs on Windows only';
+    return;
+  }
+
+  // The launch.  An external-protocol redirect leaves this document in place,
+  // so the watch below outlives it; a browser with no session at the identity
+  // server is shown their sign-in page instead and this page goes away.
+  var away = false;
+  var leaving = false;
+  var reported = false;
+  function gone() {
+    // The first time the focus leaves is the answer: this program has a handler.
+    // (Later blurs, the page being hidden and unloaded, say nothing new.)
+    if (!reported) { reported = true; report(current.id, true); }
+    away = true;
+    // What is actually known: the link went to the operating system and the
+    // focus left.  Whether Viking's window is up is not ours to claim.
+    head.textContent = 'Handed to ' + current.name + '.';
+    says.textContent = 'The link went to the operating system and the focus left this page. '
+      + 'This tab closes itself when you come back to it.';
+    install.className = 'hide';
+    slow.className = 'muted hide';
+    document.title = 'Handed to ' + current.name;
+  }
+
+  // Close this tab, and the render it was opened from is in front again -- but
+  // only once the link has gone out.  The browser's "Open Viking?" question
+  // belongs to this tab, and closing the tab while it is asked cancels the
+  // launch, so a lost focus alone proves nothing.  Two things do:
+  //   - the focus comes back after it left: the question was answered (the
+  //     launch goes out before the focus returns), or Viking had the focus and
+  //     the user came back to the browser;
+  //   - the page is hidden while it is still the page: Viking's window covers
+  //     the browser, or the user turned to another tab.
+  // A tab the render opened may close itself; one opened by hand, with history
+  // behind it, may not, and then the page says it can be closed instead.
+  function done() {
+    window.close();
+    if (!window.closed) {
+      says.textContent = 'The link went to the operating system and the focus left this page. '
+        + 'This tab can be closed.';
+    }
+  }
+  window.addEventListener('blur', gone);
+  window.addEventListener('focus', function () { if (away) done(); });
+  window.addEventListener('pagehide', function () { leaving = true; gone(); });
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) return;
+    gone();
+    // Hidden also comes with being replaced by the identity server's sign-in
+    // page, which must stay open (Firefox 156: pagehide, then hidden; a close
+    // made right here closed the sign-in tab).  `leaving` is set by then, and a
+    // task queued during an unload never runs, whichever order a browser uses.
+    setTimeout(function () { if (!leaving && document.hidden) done(); }, 0);
+  });
+
+  // Long enough for a cold Velopack start to take the focus first: a false
+  // "not installed" is withdrawn a moment later, but it should be rare.
+  var WAIT_MS = 6000;
+
+  /** Nothing answered: the same message whichever program was tried. */
+  function notInstalled() {
+    head.textContent = 'Viking client is not installed.';
+    says.className = 'hide';
+    install.className = '';
+    slow.className = 'muted';
+    document.title = 'Viking is not installed';
+    // The address is the whole point of this state, so it flares with the
+    // heading and can be taken away without retyping it.
+    flare(head);
+    flare(installLink);
+  }
+
+  /**
+   * The other program, on a click: a launch the page starts by itself this long
+   * after it loaded is refused by Chrome, and one made in a click is not.
+   */
+  document.getElementById('tryOther').addEventListener('click', function () {
+    if (!fallback) return;
+    var next = fallback;
+    fallback = null;
+    current = { id: next.id, name: next.name };
+    reported = false;
+    away = false;
+    other.className = 'hide';
+    install.className = 'hide';
+    slow.className = 'muted hide';
+    head.textContent = 'Starting ' + current.name + '…';
+    says.className = 'muted';
+    says.textContent = 'The browser may ask before it starts ' + current.name
+      + '. This tab then closes itself; the render you came from is untouched.';
+    document.title = 'Opening ' + current.name;
+    location.replace(next.target);
+    watch();
+  });
+
+  function watch() {
+    setTimeout(function () {
+      // Still focused and never blurred: the scheme was handed over and nothing
+      // took it.  If the focus is simply elsewhere (another window), say nothing.
+      if (away || !document.hasFocus()) return;
+      report(current.id, false);
+      notInstalled();
+      if (fallback) other.className = 'muted';
+    }, WAIT_MS);
+  }
+  loadMemory();
+  watch();
+
+  setTimeout(function () { location.replace(target); }, 0);
+}());
+</script>
+</body>
+</html>

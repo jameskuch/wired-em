@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — SBFSEM-pytools</title>
+<!-- Self-contained on purpose: every other asset sits behind the login. -->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #16191d; --muted: #6b7280;
+    --line: #dfe3e8; --accent: #2f6fed; --accent-ink: #ffffff; --danger: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16191d; --panel: #1e2227; --ink: #e8eaed; --muted: #9aa3ad;
+      --line: #2e343b; --accent: #6b9bff; --accent-ink: #10131a; --danger: #ff7b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--ink);
+    display: grid; place-items: center; padding: 24px;
+  }
+  .card {
+    width: min(340px, 100%); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 24px;
+  }
+  h1 { margin: 0 0 4px; font-size: 18px; }
+  h1 span { color: var(--muted); font-weight: 400; }
+  p.sub { margin: 0 0 16px; color: var(--muted); }
+  label { display: block; margin: 12px 0 4px; color: var(--muted); }
+  input {
+    width: 100%; padding: 8px 10px; font: inherit; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button {
+    width: 100%; margin-top: 18px; padding: 9px 10px; font: inherit; font-weight: 600;
+    color: var(--accent-ink); background: var(--accent);
+    border: 0; border-radius: 6px; cursor: pointer;
+  }
+  .error { color: var(--danger); margin: 0 0 12px; }
+  .error:empty { display: none; }
+  /* The Viking button is the primary path: it is what most people should
+     click, so it comes first and carries the accent. */
+  a.viking {
+    display: block; margin-top: 4px; padding: 9px 10px; font-weight: 600;
+    text-align: center; text-decoration: none;
+    color: var(--accent-ink); background: var(--accent); border-radius: 6px;
+  }
+  a.viking:hover { filter: brightness(1.08); }
+  .viking-note { margin: 10px 0 0; color: var(--muted); font-size: 13px; }
+  /* A labelled rule, so the local form reads as the secondary option rather
+     than as a second thing to fill in. */
+  .or {
+    display: flex; align-items: center; gap: 10px;
+    margin: 20px 0 4px; color: var(--muted); font-size: 12px;
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+  .or::before, .or::after {
+    content: ""; flex: 1; height: 1px; background: var(--line);
+  }
+  fieldset { border: 0; margin: 0; padding: 0; }
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>SBFSEM<span>-pytools</span></h1>
+  <p class="sub">Sign in to continue</p>
+  <p class="error" role="alert">__ERROR__</p>
+  __VIKING__
+  <form method="post" action="/login" __LOCAL_STATE__>
+    <input type="hidden" name="next" value="__NEXT__">
+    <label for="username">Username</label>
+    <input id="username" name="username" autocomplete="username"
+           autocapitalize="none" __AUTOFOCUS__ required>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password"
+           autocomplete="current-password" required>
+    <button type="submit">Sign in</button>
+  </form>
+</main>
+</body>
+</html>

@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+message: "If you use Wired, please cite it as below, and cite the original SBFSEM-tools as its README describes."
+title: "Wired: visual tools for connectomics"
+type: software
+authors:
+  - family-names: Kuchenbecker
+    given-names: James A.
+license: MIT
+repository-code: "https://github.com/jameskuch/wired-em"
+url: "https://sbfsem-tools.com"
+keywords:
+  - connectomics
+  - electron microscopy
+  - Viking
+  - neuron morphology
+  - 3D rendering
+references:
+  - type: software
+    title: SBFSEM-tools
+    authors:
+      - family-names: Patterson
+        given-names: Sara S.
+    repository-code: "https://github.com/sarastokes/SBFSEM-tools"
+    license: MIT
+  - type: article
+    title: "An S-cone circuit for edge detection in the primate retina"
+    authors:
+      - family-names: Patterson
+        given-names: Sara S.
+      - family-names: Neitz
+        given-names: Maureen
+      - family-names: Neitz
+        given-names: Jay
+    journal: Scientific Reports
+    volume: 9
+    start: 11913
+    year: 2019

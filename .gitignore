@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+site/
+node_modules/
+.DS_Store
+
+# Claude Code settings that belong to this machine only (auto memory location, local approvals)
+.claude/settings.local.json
+.claude/worktrees/

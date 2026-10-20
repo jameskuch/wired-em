@@ -1,0 +1,137 @@
+# systemd unit for the SBFSEM-pytools web service.
+#
+# Install to /etc/systemd/system/sbfsem-web.service, then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now sbfsem-web
+#
+# One worker, deliberately. SbfsemService keeps the set of loaded neurons in
+# process memory, so a second worker would hold its own and a request routed to
+# the wrong one would 404 on a neuron the user just loaded.
+#
+# This also caps throughput at about two concurrent renders: a mesh build is
+# single-threaded and Python-loop-heavy, so threads contend on the GIL and a
+# fourth concurrent render is slower than two. Separate processes do scale --
+# measured 3.8x at four and 7.2x at eight -- so once the loaded set moves to a
+# per-session store (see docs/deployment.md, "Planning for multiple users"),
+# raise --workers to about one per vCPU and budget ~450 MB of RSS for each.
+
+[Unit]
+Description=SBFSEM-pytools web service
+Documentation=https://github.com/sarastokes/SBFSEM-tools
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=sbfsem
+Group=sbfsem
+WorkingDirectory=/srv/sbfsem/app
+
+Environment=SBFSEM_CACHE_DIR=/srv/sbfsem/cache
+Environment=SBFSEM_SAVE_DIR=/srv/sbfsem/saves
+Environment=SBFSEM_CELL_RENDER_DIR=/srv/sbfsem/cell-renders
+Environment=SBFSEM_LIBRARY_DIR=/srv/sbfsem/library
+# Every other variable the code reads (SBFSEM_LOG_LEVEL, SBFSEM_MESH_CACHE_SIZE,
+# SBFSEM_PUBLIC_URL, SBFSEM_UNTAGGED_PSD, the Viking sign-in settings ...) has a
+# working default and is listed with it in docs/deployment.md, "Environment
+# variables"; add one here, or in /etc/sbfsem/secrets.env, to change it.
+# Mesh builds, sized for the 4 vCPU / 16 GB instance (docs/vm-upgrade.md,
+# "What to change after resizing"): one worker thread and one child process
+# per vCPU, sharing SBFSEM_MESH_MEMORY_MB of estimated peak memory (~70 % of
+# RAM minus the ~800 MB idle footprint minus ~250 MB per child process).  On
+# a different box scale all of these with it -- and never redeploy these
+# numbers onto a 3.8 GB instance, where they overcommit memory.
+Environment=SBFSEM_MESH_WORKERS=4
+Environment=SBFSEM_MESH_PROCESSES=4
+Environment=SBFSEM_MESH_MEMORY_MB=9000
+# Cached renders on disk (under SBFSEM_CACHE_DIR/meshes), pruned LRU past
+# this.  64 GB of the 320 GB disk: at that size the cache effectively stops
+# evicting, and a hit costs nothing where a rebuild costs a core.
+Environment=SBFSEM_MESH_CACHE_MB=65536
+# Login is on iff users.json exists here; maintain it with
+#   sudo -u sbfsem /srv/sbfsem/venv/bin/sbfsem-users --dir /srv/sbfsem/auth add NAME
+Environment=SBFSEM_AUTH_DIR=/srv/sbfsem/auth
+# Who may use the Settings tab's server tools (clear cached renders, replace
+# the build processes, restart): built-in or Viking user names, comma-separated.
+Environment=SBFSEM_ADMIN_USERS=jkuchen
+#
+# Sign-in through the Viking Identity Server.  Off unless the file below sets
+# SBFSEM_VIKING_AUTH=1 *and* supplies the client secret, so a server that has
+# never heard of it keeps the built-in login and behaves exactly as before.
+#
+# The secret is deliberately not in this file: this file is in the repository
+# and is rsynced to the server on every deploy.  Create it by hand instead,
+# once, readable only by root (systemd reads it as PID 1, before the sandbox
+# below applies):
+#
+#   sudo install -d -m 0700 /etc/sbfsem
+#   sudo install -m 0600 /dev/null /etc/sbfsem/secrets.env
+#   sudo tee /etc/sbfsem/secrets.env >/dev/null <<'EOF'
+#   SBFSEM_VIKING_AUTH=1
+#   SBFSEM_VIKING_CLIENT_SECRET=<the secret James Anderson sent>
+#   EOF
+#   sudo systemctl restart sbfsem-web
+#
+# The leading "-" means a server without the file still starts.  Other
+# settings it may carry, all with working defaults in src/sbfsem_web/viking.py:
+#   SBFSEM_VIKING_AUTHORITY        https://identity.codepharm.net:5001/
+#   SBFSEM_VIKING_PERMISSIONS_API  https://identity.codepharm.net:6001/
+#   SBFSEM_VIKING_CLIENT_ID        sbfsem-tools
+#   SBFSEM_VIKING_REDIRECT_URI     https://sbfsem-tools.com/auth/callback
+#   SBFSEM_VIKING_GATE_VOLUMES     1  (0 signs people in without filtering)
+EnvironmentFile=-/etc/sbfsem/secrets.env
+Environment=PYTHONUNBUFFERED=1
+# Keep BLAS single-threaded: the work is already inside one uvicorn worker, and
+# letting OpenBLAS spawn a thread per core just adds contention and RSS.
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+# ProtectHome and ProtectSystem leave nowhere for matplotlib's font cache; it is
+# only imported if a colormap is requested, but an unwritable default turns that
+# into a hard failure instead of a cache miss.
+Environment=MPLCONFIGDIR=/srv/sbfsem/cache/matplotlib
+
+ExecStart=/srv/sbfsem/venv/bin/uvicorn sbfsem_web.app:app \
+    --host 127.0.0.1 \
+    --port 8765 \
+    --workers 1 \
+    --proxy-headers \
+    --forwarded-allow-ips 127.0.0.1 \
+    --timeout-keep-alive 75 \
+    --log-level info
+
+Restart=on-failure
+RestartSec=5s
+# The Settings tab's Restart (POST /api/admin/restart) ends the service with 75
+# after a normal shutdown: started again, and not counted a failure.
+RestartForceExitStatus=75
+SuccessExitStatus=75
+
+# Measured footprint: ~385 MB once the IPL boundary surfaces are fitted, ~500 MB
+# steady state after a working session, and a transient peak near 750 MB while a
+# closed-curve volume render is being built (one can reach 2.5 GB). MemoryHigh
+# throttles and reclaims before MemoryMax kills, so a runaway render degrades
+# instead of OOMing.  On the old 3.8 GB box 2G proved too tight once
+# hybrid/curve builds reached ~10^8 voxels: the service sat ABOVE MemoryHigh
+# and the kernel reclaim-stalled it at 94% memory pressure -- a 24 s build
+# crawling for half an hour at 0% CPU (measured 2026-09-01 on RC2 c1).
+# ~70 % / ~85 % of the 16 GB box; the rest is nginx, the system and page
+# cache for the OData files.
+MemoryHigh=11000M
+MemoryMax=13500M
+
+# The service only ever reads its own tree and writes the OData cache.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/sbfsem/cache /srv/sbfsem/saves /srv/sbfsem/auth /srv/sbfsem/cell-renders /srv/sbfsem/library
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
