@@ -38,7 +38,6 @@ from .api.admin import router as admin_router
 from .api.routes import router
 from .auth import COOKIE_NAME, MIN_PASSWORD_LENGTH, SESSION_TTL, AuthManager
 from .jobs import MeshJobStore
-from .json_response import SafeJSONResponse
 from .saves import MAX_FILE_BYTES, CellRenderStore, LibraryStore, SaveStore
 from .viking import SESSION_TTL as VIKING_SESSION_TTL
 from .viking import VIKING_COOKIE, VIKING_INSTALL_URL, VikingAuth, VikingError
@@ -572,7 +571,8 @@ def create_app() -> FastAPI:
             "annotations from the Viking OData service."
         ),
         lifespan=lifespan,
-        default_response_class=SafeJSONResponse,
+        # No default_response_class: one named here reaches every included route
+        # and keeps FastAPI off pydantic's encoder (SafeJSONRouter).
     )
     app.include_router(router)
     app.include_router(admin_router)

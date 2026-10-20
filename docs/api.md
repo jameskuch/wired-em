@@ -395,3 +395,9 @@ or ask for 40 or fewer at a time.
 
 Responses never contain `NaN` or `Infinity`: non-finite floats serialize as
 `null`, because `JSON.parse` rejects the alternatives.
+
+Since 2.17.8 a reply with a response model, and a finished job's poll, is
+written by pydantic's encoder. A number under 1e-4 whose exponent has one
+digit is then spelled another way (`0.00001` where 2.17.7 wrote `1e-05`,
+`1e-6` for `1e-06`); any JSON parser reads the same value. Every other byte is
+as before.

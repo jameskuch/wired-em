@@ -8,17 +8,23 @@ Most DTOs declare their float fields as ``float | None`` with a validator that
 maps non-finite values to ``None``, which is the right thing at the type level.
 This class is the backstop for everything else: raw dicts, lists of floats, and
 any field added later without a validator.
+
+A route with a ``response_model`` is written by pydantic's own encoder instead
+(:class:`SafeJSONRouter`), which sends a non-finite float as ``null`` too.
 """
 
 from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from typing import Any
 
+from fastapi import APIRouter
+from fastapi.datastructures import Default, DefaultPlaceholder
 from fastapi.responses import JSONResponse
 
-__all__ = ["EncodedJSON", "SafeJSONResponse", "sanitize"]
+__all__ = ["EncodedJSON", "SafeJSONResponse", "SafeJSONRouter", "sanitize"]
 
 
 class EncodedJSON(bytes):
@@ -52,6 +58,33 @@ class SafeJSONResponse(JSONResponse):
             return _dumps(content)
         except ValueError:
             return _dumps(sanitize(content))
+
+
+class SafeJSONRouter(APIRouter):
+    """An ``APIRouter`` whose routes answer in :class:`SafeJSONResponse` by default,
+    while a route with a ``response_model`` keeps FastAPI's Rust encoder.
+
+    FastAPI writes a model's reply in one pass with pydantic's ``dump_json`` only
+    while the route's response class is still a default (a ``DefaultPlaceholder``).
+    A class named anywhere, on the route, its router or the app (2.17.7 and before:
+    the app's ``default_response_class``), turns every such reply into
+    ``dump_python`` and then this module's ``json.dumps``, in the one server
+    process: 0.17 s of 0.63 s for c1178's 11.7 MB closed-curve mesh, 0.05 s of
+    0.11 s for its annotation wireframe, where ``dump_json`` takes 0.04 s and
+    0.008 s (2026-10-20, Mac).  So the default here stays a placeholder, of
+    :class:`SafeJSONResponse`: a model's reply is ``dump_json``'s, which writes a
+    non-finite float as ``null`` as the backstop does, and every other reply (a
+    dict, a list) still goes through the backstop.  The bytes are the same, but
+    for a number under 1e-4 with a one-digit exponent, which pydantic spells
+    ``0.00001`` or ``1e-6`` where Python writes ``1e-05`` or ``1e-06``: the same
+    value.  The app itself names no default class.
+    """
+
+    def add_api_route(self, path: str, endpoint: Callable[..., Any], **kwargs: Any) -> None:
+        response_class = kwargs.get("response_class", Default(JSONResponse))
+        if isinstance(response_class, DefaultPlaceholder) and response_class.value is JSONResponse:
+            kwargs["response_class"] = Default(SafeJSONResponse)
+        super().add_api_route(path, endpoint, **kwargs)
 
 
 def _dumps(content: Any) -> bytes:

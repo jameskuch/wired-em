@@ -39,8 +39,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, Request
+from fastapi import Body, HTTPException, Request
 from fastapi.responses import JSONResponse
+
+from ..json_response import SafeJSONRouter
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +59,7 @@ RESTART_DELAY_S = 0.5
 #: cannot leave the service stopped instead of restarted.
 RESTART_DEADLINE_S = 30.0
 
-router = APIRouter(prefix="/api")
+router = SafeJSONRouter(prefix="/api")
 
 _BODY = Body(default=None)
 

@@ -18,11 +18,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, UploadFile
+from fastapi import Body, Depends, HTTPException, Query, Request, UploadFile
 from fastapi import Path as PathParam
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter
+from pydantic_core import PydanticSerializationError
 from starlette.concurrency import run_in_threadpool
 
 from sbfsem.core.volumes import validate_source
@@ -66,7 +67,7 @@ from sbfsem.service.facade import (
 )
 
 from .. import mesh_binary
-from ..json_response import EncodedJSON, SafeJSONResponse
+from ..json_response import EncodedJSON, SafeJSONResponse, SafeJSONRouter
 from ..library import validate_library_doc
 from ..saves import MAX_CELL_ID, CellRenderStore, LibraryStore, QuotaError, SaveError, SaveStore
 
@@ -199,8 +200,8 @@ async def _cell_copy(request: Request):
         yield
 
 
-router = APIRouter(prefix="/api",
-                   dependencies=[Depends(_volume_access_guard), Depends(_cell_copy)])
+router = SafeJSONRouter(prefix="/api",
+                        dependencies=[Depends(_volume_access_guard), Depends(_cell_copy)])
 
 #: FastAPI marker, hoisted so it is not constructed in an argument default.
 _BODY = Body(...)
@@ -995,18 +996,30 @@ def _plain(value: Any) -> Any:
     return value.model_dump(mode="json", by_alias=True) if isinstance(value, BaseModel) else value
 
 
+#: Writes any value, a model nested anywhere in it included, as its model would.
+_ANY_JSON: TypeAdapter[Any] = TypeAdapter(Any)
+
+
 def _json_bytes(value: Any) -> bytes:
     """The JSON body FastAPI would have made of ``value``, minus ``jsonable_encoder``.
 
-    A pydantic model is dumped to plain JSON types first, and that goes
-    straight to the same ``JSONResponse`` (see :func:`_job_status_response`
-    for what the encoder cost).  So is a model that is a value of a dict, such
-    as a finished job's ``result``: ``JSONResponse`` refuses a model nested in
-    the dict it is given, and the fallback for that is the general encoder,
-    whose pure-Python walk over every number is what this function exists to
-    skip (724404b left it that way for every finished error map and difference,
-    2.3 to 4 times slower than the dump).
+    Written in one pass by pydantic's encoder, a model nested in a dict included
+    (a finished job's ``result``), with a non-finite float as ``null`` as the
+    backstop writes it.  Each poll of a finished error map made it again with
+    ``model_dump`` and ``json.dumps``: 0.086 s for c1178's (3.0 MB, 2026-10-20,
+    Mac) against 0.02 s.  The bytes are the same but for a number under 1e-4
+    (``0.00001`` for ``1e-05``: :class:`~sbfsem_web.json_response.SafeJSONRouter`).
+
+    A value pydantic cannot write (a NumPy scalar) takes the old way: a model is
+    dumped to plain JSON types, and that goes to the same ``JSONResponse``, or to
+    the general encoder, whose pure-Python walk over every number this function
+    otherwise skips (724404b left it that way for every finished error map and
+    difference, 2.3 to 4 times slower than the dump).
     """
+    try:
+        return _ANY_JSON.dump_json(value, by_alias=True)
+    except PydanticSerializationError:
+        pass
     plain = {k: _plain(v) for k, v in value.items()} if isinstance(value, dict) else _plain(value)
     try:
         response: Response = JSONResponse(plain)
