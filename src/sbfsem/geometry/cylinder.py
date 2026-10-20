@@ -23,7 +23,8 @@ Deviations (see DEVIATIONS.md):
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from typing import Any, Protocol
 
 import numpy as np
 from scipy.optimize import minimize
@@ -684,10 +685,20 @@ def _tie_mesh(a: np.ndarray, b: np.ndarray) -> Mesh:
                        cap_ends=True).drop_nan().fix_winding()
 
 
-def _tie_segments(meshes: list[Mesh], max_tie_um: float, *,
+class _Vertices(Protocol):
+    """What the tie search reads of a piece: its vertices (a :class:`Mesh`, or
+    the Voxel remesh's pieces without the faces nothing here reads)."""
+
+    vertices: np.ndarray
+
+    @property
+    def is_empty(self) -> bool: ...
+
+
+def _tie_segments(meshes: Sequence[_Vertices], max_tie_um: float, *,
                   touch_um: float = TIE_TOUCH_UM,
                   sample: int = 20_000,
-                  attached: Callable[[Mesh], bool] | None = None,
+                  attached: Callable[[Any], bool] | None = None,
                   ) -> list[tuple[np.ndarray, np.ndarray]]:
     """Where to tie: the residual gaps between remesh-branch pieces.
 
@@ -1353,13 +1364,21 @@ def cylinder_render(
                 from .decimate import decimate_in_chunks
 
                 voxel = float(m.meta.get("voxel2_um", 0.0) or 0.0)
-                return decimate_in_chunks(m, max(4, int(round(len(m.faces) * fraction))),
-                                          span_um=BLOCK * voxel)
+                target = max(4, int(round(len(m.faces) * fraction)))
+                # Handed over as the only reference, so the sheet can go before
+                # the chunks are joined (the build's peak).
+                sheet = [m]
+                del m
+                return decimate_in_chunks(sheet.pop(), target, span_um=BLOCK * voxel)
         return m.decimate(fraction)
 
     stages = (smooth, decimate) if post_order == "smooth_first" else (decimate, smooth)
+    # Each stage is handed the mesh as the only reference to it (decimate lets it go).
+    held = [combined]
+    del combined
     for stage in stages:
-        combined = stage(combined)
+        held.append(stage(held.pop()))
+    combined = held.pop()
 
     combined.meta["neuron_id"] = getattr(neuron, "id", None)
     combined.meta["n_segments"] = n_segments

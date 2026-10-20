@@ -167,10 +167,16 @@ class Mesh:
         if not -1.0 < mu < -lam < 1.0:
             raise ValueError("Taubin requires -1 < mu < -lam < 1")
         neighbor_mean = self._neighbor_mean()
-        vertices = self.vertices
+        vertices = np.array(self.vertices, dtype=float)
         for _ in range(int(iterations)):
-            vertices = vertices + lam * (neighbor_mean(vertices) - vertices)
-            vertices = vertices + mu * (neighbor_mean(vertices) - vertices)
+            for step in (lam, mu):
+                # v + step * (mean - v), each operation where it lies: the same
+                # numbers without two more copies of the vertices.
+                move = neighbor_mean(vertices)
+                move -= vertices
+                move *= step
+                vertices += move
+                del move
         del neighbor_mean                 # its edge list, before the faces are copied
         return Mesh(np.asarray(vertices), self.faces.copy(),
                     None if self.vertex_data is None else self.vertex_data.copy(),
@@ -188,25 +194,32 @@ class Mesh:
         if iterations <= 0 or self.is_empty:
             return self
         neighbor_mean = self._neighbor_mean()
-        vertices = self.vertices
+        vertices = np.array(self.vertices, dtype=float)
         for _ in range(int(iterations)):
-            vertices = vertices + float(smooth) * (neighbor_mean(vertices) - vertices)
+            # As in taubin: each step's operations where they lie.
+            move = neighbor_mean(vertices)
+            move -= vertices
+            move *= float(smooth)
+            vertices += move
             if inflate:
-                vertices = vertices - float(inflate) * (neighbor_mean(vertices) - vertices)
-        return Mesh(np.asarray(vertices), self.faces.copy(),
+                move = neighbor_mean(vertices)
+                move -= vertices
+                move *= float(inflate)
+                vertices -= move
+            del move
+        del neighbor_mean
+        return Mesh(vertices, self.faces.copy(),
                     None if self.vertex_data is None else self.vertex_data.copy(),
                     dict(self.meta))
 
-    def _directed_edges(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """The vertex adjacency as a directed edge list (every undirected edge
-        once each way): ``rows``, ``cols`` and ``1 / (neighbors + 1)`` per
-        vertex, the weight of the smoothers' mean (the vertex itself counts).
+    def _packed_edges(self) -> np.ndarray:
+        """Each undirected edge once, as ``low * n + high``, ascending.
 
         The edges are packed a side of the triangles at a time into one array
         and sorted where they lie, which is ``np.unique`` of them without its
-        temporaries: the same arrays from 78 bytes a triangle at the peak, not
-        108, in 0.3 s, not 2.0 (Inferior c1178's 2.1 million raw triangles,
-        2026-10-20).
+        temporaries: 39 bytes a triangle at the peak, and the edge list built
+        on them 54 where ``np.unique``'s took 108, in 0.3 s, not 2.0 (Inferior
+        c1178's 2.1 to 2.5 million raw triangles, 2026-10-20).
         """
         n = len(self.vertices)
         f = self.faces.astype(np.int64, copy=False)
@@ -217,11 +230,21 @@ class Mesh:
             np.minimum(f[:, i], f[:, j], out=side)
             side *= n
             side += np.maximum(f[:, i], f[:, j])
+        # A view: kept, it holds the unsorted edges past the unique ones (24 bytes
+        # a triangle through the rest of either caller, as in 2.19.4).
+        del side
         packed.sort()
         first = np.ones(len(packed), dtype=bool)
         np.not_equal(packed[1:], packed[:-1], out=first[1:])
-        packed = packed[first]                                     # undirected, once
-        del first
+        return packed[first]
+
+    def _directed_edges(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """The vertex adjacency as a directed edge list (every undirected edge
+        once each way): ``rows``, ``cols`` and ``1 / (neighbors + 1)`` per
+        vertex, the weight of the smoothers' mean (the vertex itself counts).
+        """
+        n = len(self.vertices)
+        packed = self._packed_edges()
         lo = (packed // n).astype(np.int32)
         hi = (packed % n).astype(np.int32)
         del packed
@@ -391,25 +414,74 @@ class Mesh:
             out[ids[mine]] = smoothed[mine]
         return out
 
+    #: Vertices whose neighbor sums :meth:`_neighbor_mean` takes at a time.
+    NEIGHBOR_ROWS = 1 << 17
+
+    def _adjacency(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """:meth:`_directed_edges` as compressed rows: ``indptr``, ``cols``
+        (int32) and the same weights.  A vertex's neighbors are in the order
+        the edge list visits them (those numbered above it, then those below,
+        each ascending), so a sum over a row adds what the edge list's
+        ``bincount`` adds, in its order.
+
+        Each undirected edge is keyed twice, ``row * 2n + col`` when the
+        neighbor is above the row and ``row * 2n + n + col`` when below, and
+        one sort lays the rows out: 51 bytes a triangle at the peak and 20 kept,
+        where the edge list's are 54 and 28 (Inferior c1178's 2.5 million raw
+        triangles, 2026-10-20).
+        """
+        n = len(self.vertices)
+        packed = self._packed_edges()
+        keys = np.empty(2 * len(packed), dtype=np.int64)
+        at = 0
+        step = 1 << 20
+        for start in range(0, len(packed), step):
+            lo, hi = np.divmod(packed[start:start + step], n)
+            keep = lo != hi
+            lo, hi = lo[keep], hi[keep]
+            m = len(lo)
+            keys[at:at + m] = lo * (2 * n) + hi                    # hi is above lo
+            keys[at + m:at + 2 * m] = hi * (2 * n) + n + lo         # lo is below hi
+            at += 2 * m
+        del packed
+        keys = keys[:at]
+        keys.sort()
+        indptr = np.searchsorted(keys, np.arange(n + 1, dtype=np.int64) * (2 * n))
+        cols = np.empty(at, dtype=np.int32)
+        for start in range(0, at, step):
+            col = keys[start:start + step] % (2 * n)
+            col[col >= n] -= n
+            cols[start:start + len(col)] = col
+        del keys
+        degree = np.diff(indptr).astype(float) + 1.0                # + self
+        return indptr, cols, 1.0 / degree
+
     def _neighbor_mean(self):
         """The smoothers' operator: each vertex to the mean of itself and its
         distinct neighbors (the row-normalized adjacency with self loops).
 
-        Applied through ``bincount`` over the directed edge list rather than a
-        sparse matrix.  Same weights -- one over the number of distinct
-        neighbors plus one -- but the matrix route (a COO with duplicates,
-        summed into CSR) peaked at half a gigabyte on a two-million-face
-        sheet, and this needs the edge list alone.
+        Summed by ``bincount`` a run of :attr:`NEIGHBOR_ROWS` rows of
+        :meth:`_adjacency` at a time rather than through a sparse matrix.  Same
+        weights -- one over the number of distinct neighbors plus one -- but the
+        matrix route (a COO with duplicates, summed into CSR) peaked at half a
+        gigabyte on a two-million-face sheet; the whole edge list's gather was
+        24 bytes a triangle, a run's is a run's.  Each row's terms are added in
+        the edge list's order, so the sums are its own to the bit.
         """
         n = len(self.vertices)
-        rows, cols, inv_degree = self._directed_edges()
+        indptr, cols, inv_degree = self._adjacency()
+        runs = [(r0, min(r0 + self.NEIGHBOR_ROWS, n)) for r0 in range(0, n, self.NEIGHBOR_ROWS)]
 
         def apply(v: np.ndarray) -> np.ndarray:
             v = np.asarray(v, dtype=float)
             out = np.empty_like(v)
-            for c in range(v.shape[1]):
-                acc = np.bincount(rows, weights=v[cols, c], minlength=n)
-                out[:, c] = (acc + v[:, c]) * inv_degree
+            for r0, r1 in runs:
+                e0, e1 = int(indptr[r0]), int(indptr[r1])
+                row = np.repeat(np.arange(r1 - r0), np.diff(indptr[r0:r1 + 1]))
+                around = cols[e0:e1]
+                for c in range(v.shape[1]):
+                    acc = np.bincount(row, weights=v[around, c], minlength=r1 - r0)
+                    out[r0:r1, c] = (acc + v[r0:r1, c]) * inv_degree[r0:r1]
             return out
 
         return apply
@@ -445,12 +517,14 @@ class Mesh:
         out.faces = out.faces[:, ::-1].copy()
         return out
 
-    def fix_winding(self) -> Mesh:
+    def fix_winding(self, *, in_place: bool = False) -> Mesh:
         """Orient faces outward.
 
         The Line3 ring triangulation winds inward, so lighting and glTF
         back-face culling see the inside of every tube.  A negative signed
-        volume means the whole mesh is inverted.
+        volume means the whole mesh is inverted.  ``in_place`` turns this
+        mesh's faces where they lie, for a mesh nothing else holds: the same
+        faces :meth:`flip_faces` gives, without its two copies of them.
         """
         if self.is_empty:
             return self
@@ -460,7 +534,14 @@ class Mesh:
         for start in range(0, len(self.faces), 250_000):
             v = self.vertices[self.faces[start:start + 250_000]]
             signed += float(np.einsum("ij,ij->i", v[:, 0], np.cross(v[:, 1], v[:, 2])).sum())
-        return self.flip_faces() if signed / 6.0 < 0 else self
+        if not signed / 6.0 < 0:
+            return self
+        if not in_place:
+            return self.flip_faces()
+        for start in range(0, len(self.faces), 1 << 20):
+            part = self.faces[start:start + (1 << 20)]
+            part[:, [0, 2]] = part[:, [2, 0]]
+        return self
 
     def to_trimesh(self):
         import trimesh

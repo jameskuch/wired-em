@@ -83,6 +83,7 @@ __all__ = [
     "VoxelPlan",
     "WORK_PER_RAW_FACE",
     "auto_voxel_um",
+    "count_components",
     "decimates_in_chunks",
     "field_bodies",
     "hull_pairs",
@@ -235,6 +236,11 @@ BLOCK = 32
 #: crossing is always interpolated between two genuine distances and never
 #: between a distance and the ``FAR`` background.
 PAD_VOXELS = 3
+
+#: Vertices the weld (:meth:`_BlockGrid.mesh`) takes at a time: a run of
+#: consecutive blocks about this big, so its temporaries are a run's and
+#: only the welded sheet itself is the size of the sheet.
+WELD_RUN_VERTICES = 1 << 18
 
 
 class _Leaf(Protocol):
@@ -836,44 +842,92 @@ class _BlockGrid:
         deduplicates that small subset (a few percent of the vertices) and
         leaves the rest alone -- a whole-mesh ``unique`` over a million rows
         was half the pathway's memory.
+
+        The blocks are taken a run of :data:`WELD_RUN_VERTICES` vertices at a
+        time, as they lie in ``tris``, and the sheet's vertex and face arrays
+        are filled in place, the winding turned where they lie: the same arrays
+        as stacking every block and welding the stack, without the stack and
+        its copies (Inferior c1178's 6.9 million raw triangles at 0.042 um on
+        the server, 2026-10-20: 1,081 -> 687 MB).  A vertex's index in the
+        stack is still its block's offset plus its row, and the weld's twins
+        and the faces it drops are the stack's.
         """
         if not self.tris:
             return EMPTY_MESH
-        verts_parts, faces_parts = [], []
-        offset = 0
-        offsets: dict[tuple[int, int, int], tuple[int, int]] = {}
-        for block_key, (v, f) in self.tris.items():
-            verts_parts.append(v)
-            faces_parts.append(f + offset)
-            offsets[block_key] = (offset, len(v))
-            offset += len(v)
-        verts = np.vstack(verts_parts)
-        faces = np.vstack(faces_parts)
-        del verts_parts, faces_parts
-        idx = (verts - self.origin) / self.voxel / self.block
-        on_face = (np.abs(idx - np.rint(idx)) < 1e-6).any(axis=1)
-        face_ids = np.flatnonzero(on_face)
-        remap = np.arange(len(verts))
+        keys = list(self.tris)
+        parts = list(self.tris.values())
+        offsets = np.zeros(len(parts) + 1, dtype=np.int64)
+        np.cumsum([len(v) for v, _f in parts], out=offsets[1:])
+        n = int(offsets[-1])
+        runs: list[tuple[int, int]] = []
+        first_block = 0
+        for b in range(len(parts)):
+            if offsets[b + 1] - offsets[first_block] >= WELD_RUN_VERTICES:
+                runs.append((first_block, b + 1))
+                first_block = b + 1
+        if first_block < len(parts):
+            runs.append((first_block, len(parts)))
+
+        def run_vertices(b0: int, b1: int) -> np.ndarray:
+            return parts[b0][0] if b1 - b0 == 1 else np.vstack([v for v, _f in parts[b0:b1]])
+
+        # The vertices on a block face and their weld keys, in stack order.
+        ids_parts, key_parts = [], []
+        for b0, b1 in runs:
+            verts = run_vertices(b0, b1)
+            idx = (verts - self.origin) / self.voxel / self.block
+            local = np.flatnonzero((np.abs(idx - np.rint(idx)) < 1e-6).any(axis=1))
+            del idx
+            if len(local):
+                ids_parts.append(local + offsets[b0])
+                key_parts.append(np.round(verts[local] / 1e-6).astype(np.int64))
+        face_ids = np.concatenate(ids_parts) if ids_parts else np.zeros(0, dtype=np.int64)
+        twin = face_ids                     # each face vertex's first twin in the stack
         if len(face_ids):
-            key = np.round(verts[face_ids] / 1e-6).astype(np.int64)
-            _u, first, inverse = np.unique(key, axis=0, return_index=True,
-                                           return_inverse=True)
-            remap[face_ids] = face_ids[first[np.asarray(inverse).ravel()]]
-            faces = remap[faces]
-            del key
-        keep = ((faces[:, 0] != faces[:, 1]) & (faces[:, 1] != faces[:, 2])
-                & (faces[:, 0] != faces[:, 2]))
-        faces = faces[keep]
-        used = np.zeros(len(verts), dtype=bool)
-        used[faces.ravel()] = True
+            _u, first, inverse = np.unique(np.concatenate(key_parts), axis=0,
+                                           return_index=True, return_inverse=True)
+            twin = face_ids[first[np.asarray(inverse).ravel()]]
+            del _u, first, inverse
+        del ids_parts, key_parts
+        bounds = np.searchsorted(face_ids, offsets)
+
+        def run_faces(b0: int, b1: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            """The run's stack rows' weld targets, its faces in them and which are kept."""
+            remap = np.arange(offsets[b0], offsets[b1])
+            lo, hi = int(bounds[b0]), int(bounds[b1])
+            remap[face_ids[lo:hi] - offsets[b0]] = twin[lo:hi]
+            faces = remap[np.vstack([f + int(offsets[b] - offsets[b0])
+                                     for b, (_v, f) in enumerate(parts[b0:b1], start=b0)])]
+            keep = ((faces[:, 0] != faces[:, 1]) & (faces[:, 1] != faces[:, 2])
+                    & (faces[:, 0] != faces[:, 2]))
+            return remap, faces, keep
+
+        used = np.zeros(n, dtype=bool)
+        kept = 0
+        for b0, b1 in runs:
+            _remap, faces, keep = run_faces(b0, b1)
+            used[faces[keep].ravel()] = True
+            kept += int(np.count_nonzero(keep))
         compact = np.cumsum(used) - 1
-        if index_out is not None:
-            welded = np.where(used[remap], compact[remap], -1)
-            for k, (start, n) in offsets.items():
-                index_out[k] = welded[start:start + n]
-        del remap
-        mesh = Mesh(verts[used], compact[faces])
-        return mesh.fix_winding()
+        vertices = np.empty((int(np.count_nonzero(used)), 3))
+        out_faces = np.empty((kept, 3), dtype=np.int64)
+        at_v = at_f = 0
+        for b0, b1 in runs:
+            remap, faces, keep = run_faces(b0, b1)
+            rows = compact[faces[keep]]
+            out_faces[at_f:at_f + len(rows)] = rows
+            at_f += len(rows)
+            del faces, keep, rows
+            mine = used[offsets[b0]:offsets[b1]]
+            n_mine = int(np.count_nonzero(mine))
+            vertices[at_v:at_v + n_mine] = run_vertices(b0, b1)[mine]
+            at_v += n_mine
+            if index_out is not None:
+                welded = np.where(used[remap], compact[remap], -1)
+                for b in range(b0, b1):
+                    index_out[keys[b]] = welded[offsets[b] - offsets[b0]:offsets[b + 1] - offsets[b0]]
+        del used, compact
+        return Mesh(vertices, out_faces).fix_winding(in_place=True)
 
 
 # -- building again on the last grid (manual moves) ---------------------------------------------
@@ -1029,7 +1083,7 @@ def _grid_state(grid: _BlockGrid, signatures: dict | None = None) -> GridState:
     )
 
 
-def _tie_record(pieces: list[Mesh], segments: list, grid: _BlockGrid, params: tuple) -> dict:
+def _tie_record(pieces: list[_Piece], segments: list, grid: _BlockGrid, params: tuple) -> dict:
     """What a tie step decided, for the next build on this grid (:func:`_reused_ties`):
     each piece's blocks, the vertices of all but the largest, and the segments."""
     span = grid.voxel * grid.block
@@ -1281,29 +1335,81 @@ def _taubin_around(mesh: Mesh, index: dict, old: GridState, new_tris: dict, chan
     return out
 
 
+def _vertex_labels(mesh: Mesh) -> tuple[int, np.ndarray]:
+    """The connected pieces the mesh's triangles join its vertices into: how many, and
+    each vertex's.  ``connected_components`` numbers the pieces in the order of each
+    one's lowest vertex whatever edges join them, so two sides of each triangle (which
+    join its corners as the three do), written as int32 where they lie, give the same
+    numbers from 44 bytes a triangle at the peak, not 63 (Inferior c1178's 2.5 million
+    raw triangles at 0.07 um, 2026-10-20)."""
+    faces = mesh.faces
+    n, t = mesh.n_vertices, len(faces)
+    rows = np.empty(2 * t, dtype=np.int32)
+    cols = np.empty(2 * t, dtype=np.int32)
+    rows[:t], cols[:t] = faces[:, 0], faces[:, 1]
+    rows[t:], cols[t:] = faces[:, 1], faces[:, 2]
+    graph = coo_matrix((np.ones(2 * t, dtype=np.int8), (rows, cols)), shape=(n, n))
+    del rows, cols
+    n_comp, labels = connected_components(graph, directed=False)
+    return int(n_comp), labels
+
+
+@dataclass
+class _Piece:
+    """A piece of the untied sheet as the tie step reads it: its vertices, as
+    :func:`split_components` gives them, without the faces it would copy too
+    (two thirds of a second copy of the sheet, alive through the tie search)."""
+
+    vertices: np.ndarray
+
+    @property
+    def is_empty(self) -> bool:
+        return len(self.vertices) == 0
+
+
+def _piece_vertices(mesh: Mesh) -> list[_Piece]:
+    """:func:`split_components`'s pieces, in its order, their vertices alone: a piece's
+    vertices are those its labels name, every one of them in one of its triangles."""
+    if mesh.is_empty:
+        return []
+    n_comp, labels = _vertex_labels(mesh)
+    faced = np.flatnonzero(np.bincount(labels[mesh.faces[:, 0]], minlength=n_comp))
+    return [_Piece(mesh.vertices[labels == k]) for k in faced]
+
+
+def count_components(mesh: Mesh) -> int:
+    """``len(split_components(mesh))``, without making the pieces."""
+    if mesh.is_empty:
+        return 0
+    n_comp, labels = _vertex_labels(mesh)
+    return int(np.count_nonzero(np.bincount(labels[mesh.faces[:, 0]], minlength=n_comp)))
+
+
 def split_components(mesh: Mesh) -> list[Mesh]:
     """The mesh's topological pieces (connected components of its triangles)."""
     if mesh.is_empty:
         return []
     faces = mesh.faces
     n = mesh.n_vertices
-    rows = np.concatenate([faces[:, 0], faces[:, 1], faces[:, 2]]).astype(np.int32)
-    cols = np.concatenate([faces[:, 1], faces[:, 2], faces[:, 0]]).astype(np.int32)
-    graph = coo_matrix((np.ones(len(rows), dtype=np.int8), (rows, cols)), shape=(n, n))
-    del rows, cols
-    n_comp, labels = connected_components(graph, directed=False)
-    del graph
+    n_comp, labels = _vertex_labels(mesh)
     face_label = labels[faces[:, 0]]
+    del labels
     out: list[Mesh] = []
+    remap = np.empty(n, dtype=np.int64)
     for k in range(n_comp):
         sel = face_label == k
         if not sel.any():
             continue
+        mine = faces[sel]
+        del sel
         keep = np.zeros(n, dtype=bool)
-        keep[np.unique(faces[sel])] = True
-        remap = -np.ones(n, dtype=np.int64)
+        keep[mine.ravel()] = True
         remap[keep] = np.arange(int(keep.sum()))
-        out.append(Mesh(mesh.vertices[keep], remap[faces[sel]]))
+        # Renumbered where they lie: the piece's faces are this copy.
+        for start in range(0, len(mine), 1 << 20):
+            part = mine[start:start + (1 << 20)]
+            part[...] = remap[part]
+        out.append(Mesh(mesh.vertices[keep], mine))
     return out
 
 
@@ -1705,7 +1811,7 @@ def unified_mesh(
             segments = [(np.asarray(a, dtype=float), np.asarray(b, dtype=float))
                         for a, b in kept_ties["segments"]]
         else:
-            pieces = split_components(mesh)
+            pieces = _piece_vertices(mesh)
             pieces_n = len(pieces)
             segments = (_tie_segments(pieces, tie_um, touch_um=0.0, attached=attached)
                         if len(pieces) > 1 else [])
@@ -1742,6 +1848,7 @@ def unified_mesh(
                     grid.march(key)
             if ties:
                 index = {} if ctx is not None else None
+                del mesh                  # the untied sheet, before the tied one is welded
                 mesh = grid.mesh(index_out=index)
         if kept_ties is not None and changed is not None:
             record = dict(kept_ties)
@@ -1752,8 +1859,11 @@ def unified_mesh(
             if not (set(affected if pieces_n > 1 else ()) & changed):
                 # The same pieces, tied the same way through blocks the moves left alone.
                 components = int(kept_ties["components"])
+    n_blocks = len(grid.tris)
+    if ctx is None:
+        grid.tris.clear()                 # welded: nothing builds on these blocks again
     if components is None:
-        components = len(split_components(mesh))
+        components = count_components(mesh)
     if record is not None:
         record["components"] = components
     if ctx is not None:
@@ -1768,7 +1878,7 @@ def unified_mesh(
         "voxel2_coarsened": bool(coarsened),
         "voxel2_reason": reason,
         "voxel2_raw_faces": raw_faces,
-        "voxel2_blocks": len(grid.tris),
+        "voxel2_blocks": n_blocks,
         "voxel2_ties": ties,
         "voxel2_components": components,
         "field_mode": mode,

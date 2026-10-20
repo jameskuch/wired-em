@@ -724,6 +724,12 @@ of keeping every triangle. On the server the same builds take about half the
 memory they did, 1.5 to 7 % slower, with the same deviation, creases and one
 body (c1178 at 0.042 µm under 3.4 million 3,132 → 1,564 MB; at 0.07 µm under 1.2
 million 1,401 → 815; c16137 at 0.04 µm under 1.2 million 1,473 → 823). Since
+2.19.5 the raw sheet's own steps (the weld of the blocks, the tie step, the
+smoothing, the join of the decimated chunks) hold no copies they do not need, and
+the surface is the same to the bit: on the server c1178 at 0.042 µm under 3.4
+million peaks at about 1,100 MB (1,450 in 2.19.4), uncapped at 954 (1,413), and at
+0.07 µm under 1.2 million at 725 (819); what is left over the sheet is mostly
+the decimator's own arrays. Since
 2.19.2 the build gate weighs every Voxel remesh, Convolution and Ultraliser build
 at least at the sheet it is sized to draw, the one the render estimate names:
 before, a sheet under 3 million was weighed by the cell's annotations alone, and

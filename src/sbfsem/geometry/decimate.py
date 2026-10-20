@@ -277,11 +277,20 @@ def decimate_in_chunks(mesh: Mesh, face_count: int, *, span_um: float,
         offset += len(sub_v)
         del used, local, sub_v
     del chunk, on_cut, scratch
+    # The join is the build's peak: the sheet goes first, when the caller handed it
+    # over (passed it as the only reference, as cylinder_render does), and the
+    # chunks once stacked.
+    meta = dict(mesh.meta)
+    del mesh, vertices, faces
     report("decimating", n_chunks, n_chunks)
     # The vertices along a cut came out of both chunks with the same coordinates;
     # trimesh's processing merges them, as it does the global pass's output.
-    joined = trimesh.Trimesh(vertices=np.vstack(parts_v), faces=np.vstack(parts_f))
-    del parts_v, parts_f
+    stacked_v = np.vstack(parts_v)
+    del parts_v
+    stacked_f = np.vstack(parts_f)
+    del parts_f
+    joined = trimesh.Trimesh(vertices=stacked_v, faces=stacked_f)
+    del stacked_v, stacked_f
     out_v, out_f = np.asarray(joined.vertices), np.asarray(joined.faces)
     del joined
     if final and len(out_f) > face_count:
@@ -292,4 +301,4 @@ def decimate_in_chunks(mesh: Mesh, face_count: int, *, span_um: float,
     log.info("decimated %s triangles to %s in %d chunks (%d straddling the cuts, %d kept along them%s)",
              f"{n_faces:,}", f"{len(out_f):,}", n_chunks, crossing, int(bands),
              ", then the cuts" if final else "")
-    return Mesh(out_v, out_f, None, dict(mesh.meta))
+    return Mesh(out_v, out_f, None, meta)
