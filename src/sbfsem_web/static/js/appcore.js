@@ -414,6 +414,33 @@ export function paneCountMessage(before, after) {
   return null;
 }
 
+// -- the view a load put up ------------------------------------------------------
+
+/**
+ * Are two `Renderer3D.cameraState()`s the same view?  A load that framed the
+ * view, or put a saved one back, as its first cells came in compares the camera
+ * at its end with what it put up: the same, and the load frames the whole scene
+ * (or puts the saved view back) over it; moved, and the person turned, panned
+ * or zoomed it while the cells came in, so it stays where they put it.  Null is
+ * a camera aimed at nothing (`cameraState()`), the same only as another null.
+ * The controls recompute the camera every frame, so positions are compared to a
+ * millionth of the camera's distance from its target (half a nanometer at
+ * 500 µm), far under the smallest move a hand makes, and never with `==`.
+ */
+export function sameCamera(a, b) {
+  if (!a || !b) return !a && !b;
+  if (Boolean(a.orthographic) !== Boolean(b.orthographic)) return false;
+  const near = (p, q, tol) => Array.isArray(p) && Array.isArray(q) && p.length === q.length
+    && p.every((v, i) => Math.abs(v - q[i]) <= tol);
+  const span = Math.hypot(...a.position.map((v, i) => v - a.target[i]));
+  const tol = Math.max(span, 1) * 1e-6;
+  const zoomA = a.zoom ?? 1;
+  const zoomB = b.zoom ?? 1;
+  return near(a.position, b.position, tol) && near(a.target, b.target, tol)
+    && near(a.up ?? [0, 0, 1], b.up ?? [0, 0, 1], 1e-6)
+    && Math.abs(zoomA - zoomB) <= Math.max(Math.abs(zoomA), 1) * 1e-6;
+}
+
 // -- a flared status message against the busy tracker --------------------------
 
 /** How long a flared message keeps the status line: the flare's 2.4 s (`.status.flare`, app.css) and a moment to read it. */

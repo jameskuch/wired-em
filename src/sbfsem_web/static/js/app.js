@@ -21,7 +21,7 @@ import {
 import {
   meshCacheKey, dropWithPrefix, dropOtherCopies, MeshCache, DrawTokens, importKind, isTypingTarget,
   registrationChoiceDiffers, helpLayouts, pickHelpLayout, singleFlight, sameOptions, paneCountMessage,
-  StatusHold, extrasWanted, startExtras, adoptExtras, sharedRequest,
+  StatusHold, extrasWanted, startExtras, adoptExtras, sharedRequest, sameCamera,
 } from './appcore.js';
 import { buildRenderForm } from './renderform.js';
 import {
@@ -922,6 +922,15 @@ async function restoreSession(saved) {
   const failures = [];
   try {
     applySessionShell(saved);
+    // The saved view goes up before the cells, so they come in where they will
+    // be seen and a drag turns the view while they do.  A fresh page's camera
+    // sits on its own target at the origin, where a turn has nothing to turn
+    // about: in Orthographic view, which draws on both sides of the camera's
+    // plane, the cells showed from there and zoomed and panned, but would not
+    // rotate until the last one was in (2026-10-20).  With no saved view, the
+    // first thing to land frames it, as a first load's does.
+    const placed = renderer.restoreCamera(saved.camera) ? renderer.cameraState() : null;
+    const framing = placed || display?.holdLimits ? null : { done: false };
 
     // Side by side, as loadMany does: a restore of thirty cells is thirty
     // Viking round trips (or cache reads) and thirty mesh jobs.  The list is
@@ -984,7 +993,7 @@ async function restoreSession(saved) {
         record.visible = entry.visible !== false;
         record.opacity = entry.opacity ?? record.opacity;
         if (!listed) started.add(key);
-        await addToScene(record, { frame: false, progress: cell });
+        await addToScene(record, { frame: false, progress: cell, framing });
         if (strip.stopped && !state.neurons.has(key)) {
           dropped = true;
           return;
@@ -1020,9 +1029,12 @@ async function restoreSession(saved) {
       focusSeen = state.selected;     // the panel has this cell's settings: a tick keeps them
     }
 
-    // After the meshes, so nothing re-frames on top of it; falls back to
-    // framing the scene when there is no usable camera.
-    if (!renderer.restoreCamera(saved.camera)) renderer.resetView();
+    // Again after the meshes, which can now say whether the saved view sees
+    // them; falls back to framing the scene when there is no usable camera.
+    // Not over a view the person moved while the cells came in.
+    if (viewUntouched(placed ?? framing?.camera)) {
+      if (!renderer.restoreCamera(saved.camera)) renderer.resetView();
+    }
     // The 2D box was set from the saved view when the restore began; the
     // camera is decided now, so the box can be judged against it.
     display?.syncTwoD();
@@ -1585,8 +1597,9 @@ async function loadCells(entries) {
   // Cells this load added to the list, until each is drawn: what Stop drops.
   const started = new Set();
   const strip = loadStrip().begin(total, { onStop: () => stopLoad(started) });
-  // The waiting points' one framing (showWaitingPoints): only for a load
-  // that will frame the scene at its end anyway.
+  // The load's one early framing, on its first cloud of waiting points or its
+  // first surface, whichever lands first: only for a load that will frame the
+  // scene at its end anyway.
   const framing = first && !display?.holdLimits ? { done: false } : null;
 
   await inParallel(entries, LOAD_CONCURRENCY, async ({ source, id }) => {
@@ -1640,8 +1653,9 @@ async function loadCells(entries) {
 
   // Frame once at the end rather than after each, or a batch load walks the
   // camera around while it runs.  "Hold" in the Display panel means the user
-  // has chosen a framing and does not want loading to move it.
-  if (first && loaded && !display?.holdLimits) renderer.resetView();
+  // has chosen a framing and does not want loading to move it; so has someone
+  // who turned, panned or zoomed the view after the load's first framing.
+  if (first && loaded && !display?.holdLimits && viewUntouched(framing?.camera)) renderer.resetView();
   // Not under a dropdown, slider or box someone is using in the cell panel
   // while the load ran: the events during the load waited for them, and so does this.
   renderNeuronListWhenIdle();
@@ -2576,6 +2590,16 @@ async function addToScene(record, {
     renderer.setWireframeStyle(record.key, {
       color: d0.wireframeColor || record.color, opacity: d0.wireframeOpacity,
     });
+    // The load's one early framing (showWaitingPoints) when this surface is the
+    // first thing of it on screen: one from a cache comes inside the waiting
+    // points' delay, so no cloud framed the view before it.  Until something
+    // does, a fresh page's camera sits on its own target at the origin, where a
+    // drag has nothing to turn about.
+    if (framing && !framing.done) {
+      framing.done = true;
+      renderer.resetView();
+      framing.camera = renderer.cameraState();
+    }
     askExtras();  // a surface this tab had: asked now, side by side
     await refreshExtras(record, { early });
     // After refreshExtras, so the freshly built synapse and skeleton objects
@@ -2673,6 +2697,7 @@ function showWaitingPoints(record, current, framing = null) {
       if (framing && !framing.done) {
         framing.done = true;
         renderer.framePoints(key);
+        framing.camera = renderer.cameraState();
       }
     } catch (error) {
       console.warn(`no waiting points for c${record.id}:`, error);
@@ -2685,6 +2710,16 @@ function showWaitingPoints(record, current, framing = null) {
       if (!keepPoints) renderer.removePoints(key);
     },
   };
+}
+
+/**
+ * Is the camera still where a load put it (`framing.camera`, or the saved view
+ * a restore put up)?  Yes too when the load put up nothing, so its end frames
+ * the scene as it always has.  A view the person moved while the cells came in
+ * is theirs, and the load's end leaves it there.
+ */
+function viewUntouched(reference) {
+  return !reference || sameCamera(renderer.cameraState(), reference);
 }
 
 /** '#rrggbb' as three 0-1 numbers; mid gray for anything else. */

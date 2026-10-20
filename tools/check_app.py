@@ -34,6 +34,10 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
 * ``sheets`` -- Undo of a context sheet reaches the session stored in the browser.
 * ``volume`` -- switching volume takes the first volume's boundary sheets off the scene.
 * ``hold`` -- Hold in the Display panel keeps a load from reframing the scene.
+* ``orbit`` -- a plain drag turns the view while cells come in: during a Restore of a session saved in
+  Orthographic view (a fresh page's camera sat on its own target at the origin until the last cell was in,
+  so the cells zoomed and panned but would not turn, 2026-10-20) and during a first load; the end of
+  either leaves a view turned meanwhile, and an untouched Restore still ends on the saved view.
 * ``keys`` -- Ctrl+Z belongs to a text box, and a held key is one step.
 * ``viking`` -- Open in Viking and Viking Test: the launch tab tries the signed Viking and, when
   nothing answers, says so and offers Viking Test on a button (a click is the only way Chrome lets
@@ -85,6 +89,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 import urllib.parse
@@ -661,6 +666,96 @@ def hold(c: Chrome, r: Report, ctx):
     c.wait_for('window.sbfsem.renderer.meshes.size === 1', 240)
     c.settle(3)
     r.check('and neither does the cell\'s arrival', not moved(before, camera()), (before, camera()))
+
+
+# -- orbit ------------------------------------------------------------------------------------
+
+def orbit(c: Chrome, r: Report, ctx):
+    r.start('orbit: a drag turns the view while cells come in')
+    view = 'window.sbfsem.renderer.cameraState()'
+    gate_shut = "[...window.sbfsem.renderer.points.keys()].some((k) => k.endsWith('|waiting'))"
+
+    def direction() -> list[float]:
+        return js(c, 'window.sbfsem.renderer.camera.getWorldDirection('
+                     'window.sbfsem.renderer.camera.position.clone()).toArray()')
+
+    def drag() -> tuple[float, float]:
+        """A plain left-drag of 120 px across the viewport, with a real mouse: (degrees turned, expected)."""
+        box = js(c, "(() => { const b = window.sbfsem.renderer.webgl.domElement.getBoundingClientRect();"
+                    " return [b.left, b.top, b.width, b.height]; })()")
+        x, y = box[0] + box[2] * 0.35, box[1] + box[3] * 0.55
+        before = direction()
+        c.press(x, y)
+        for i in range(1, 61):
+            c.move(x + i * 2, y, buttons=1)
+            time.sleep(0.02)
+        c.release(x + 120, y)
+        time.sleep(1.2)                       # the glide
+        after = direction()
+        dot = max(-1.0, min(1.0, sum(a * b for a, b in zip(before, after, strict=True))))
+        return math.degrees(math.acos(dot)), 120 / box[3] * 360
+
+    def apart(a, b) -> float:
+        """How far apart two camera states are, in µm of position or target (inf for one aimed at nothing)."""
+        if not a or not b:
+            return 0.0 if not a and not b else float('inf')
+        return max(abs(x - y) for x, y in zip(a['position'] + a['target'], b['position'] + b['target'], strict=True))
+
+    # A session in Orthographic view, as the user's workspace of 2026-10-20 was.  A fresh page's
+    # camera sits on its own target at the origin; the restore put the saved view back only after
+    # the last cell, and until then the cells showed, zoomed and panned, but a drag turned nothing.
+    boot(c, ctx.url)
+    load(c, ctx.cell)
+    js(c, "document.getElementById('ortho').click()")
+    c.settle(2)
+    drag()                                     # a view of the user's own, saved with the session
+    time.sleep(1.0)
+    saved = js(c, view)
+    r.check('the session is saved in Orthographic view', saved and saved['orthographic'], saved)
+    stored = "(() => { try { return JSON.parse(localStorage.getItem('sbfsem.session.v1')).camera; } catch (e) { return null; } })()"
+    for touch in (True, False):
+        boot(c, ctx.url, keep=True)
+        c.wait_for("!document.getElementById('restore-banner').hidden", 30)
+        saved = js(c, stored)             # a view turned during the first restore is saved with it
+        js(c, '__hold()')
+        js(c, "document.getElementById('restore-yes').click()")
+        c.wait_for(gate_shut, 30)
+        c.settle(3)
+        during = js(c, view)
+        r.check(f"{'' if touch else 'again: '}while the restore waits on its build, the saved view is up",
+                apart(during, saved) < 1e-3, (during, saved))
+        if touch:
+            turned, expected = drag()
+            r.check('a plain drag turns it', abs(turned - expected) < 3,
+                    f'{turned:.1f} degrees of {expected:.0f}')
+            mine = js(c, view)
+        js(c, '__release()')
+        c.wait_for('window.sbfsem.renderer.meshes.size === 1', 240)
+        c.settle(3)
+        end = js(c, view)
+        if touch:
+            r.check('and the restore\'s end leaves the turned view',
+                    apart(end, mine) < 0.5 and apart(end, saved) > 1, f'{apart(end, mine):.3f} µm from it')
+        else:
+            r.check('untouched, the restore ends on the saved view', apart(end, saved) < 1e-3, (end, saved))
+
+    # A first load: the waiting points frame the view early, a drag turns it, and the load's
+    # framing at its end does not throw the turn away.
+    boot(c, ctx.url)
+    js(c, '__hold()')
+    js(c, """(() => { document.getElementById('neuron-id').value = '%d';
+        document.getElementById('load-form').requestSubmit(); })()""" % ctx.cell)
+    c.wait_for(gate_shut, 30)
+    c.settle(3)
+    turned, expected = drag()
+    r.check('a first load: a drag turns the view while the build waits', abs(turned - expected) < 3,
+            f'{turned:.1f} degrees of {expected:.0f}')
+    mine = js(c, view)
+    js(c, '__release()')
+    c.wait_for('window.sbfsem.renderer.meshes.size === 1', 240)
+    c.settle(3)
+    end = js(c, view)
+    r.check('and the load\'s end leaves the turned view', apart(end, mine) < 0.5, f'{apart(end, mine):.3f} µm from it')
 
 
 # -- keys -------------------------------------------------------------------------------------
@@ -2166,6 +2261,7 @@ SECTIONS = {
     'notice': notice, 'waiting': waiting, 'draws': draws, 'undo': undo, 'idle': idle,
     'picker': picker, 'save': save, 'analysis': analysis, 'strata': strata, 'twod': twod, 'sheets': sheets, 'volume': volume,
     'hold': hold,
+    'orbit': orbit,
     'keys': keys,
     'viking': viking,
     'voxel': voxel,

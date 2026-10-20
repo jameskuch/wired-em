@@ -1414,6 +1414,11 @@ building, drawing. While a cell builds, the line names the build's own stage and
 Viking and a restored session get the same strip. It turns red if any cell
 failed and goes away a few seconds after the load ends.
 
+A load into an empty viewer frames the view on the first thing of it to appear (a cell's dots or
+its surface) and frames the whole scene when it ends. You can turn, pan and zoom the view while
+the cells come in; once you have, the end of the load leaves the view where you put it, and
+**Reset view** (or `m`) frames everything.
+
 **Stop**, at the right of the strip, ends the load at once: no further cells
 start, and every cell of the load that is not drawn yet — still fetching its
 annotations, or queued or building on the server — is dropped from the list
@@ -2411,7 +2416,11 @@ orthographic). When you come back, a banner at the top lists the cells it
 would restore, by volume (`3 cells from your last visit (…): Inferior Monkey
 c1178, c21768; RC1 c606`), and nothing is fetched until you choose:
 **Restore** puts it all back, and the status line says how many neurons were
-restored and when they were saved; **Discard** forgets them. Until you choose,
+restored and when they were saved; **Discard** forgets them. The saved view goes
+up first, so the cells come in where they were, and it turns, pans and zooms
+while they do; a view you moved during the restore is kept at its end, and an
+untouched one ends exactly as it was saved. Opening a saved workspace works the
+same way. Until you choose,
 the list is kept, so a tab closed without deciding loses nothing. The volume
 and the panel settings come back either way.
 

@@ -18,7 +18,7 @@ const {
   meshCacheKey, dropWithPrefix, DrawTokens, importKind, isTypingTarget, registrationChoiceDiffers,
   MeshCache, meshWeight, dropOtherCopies, singleFlight, sameOptions, chooseSource,
   helpLayouts, pickHelpLayout, paneCountMessage, StatusHold, FLARE_HOLD_MS,
-  extrasWanted, startExtras, adoptExtras, sharedRequest,
+  extrasWanted, startExtras, adoptExtras, sharedRequest, sameCamera,
 } = await load('appcore.js');
 
 const cases = [];
@@ -553,6 +553,34 @@ test('a failed request fails for every asker and is not held, and a send that th
   await assert.rejects(thrown, /offline/);
   await Promise.resolve();
   assert.equal(pending.has('other'), false);
+});
+
+test('a view moved while the cells came in is told from the one the load put up', () => {
+  // The user's saved workspace of 2026-10-20 (c1178 and c16137, orthographic).
+  const put = {
+    position: [600.7653910611868, 11.662770846297022, 243.21372644697553],
+    target: [147.31534332279375, 95.9447824616182, 46.134553350380884],
+    up: [-0.4164512264176127, -0.14002482965030866, 0.8983103155907032],
+    zoom: 12.336356474530863,
+    orthographic: true,
+  };
+  const moved = (change) => ({ ...put, ...change });
+  assert.equal(sameCamera(put, { ...put }), true);
+  // What the controls' every-frame recompute leaves: the last bits of each coordinate.
+  assert.equal(sameCamera(put, moved({ position: put.position.map((v) => v * (1 + 1e-14)) })), true);
+  // The smallest moves a hand makes: a pixel of pan at this zoom, a tenth of a degree of turn, a wheel notch.
+  assert.equal(sameCamera(put, moved({ target: [put.target[0] + 0.05, put.target[1], put.target[2]] })), false);
+  const turn = 0.1 * Math.PI / 180;
+  const [x, y, z] = put.position.map((v, i) => v - put.target[i]);
+  const turned = [x * Math.cos(turn) - y * Math.sin(turn), x * Math.sin(turn) + y * Math.cos(turn), z];
+  assert.equal(sameCamera(put, moved({ position: turned.map((v, i) => v + put.target[i]) })), false);
+  assert.equal(sameCamera(put, moved({ zoom: put.zoom * 1.05 })), false);
+  assert.equal(sameCamera(put, moved({ up: [0, 0, 1] })), false, 'a roll');
+  assert.equal(sameCamera(put, moved({ orthographic: false })), false, 'Orthographic switched off');
+  // Aimed at nothing (a fresh page's camera on its own target) is the same only as nothing.
+  assert.equal(sameCamera(null, null), true);
+  assert.equal(sameCamera(null, put), false);
+  assert.equal(sameCamera(put, undefined), false);
 });
 
 let failed = 0;
