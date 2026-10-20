@@ -193,6 +193,27 @@ export async function adoptExtras(pending, caches, key, gone) {
   return true;
 }
 
+/**
+ * One request for each `key` and `gen` (a cell and its load): `send()` is called by the
+ * first asker, and everyone who asks for the same load after it gets the same promise,
+ * answered or not, so what one load's request brought back is never asked for twice.  A
+ * request of an earlier load is never handed to a later one; a failed one is dropped, so
+ * the next asker tries again.  `pending` is the caller's Map, and the caller deletes a
+ * key when it lets the load go.  A Registration switch asked for the cell's annotations
+ * twice, 0.6 s apart: once with its extras while the surface built, and again for the
+ * points that show while it builds, before the first answer had reached the caches.
+ */
+export function sharedRequest(pending, key, gen, send) {
+  const out = pending.get(key);
+  if (out && out.gen === gen) return out.promise;
+  // An async function runs to its first await at once: the request leaves now, and a
+  // `send` that throws is a rejected promise like any other failure.
+  const entry = { gen, promise: (async () => send())() };
+  pending.set(key, entry);
+  entry.promise.catch(() => { if (pending.get(key) === entry) pending.delete(key); });
+  return entry.promise;
+}
+
 // -- an action that arrives twice ------------------------------------------------
 
 /**

@@ -21,7 +21,7 @@ import {
 import {
   meshCacheKey, dropWithPrefix, dropOtherCopies, MeshCache, DrawTokens, importKind, isTypingTarget,
   registrationChoiceDiffers, helpLayouts, pickHelpLayout, singleFlight, sameOptions, paneCountMessage,
-  StatusHold, extrasWanted, startExtras, adoptExtras,
+  StatusHold, extrasWanted, startExtras, adoptExtras, sharedRequest,
 } from './appcore.js';
 import { buildRenderForm } from './renderform.js';
 import {
@@ -2512,8 +2512,11 @@ async function addToScene(record, {
     // Once the server has taken the build, which it runs in a process of its own:
     // asked beside the estimate or the build's start, the outlines (0.5 s of the
     // service's Python on c1178) held up a Hybrid's estimate from 0.17 to 1.05 s
-    // and its start from 0.15 to 1.2 s (production, 2026-10-20).
-    const askExtras = () => { if (extrasEarly && !early) early = fetchExtrasEarly(record); };
+    // and its start from 0.15 to 1.2 s (production, 2026-10-20).  Not by a draw
+    // already retired: its requests would name the copy that replaced it.
+    const askExtras = () => {
+      if (extrasEarly && !early && current()) early = fetchExtrasEarly(record);
+    };
     let fetched = false;
     if (!mesh) {
       waiting = showWaitingPoints(record, current, framing);
@@ -2603,7 +2606,7 @@ async function addToScene(record, {
       setRenderOptions(record.key, { ...record.render, pixel_size_um: fits });
       noteCoarsened(record, before, fits,
         `${tooFine[1]} ${tooFine[2]}, over the server's limit of ${tooFine[3]}`);
-      const result = await addToScene(record, { frame, refit: false });
+      const result = await addToScene(record, { frame, refit: false, extrasEarly });
       renderNeuronListWhenIdle();
       updateScopeNote();
       return result;
@@ -2691,6 +2694,9 @@ function hexToUnitRgb(hex) {
 }
 
 const nodesCache = new Map();
+// key -> the `/nodes` request of the cell's current load, which every asker shares
+// (the waiting points, a pick, a draw's extras), answered or not: see askNodes.
+const nodesAsked = new Map();
 // key -> Location ID -> the IDs it is linked to (the cell's own annotations).
 const edgesCache = new Map();
 // key -> closed-curve outlines ([] for a cell traced only as discs).
@@ -2741,7 +2747,8 @@ async function outlinesFor(record) {
  * its display draws (`extrasWanted`) and the caches do not hold.  A manual move's
  * Apply used to ask for them one after another once the moved copy's surface was
  * drawn: 1.1 to 1.3 s more per Apply of Inferior c1178 on production (2026-10-20),
- * where a 4.6 to 7.3 s build hides all of them.  Answers the pending requests, for
+ * where a 4.6 to 7.3 s build hides all of them.  A Registration switch and Update
+ * from Viking draw a new copy the same way.  Answers the pending requests, for
  * `refreshExtras`'s `early`.  The copy each request names is the one the tab holds
  * now (api.js `withCopy`), the copy this draw is of.
  */
@@ -2752,7 +2759,7 @@ function fetchExtrasEarly(record) {
   const params = annoWireParams(display);
   const caches = extraCaches();
   return startExtras(wanted, {
-    nodes: () => api.nodes(record.source, record.id),
+    nodes: () => askNodes(record),
     outlines: () => api.closedCurves(record.source, record.id),
     skeleton: () => api.skeleton(record.source, record.id),
     wire: async () => ({
@@ -2787,7 +2794,7 @@ async function refreshExtras(record, { early = null } = {}) {
       // Cached: stroke changes rebuild the rings from the same annotations.
       let nodes = nodesCache.get(record.key);
       if (!nodes) {
-        nodes = await api.nodes(record.source, record.id);
+        nodes = await askNodes(record);
         if (gone()) return;
         nodesCache.set(record.key, nodes);
       }
@@ -2974,6 +2981,17 @@ function nearestNode(nodes, point) {
   return best;
 }
 
+/**
+ * The cell's annotations from the server, one request for each load of it
+ * (`appcore.sharedRequest`): the waiting points asked for them again 0.6 s into a
+ * Registration switch, while the answer to the switch's own request waited for the
+ * surface to be drawn before it went into the cache.
+ */
+function askNodes(record) {
+  return sharedRequest(nodesAsked, record.key, loadGeneration(record.key),
+    () => api.nodes(record.source, record.id));
+}
+
 async function nodesFor(record) {
   let nodes = nodesCache.get(record.key);
   if (!nodes) {
@@ -2981,7 +2999,7 @@ async function nodesFor(record) {
     // applied, a Registration switch) answers with the old copy's annotations:
     // they are not kept, and the current load's are fetched in their place.
     const gen = loadGeneration(record.key);
-    nodes = await api.nodes(record.source, record.id);
+    nodes = await askNodes(record);
     if (loadGeneration(record.key) !== gen) {
       const now = state.neurons.get(record.key);
       return now ? nodesFor(now) : nodes;
@@ -4270,6 +4288,7 @@ function forgetDrawn(record, { keepSurfaces = false, keepDrawn = false } = {}) {
   if (!keepSurfaces) dropWithPrefix(meshCache, `${record.key}|`);
   skeletonCache.delete(record.key);
   nodesCache.delete(record.key);
+  nodesAsked.delete(record.key);
   edgesCache.delete(record.key);
   outlinesCache.delete(record.key);
   annoWireCache.delete(record.key);
@@ -4423,7 +4442,10 @@ async function setRegistration(record, changes) {
     // The cell's tick is the user's: this is not a request to select it.
     const fresh = upsertNeuron(detail, { select: false });
     forgetDrawn(fresh);
-    await addToScene(fresh, { frame: false });
+    // The new copy's rings, outlines and skeleton are asked for while its surface
+    // builds, as an Apply's are: one after another once it was drawn, they came
+    // 0.5 to 2.0 s after it (production, 2026-10-20).
+    await addToScene(fresh, { frame: false, extrasEarly: true });
     // Loaded again meanwhile: the newer load draws and reports.
     if (loadGeneration(record.key) !== fresh.loadGen) return;
     // The box ticked or the mode chosen is already in the record, so a list
@@ -4493,7 +4515,7 @@ async function refetchCell(record) {
     { ...detail, freshness: { stale: false, loaded: detail.summary?.data_stamp, live: null } },
     { select: false });
   forgetDrawn(fresh);
-  await addToScene(fresh, { frame: false });
+  await addToScene(fresh, { frame: false, extrasEarly: true });
   renderNeuronListWhenIdle();
   return true;
 }

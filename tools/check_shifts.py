@@ -52,6 +52,11 @@ transforms switch where a volume has none):
   section by the same step, Sections from the blue marker to the red one moves the run, a
   ⌘/Ctrl-click adds one, Enter applies them all, and a click on a section in the list ticks
   every move on it.
+* ``regswitch`` -- a Registration switch and Update from Viking draw a new copy of the cell the way
+  an Apply does (2026-10-20): its annotations and outlines are asked for once each, while its
+  surface builds, and its rings are drawn with the surface.  A second switch made while the first
+  one's outlines are still out (held here) draws the second copy's rings, never the first's, and
+  nothing of the first is left in the caches for a later draw.
 * ``console`` -- nothing logged an error or a warning on the way.
 """
 
@@ -1113,10 +1118,199 @@ def s_moveplane(c: Chrome, r: Report, ctx):
           " await window.sbfsem.moves.reset(window.sbfsem.state.neurons.get(%s)); })()" % q, wait=True)
 
 
+# -- a new copy's extras -------------------------------------------------------------------------
+
+# Spies on the cell's draws and on the requests for its annotations and outlines.  Each answer is
+# marked with the copy the cell held when it was asked and a serial number; each surface and ring
+# draw records the copy the cell holds as it is drawn and the marks of what it draws.  The next
+# outline request can be held (`window.__holdNext`) until `window.__release()`.
+SWITCH_SPY = r"""
+(async () => {
+  const key = %s;
+  const R = window.sbfsem.renderer;
+  const api = window.sbfsem.api;
+  const tagNow = () => window.sbfsem.state.neurons.get(key)?.summary?.copy_tag ?? null;
+  const mark = (o) => (o && typeof o === 'object' ? { copy: o.__copy ?? null, seq: o.__seq ?? null } : null);
+  window.__drawn = []; window.__asked = []; window.__seq = window.__seq || 0;
+  window.__holdNext = false; window.__held = 0;
+  if (!window.__switchSpied) {
+    window.__switchSpied = true;
+    for (const name of ['setMesh', 'setDiscs']) {
+      const f = R[name];
+      R[name] = function (k, data, opts, ...rest) {
+        if (k === key) {
+          window.__drawn.push({ name, at: performance.now(), tag: tagNow(),
+            nodes: name === 'setDiscs' ? mark(data) : null,
+            outlines: name === 'setDiscs' ? mark(opts?.outlines) : null });
+        }
+        return f.call(this, k, data, opts, ...rest);
+      };
+    }
+    for (const name of ['nodes', 'closedCurves']) {
+      const f = api[name];
+      api[name] = async function (...a) {
+        const tag = tagNow();
+        window.__seq += 1;
+        const seq = window.__seq;
+        window.__asked.push({ name, at: performance.now(), tag, seq });
+        if (name === 'closedCurves' && window.__holdNext) {
+          window.__holdNext = false;
+          window.__held += 1;
+          await new Promise((resolve) => { window.__release = resolve; });
+        }
+        const out = await f.apply(this, a);
+        if (out && typeof out === 'object') {
+          Object.defineProperty(out, '__copy', { value: tag, configurable: true });
+          Object.defineProperty(out, '__seq', { value: seq, configurable: true });
+        }
+        return out;
+      };
+    }
+  }
+  (await import('/static/js/api.js')).POLL_TIMING.wait = 1;
+  performance.setResourceTimingBufferSize(4000); performance.clearResourceTimings();
+  return true;
+})()
+"""
+
+# What a draw since `t0` (performance.now()) asked for and drew, for the cell `key`.
+SWITCH_REPORT = r"""
+((key, t0, seq0) => {
+  const tag = window.sbfsem.state.neurons.get(key)?.summary?.copy_tag ?? null;
+  const asked = window.__asked.filter((a) => a.at >= t0);
+  const drawn = window.__drawn.filter((d) => d.at >= t0);
+  const polls = performance.getEntriesByType('resource').filter((e) => e.name.includes('/api/mesh-jobs/') && e.startTime >= t0);
+  const meshes = drawn.filter((d) => d.name === 'setMesh');
+  const rings = drawn.filter((d) => d.name === 'setDiscs');
+  const last = rings.at(-1) || null;
+  return { tag, seq0,
+    nodes: asked.filter((a) => a.name === 'nodes'), outlines: asked.filter((a) => a.name === 'closedCurves'),
+    lastPoll: polls.length ? polls.at(-1).startTime : null, polls: polls.length,
+    setMesh: meshes.length ? meshes.at(-1).at : null, setDiscs: last ? last.at : null, last,
+    stale: rings.filter((d) => d.nodes?.copy !== d.tag || d.outlines?.copy !== d.tag
+      || (d.nodes?.seq ?? 0) <= seq0 || (d.outlines?.seq ?? 0) <= seq0) };
+})(%s, %s, %s)
+"""
+
+
+def _reg_box(c: Chrome, which: str, on: bool) -> str | None:
+    """Set the Registration section's `which` switch ('transforms' or 'correction') to `on`:
+    'clicked', 'already' when it was so, None when the section has no such switch."""
+    return js(c, """(() => { window.__openSection('Registration');
+      const b = window.__section('Registration')?.querySelector('[data-reg=%s] input[type=checkbox]');
+      if (!b) return null; if (b.checked === %s) return 'already'; b.click(); return 'clicked'; })()"""
+              % (which, json.dumps(on)))
+
+
+def _show_rings(c: Chrome, on: bool) -> None:
+    js(c, """(() => { window.__openSection('Annotations');
+        const lab = [...document.querySelectorAll('.cell-panel label.check')]
+          .find((l) => l.textContent.trim().startsWith('Show annotations'));
+        const b = lab && lab.querySelector('input'); if (b && b.checked !== %s) b.click(); })()""" % json.dumps(on))
+
+
+def _mark(c: Chrome) -> tuple[float, int]:
+    return js(c, '[performance.now(), window.__seq]')
+
+
+def _drawn_after(c: Chrome, key: str, t0: float, old_tag: str | None, seconds: float = 120) -> bool:
+    """True once the cell holds a copy other than `old_tag` (any copy when None) and its rings are drawn from it."""
+    return c.wait_for("""(() => { const tag = window.sbfsem.state.neurons.get(%s)?.summary?.copy_tag;
+      return (%s === null || tag !== %s) && window.__drawn.some((d) => d.name === 'setDiscs' && d.at >= %s && d.tag === tag); })()"""
+                      % (json.dumps(key), json.dumps(old_tag), json.dumps(old_tag), t0), seconds)
+
+
+def _check_early(r: Report, what: str, got) -> None:
+    ok = bool(got)
+    r.check(f"{what}: the new copy's annotations and outlines are asked for once each, from that copy, while its surface builds",
+            ok and len(got['nodes']) == 1 and len(got['outlines']) == 1
+            and got['nodes'][0]['tag'] == got['tag'] and got['outlines'][0]['tag'] == got['tag']
+            and got['lastPoll'] is not None
+            # No later than the last poll: a surface the server holds is answered by the first
+            # poll, sent in the same tick, and the two can share a 0.1 ms timestamp.
+            and max(got['nodes'][0]['at'], got['outlines'][0]['at']) <= got['lastPoll'], got)
+    r.check(f'{what}: the rings are drawn with the surface, not before it, from what was asked for the new copy',
+            ok and got['setMesh'] is not None and got['setDiscs'] is not None
+            and 0 <= got['setDiscs'] - got['setMesh'] < 1000 and not got['stale'], got)
+
+
+def s_regswitch(c: Chrome, r: Report, ctx):
+    r.start("regswitch: a Registration switch and Update from Viking ask for the new copy's extras while it builds")
+    key = start(c, ctx)
+    ctx.key = key
+    q = json.dumps(key)
+    _show_rings(c, True)
+    r.check('the rings are drawn on the plain copy', c.wait_for('window.sbfsem.renderer.discs.has(%s)' % q, 60))
+    c.settle(3)
+    js(c, SWITCH_SPY % q, wait=True)
+    tag0 = js(c, "window.sbfsem.state.neurons.get(%s).summary.copy_tag" % q)
+
+    # One switch: Viking's current transforms off.
+    t0, seq0 = _mark(c)
+    r.check('the transforms switch is there', _reg_box(c, 'transforms', False) == 'clicked')
+    _drawn_after(c, key, t0, tag0)
+    c.settle(3)
+    got = js(c, SWITCH_REPORT % (q, t0, seq0))
+    _check_early(r, 'transforms off', got)
+    tag1 = (got or {}).get('tag')
+
+    # A second switch while the first one's outlines are still out: the transforms on again, its
+    # outlines held after its surface is drawn, then the correction off.  The first copy's rings
+    # are never drawn, nor kept for a later draw.
+    js(c, 'window.__holdNext = true')
+    t0, seq0 = _mark(c)
+    _reg_box(c, 'transforms', True)
+    held = c.wait_for("window.__held === 1 && window.__drawn.some((d) => d.name === 'setMesh' && d.at >= %s"
+                      " && d.tag !== %s)" % (t0, json.dumps(tag1)), 120)
+    mid = js(c, "window.sbfsem.state.neurons.get(%s).summary.copy_tag" % q)
+    r.check("the first switch's surface is drawn and its outlines are held", held and mid != tag1,
+            {'held': held, 'tag': mid})
+    _reg_box(c, 'correction', False)
+    _drawn_after(c, key, t0, mid)
+    js(c, 'window.__release && window.__release()')
+    time.sleep(1.5)
+    c.settle(3)
+    got = js(c, SWITCH_REPORT % (q, t0, seq0))
+    r.check('the rings drawn after both are the second copy\'s, and none from the first',
+            bool(got) and got['tag'] not in (mid, tag1) and got['last'] and got['last']['nodes']['copy'] == got['tag']
+            and got['last']['outlines']['copy'] == got['tag'] and not got['stale'], got)
+    # Drawn again from the caches: nothing of the first copy was kept in them.
+    t0b = js(c, 'performance.now()')
+    _show_rings(c, False)
+    c.wait_for('!window.sbfsem.renderer.discs.has(%s)' % q, 10)
+    _show_rings(c, True)
+    c.wait_for("window.__drawn.some((d) => d.name === 'setDiscs' && d.at >= %s)" % t0b, 30)
+    c.settle(2)
+    again = js(c, "window.__drawn.filter((d) => d.name === 'setDiscs' && d.at >= %s).at(-1) || null" % t0b)
+    r.check('rings drawn again come from the caches, and are the second copy\'s',
+            bool(again) and again['nodes']['copy'] == again['tag'] and again['outlines']['copy'] == again['tag']
+            and again['tag'] == (got or {}).get('tag'), again)
+
+    # Update from Viking: the row's refresh button.  The copy keeps its name; what is drawn is what
+    # was asked after the click.
+    t0, seq0 = _mark(c)
+    clicked = js(c, """(() => { const b = document.querySelector(%s); if (!b) return false; b.click(); return true; })()"""
+                 % json.dumps(f'.neuron-item[data-key="{key}"] .icon-btn.refresh'))
+    r.check('the refresh button is there', clicked)
+    c.wait_for("window.__drawn.some((d) => d.name === 'setDiscs' && d.at >= %s && (d.nodes?.seq ?? 0) > %s)"
+               % (t0, seq0), 180)
+    c.settle(3)
+    got = js(c, SWITCH_REPORT % (q, t0, seq0))
+    _check_early(r, 'Update from Viking', got)
+
+    # As it was: the correction and the transforms back on.
+    for which in ('correction', 'transforms'):
+        t0 = js(c, 'performance.now()')
+        if _reg_box(c, which, True) == 'clicked':
+            _drawn_after(c, key, t0, None)
+            c.settle(2)
+    js(c, "(async () => { (await import('/static/js/api.js')).POLL_TIMING.wait = 0; })()", wait=True)
+
+
 SECTIONS = {
     'panel': s_panel, 'help': s_help, 'arrows': s_arrows, 'slice': s_slice, 'legend': s_legend,
     'rc1': s_rc1, 'compare': s_compare, 'layout': s_layout, 'focus': s_focus, 'moves': s_moves,
-    'slicecolors': s_slicecolors, 'moveset': s_moveset, 'moveplane': s_moveplane,
+    'slicecolors': s_slicecolors, 'moveset': s_moveset, 'moveplane': s_moveplane, 'regswitch': s_regswitch,
 }
 
 

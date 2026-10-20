@@ -18,7 +18,7 @@ const {
   meshCacheKey, dropWithPrefix, DrawTokens, importKind, isTypingTarget, registrationChoiceDiffers,
   MeshCache, meshWeight, dropOtherCopies, singleFlight, sameOptions, chooseSource,
   helpLayouts, pickHelpLayout, paneCountMessage, StatusHold, FLARE_HOLD_MS,
-  extrasWanted, startExtras, adoptExtras,
+  extrasWanted, startExtras, adoptExtras, sharedRequest,
 } = await load('appcore.js');
 
 const cases = [];
@@ -479,6 +479,80 @@ test('what came early for a copy since replaced is never kept, and never replace
     caches, key, () => false), true);
   assert.deepEqual(caches.nodes.get(key), ['picked']);
   assert.equal(caches.outlines.has(key), false, 'a failed early request leaves the draw to ask again');
+});
+
+// -- one request for a load's annotations ---------------------------------------------
+
+/** Requests the test answers when it likes: `send` sends one, `sent[i]` settles the i-th. */
+function requests() {
+  const sent = [];
+  return {
+    sent,
+    send: () => new Promise((resolve, reject) => { sent.push({ resolve, reject }); }),
+  };
+}
+
+test('askers of one load share its request, answered or not, and a later load sends its own', async () => {
+  const pending = new Map();
+  const key = 'NeitzInferiorMonkey/1178';
+  const r = requests();
+  // A Registration switch's extras, then the waiting points 0.6 s later: one request.
+  const early = sharedRequest(pending, key, 7, r.send);
+  const points = sharedRequest(pending, key, 7, r.send);
+  assert.equal(r.sent.length, 1, 'the second asker waits for the first request');
+  assert.equal(points, early);
+  r.sent[0].resolve(['nodes of load 7']);
+  assert.deepEqual(await points, ['nodes of load 7']);
+  // Answered, and not yet in the caches (they take it once the surface is drawn): a pick asks.
+  const pick = sharedRequest(pending, key, 7, r.send);
+  assert.equal(r.sent.length, 1, 'the same load is never asked twice');
+  assert.deepEqual(await pick, ['nodes of load 7']);
+  // The cell loaded again (Update from Viking keeps the copy's name, not its load).
+  const update = sharedRequest(pending, key, 8, r.send);
+  assert.equal(r.sent.length, 2, 'a later load sends its own request');
+  assert.notEqual(update, early);
+  // Let go of (forgetDrawn): asked again, it is sent again.
+  pending.delete(key);
+  sharedRequest(pending, key, 8, r.send);
+  assert.equal(r.sent.length, 3);
+});
+
+test('a request of an earlier load is never shared with a later one, nor with another cell', async () => {
+  const pending = new Map();
+  const r = requests();
+  const old = sharedRequest(pending, 'RC1/410', 3, r.send);
+  const fresh = sharedRequest(pending, 'RC1/410', 4, r.send);
+  const other = sharedRequest(pending, 'RC1/514', 4, r.send);
+  assert.equal(r.sent.length, 3);
+  assert.notEqual(old, fresh);
+  assert.notEqual(fresh, other);
+  // The earlier load's answer coming last does not take the later load's place.
+  r.sent[1].resolve(['load 4']);
+  await fresh;
+  r.sent[0].resolve(['load 3']);
+  await old;
+  await Promise.resolve();
+  assert.equal(sharedRequest(pending, 'RC1/410', 4, r.send), fresh, 'the later load keeps its own');
+  assert.deepEqual(await sharedRequest(pending, 'RC1/410', 4, r.send), ['load 4']);
+  assert.equal(r.sent.length, 3);
+});
+
+test('a failed request fails for every asker and is not held, and a send that throws is a rejection', async () => {
+  const pending = new Map();
+  const r = requests();
+  const a = sharedRequest(pending, 'k', 1, r.send);
+  const b = sharedRequest(pending, 'k', 1, r.send);
+  r.sent[0].reject(new Error('502'));
+  await assert.rejects(a, /502/);
+  await assert.rejects(b, /502/);
+  assert.equal(pending.size, 0, 'a failure is not kept');
+  sharedRequest(pending, 'k', 1, r.send);
+  assert.equal(r.sent.length, 2, 'the next asker tries again');
+  r.sent[1].resolve([]);
+  const thrown = sharedRequest(pending, 'other', 1, () => { throw new Error('offline'); });
+  await assert.rejects(thrown, /offline/);
+  await Promise.resolve();
+  assert.equal(pending.has('other'), false);
 });
 
 let failed = 0;
