@@ -1830,9 +1830,9 @@ class SbfsemService:
         result = dendrite_segmentation(neuron)
         segments = [
             SegmentDTO(
-                location_ids=[int(i) for i in row.ID],
-                points_um=[[float(v) for v in p] for p in row.XYZum],
-                radii_um=[float(v) for v in row.Rum],
+                location_ids=np.asarray(row.ID, dtype=np.int64).tolist(),
+                points_um=np.asarray(row.XYZum, dtype=float).tolist(),
+                radii_um=np.asarray(row.Rum, dtype=float).tolist(),
             )
             for row in result.table.itertuples()
         ]

@@ -184,6 +184,41 @@ def test_segment_never_spans_a_branch_point(c943):
             assert g.has_edge(int(a), int(b)), f"{a}-{b} is not an edge"
 
 
+@pytest.mark.parametrize("cell", ["c943", "c1178"])
+def test_segment_table_is_the_label_lookup_to_the_bit(cell, request):
+    """The NumPy lookup (2.17.9) gives every segment the arrays pandas ``.loc``
+    gave, values, dtypes and layout alike, so nothing summed from them moves
+    (the tube builds read this table; ground rule 12)."""
+    from sbfsem.geometry.segmentation import _segment_table, _segment_table_loc
+
+    neuron = request.getfixturevalue(cell)
+    segments = dendrite_segmentation(neuron).segments
+    fast, slow = _segment_table(neuron, segments), _segment_table_loc(neuron, segments)
+    assert len(fast) == len(slow) == len(segments) > 10
+    for a, b in zip(fast.itertuples(), slow.itertuples(), strict=True):
+        for column in ("ID", "Z", "XYZum", "Rum"):
+            x, y = getattr(a, column), getattr(b, column)
+            assert x.dtype == y.dtype and x.shape == y.shape, column
+            assert x.tobytes() == y.tobytes(), column
+            assert x.flags["F_CONTIGUOUS"] == y.flags["F_CONTIGUOUS"], column
+            assert x.flags["C_CONTIGUOUS"] == y.flags["C_CONTIGUOUS"], column
+
+
+def test_segment_table_names_a_missing_location_and_keeps_repeated_ids(c943):
+    import copy
+
+    from sbfsem.geometry.segmentation import _segment_table
+
+    ids = c943.nodes["ID"].to_numpy(dtype=np.int64)
+    with pytest.raises(KeyError, match="123456789"):
+        _segment_table(c943, [np.array([ids[0], 123456789, ids[1]], dtype=np.int64)])
+    # A repeated ID is looked up by label, as before: every row it is on.
+    doubled = copy.copy(c943)
+    doubled.nodes = c943.nodes.iloc[[0, *range(len(c943.nodes))]].reset_index(drop=True)
+    table = _segment_table(doubled, [np.array([ids[0], ids[1]], dtype=np.int64)])
+    assert len(table.XYZum.iloc[0]) == 3
+
+
 def test_bounding_boxes():
     pts = np.array([[0.0, 0, 0], [3.2, 4.7, 1]])
     np.testing.assert_array_equal(bounding_box_from_points(pts), [0, 4, 0, 5])
