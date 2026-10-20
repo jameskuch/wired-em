@@ -41,6 +41,7 @@ import { ConflictPanel } from './conflictpanel.js';
 import { Renderer3D } from './render3d.js';
 import { CompareView } from './compare.js';
 import { DisplayPanel } from './display.js';
+import { ViewCube } from './viewcube.js';
 import {
   isPresetMaterial, materialNames, materialSpec, resolveMaterialName, setMaterialLibrary,
 } from './materials.js';
@@ -194,6 +195,7 @@ let connectivity;
 let settings;     // the Settings tab's debug tools (settings.js)
 let compare;
 let display;
+let viewCube;   // the view cube in the viewport's corner (viewcube.js)
 let recorder;
 // The surfaces this tab has, by meshCacheKey (the cell, its copy and stamp, the
 // render options), least recently used first out (MeshCache).  A cell that is
@@ -266,6 +268,7 @@ function volumeLongName(source) {
 function uiFlags() {
   return {
     show_axes: $('show-axes').checked,
+    show_viewcube: $('show-viewcube').checked,
     ortho: $('ortho').checked,
     controls: readControls(),
     // Materials, colormap, scale bar, context surfaces, crop: view state, so
@@ -648,6 +651,12 @@ async function boot() {
     },
   });
   recorder = new ViewRecorder(renderer, onRecorderState);
+  viewCube = new ViewCube($('viewport'), renderer, {
+    onHome: resetViewNow,
+    onTurned: () => display.readCamera(),
+  });
+  renderer.onFrame = () => viewCube.update();
+  showViewCube($('show-viewcube').checked);
   network = new NetworkView($('cy'));
   network.onSelect = (data) => {
     if (!data.neuronId) return;
@@ -797,8 +806,10 @@ function applyUiFlags(ui) {
     el.checked = !!value;
   };
   set('show-axes', ui.show_axes);
+  set('show-viewcube', ui.show_viewcube);
   set('ortho', ui.ortho);
   renderer.setAxesVisible($('show-axes').checked);
+  showViewCube($('show-viewcube').checked);
   renderer.setOrthographic($('ortho').checked);
   if (ui.controls) writeControls(ui.controls);
   // Fire and forget: the context meshes are a server round trip, and nothing
@@ -1289,6 +1300,10 @@ function bindEvents() {
     renderer.setAxesVisible(e.target.checked);
     persist();
   });
+  $('show-viewcube').addEventListener('change', (e) => {
+    showViewCube(e.target.checked);
+    persist();
+  });
   $('ortho').addEventListener('change', (e) => {
     renderer.setOrthographic(e.target.checked);
     persist();
@@ -1305,11 +1320,7 @@ function bindEvents() {
     button.addEventListener('click', () => lookAt(button.dataset.viewpoint));
   }
 
-  $('reset-view').addEventListener('click', () => {
-    renderer.resetView();
-    display.readCamera();
-    pushHistoryNow();
-  });
+  $('reset-view').addEventListener('click', resetViewNow);
   $('snapshot').addEventListener('click', () => renderer.snapshot(`sbfsem-${Date.now()}.png`));
   bindVideo();
 
@@ -1341,8 +1352,13 @@ function bindEvents() {
   installSelectPicker();
 
   // The camera is not part of the state store, so save it when a gesture ends
-  // rather than on every damped frame.
-  renderer.controls.addEventListener('end', persist);
+  // rather than on every damped frame.  The session only, not persist(): the
+  // gesture's undo step was taken as it ended (above), and persist's second one,
+  // 350 ms on, caught the next drag halfway when it began that soon after (a
+  // view cube turn and then a drag on the cube, 2026-10-20).
+  renderer.controls.addEventListener('end', () => {
+    if (!restoring) session.save(state, renderer, uiFlags());
+  });
 
   window.addEventListener('beforeunload', () => session.saveNow(state, renderer, uiFlags()));
 
@@ -2835,6 +2851,19 @@ function hasClosedCurves(record) {
   const s = record.summary;
   if (!s) return true;  // unknown: ask, the endpoint answers [] cheaply
   return Boolean(s.has_geometry) || (s.n_curve_annotations || 0) > 0;
+}
+
+/** Reset view, as its button and the view cube's house do (an undo step of its own). */
+function resetViewNow() {
+  renderer.resetView();
+  display.readCamera();
+  pushHistoryNow();
+}
+
+/** Show or hide the view cube; the overlay row and the notices make room for it. */
+function showViewCube(on) {
+  viewCube?.setVisible(on);
+  $('view-render').classList.toggle('with-viewcube', !!on);
 }
 
 /** Turn the view to a named viewpoint, as the toolbar's buttons do (an undo step of its own). */

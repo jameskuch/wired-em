@@ -182,8 +182,8 @@ column is otherwise entirely about cells: loading them, and the settings of
 each one.
 
 The bottom of the 3D view is a **fixed toolbar of view actions** — Axes,
-Orthographic, Undo/Redo, Reset view, the named viewpoints, Snapshot and
-Video — that never rearranges. Everything else lives in two expandable
+View cube, Orthographic, Undo/Redo, Reset view, the named viewpoints, Snapshot
+and Video — that never rearranges. Everything else lives in two expandable
 panels opened from its left edge:
 
 - **Render options** — opened by the ▲ arrow next to the technique picker.
@@ -243,6 +243,43 @@ row, with nothing moved in between, turn about the same point at the same
 distance. Only **Reset view** frames the whole scene — so for the whole cell
 along an axis, press Reset view and then the button. (The **2D** checkbox,
 which looks down Z, follows the same rule.)
+
+### View cube
+
+The cube in the top-right corner of the 3D view, after the ViewCube in
+Autodesk Fusion 360, stays where it is and turns with the view, so it always
+shows which way the volume's axes run. Its faces are labeled with the axis
+each one faces (**+X**, **−Y**, **+Z** …), and an X/Y/Z tripod in the axes'
+colors runs from the corner nearest the volume's origin. **View cube** in the
+toolbar, beside Axes, shows or hides it (on by default; kept with the session).
+
+- **Double-click a face** to look straight down that axis. The six faces are
+  the six viewpoint buttons exactly, with the same up: +Z is XY1, −Z XY2, −Y
+  XZ1, +Y XZ2, +X YZ1, −X YZ2.
+- **Double-click an edge** for the 45° view between its two faces, and **a
+  corner** for the view between three (the isometric view: 45° round,
+  35.3° up).
+  Edges and corners keep Z as upright as the view allows. The band along each
+  edge of a face, a fifth of its width, is that edge, and the square where two
+  bands meet is that corner. The part under the pointer lights up blue, and
+  its name shows under the cube.
+- **Drag the cube** to orbit, as a drag on the render does: about a quarter
+  turn for the cube's own width.
+- **The house** (top left, on hover) is Reset view.
+- **Looking straight at a face**, four triangles around the cube turn to the
+  face beside it on that side of the screen, and the two curved arrows at
+  the top right turn the picture a quarter clockwise or counterclockwise.
+  These take a single click.
+
+A single click on the cube itself does nothing; turning takes a double-click,
+so a click that was meant for the render never turns the view. Each turn
+glides there, longer the further it goes (up to 0.6 s; at once with reduced
+motion on), and pivots like a viewpoint button: what is in the middle of the
+picture stays there at the size it had, and turns in a row, with nothing
+moved in between, keep the same pivot. Every turn and every drag is one
+undo step. Under **Flip Z** the face on top is the volume's −Z and the
+tripod's Z runs down, as the Axes helper's does. The cube is drawn over the
+render, not in it: it is never in a snapshot or a video.
 
 ### An exact viewpoint
 

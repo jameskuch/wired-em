@@ -80,6 +80,13 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   (systemd did not start it); clearing surfaces in memory says what it cleared; "Clear cached files and
   reload" sends Clear-Site-Data and comes back to the tab with its note; a reset removes the ticked items,
   the session the page saved after the list was made included, and leaves the rest.
+* ``viewcube`` -- the view cube in the corner (viewcube.js), with a real mouse: a double-click on a
+  face turns the view to that face's toolbar viewpoint exactly, on an edge to the 45 degree view and on a
+  corner to the view between three faces; a single click turns nothing; looking at a face, the triangles
+  and curved arrows make quarter turns about one pivot, which nine of them do not move; a drag on the
+  cube orbits, and one begun straight after a turn is one undo step, not two; the house is
+  Reset view; the overlay row makes room for it; Flip Z relabels it; hidden, it stays hidden after a
+  reload and Restore.
 * ``locate`` -- Viking's "Show in SBFSEM-tools" (``/open?...&location=N``) and a Location ID typed into the
   readout took the view to the annotation and left it unmarked (2026-10-20): both select it now, drawn
   yellow, the readout naming it, and it stays selected once the cell has finished drawing; with the cell's
@@ -1363,6 +1370,7 @@ def fine(c: Chrome, r: Report, ctx):
     r.check('the notice says which Fine voxel was used and why', shown and '0.01 µm typed' in note[1]
             and ('finest typed voxel' in note[1] or 'raw triangles' in note[1] or 'field evaluations' in note[1]), note)
 
+
 CONFLICT = "document.getElementById('render-conflict')"
 MARKED = "[...document.querySelectorAll('#panel-render .field.conflict')].map((e) => e.dataset.key).sort()"
 
@@ -2347,6 +2355,182 @@ def locate(c: Chrome, r: Report, ctx):
             got and js(c, f'!window.sbfsem.renderer.discs.has({json.dumps(key)})') and sel['drawn'], sel)
 
 
+
+# -- viewcube ---------------------------------------------------------------------------
+
+def viewcube(c: Chrome, r: Report, ctx):
+    r.start('viewcube: the cube in the corner turns the view')
+    renderer = 'window.sbfsem.renderer'
+    boot(c, ctx.url)
+    load(c, ctx.cell)
+    shown = js(c, "(() => { const v = document.querySelector('.viewcube'); return !!v && !v.hidden; })()")
+    r.check('the cube is shown by default', shown)
+    inset = js(c, "getComputedStyle(document.querySelector('.viewport-overlay')).right")
+    r.check('the overlay row leaves it the corner', inset == '152px', inset)
+
+    def at(region: list[int]) -> tuple[float, float]:
+        """Where a part of the cube is drawn now, in page pixels (the module's own projection).
+
+        Aimed at 0.8 of the way out to the part, inside its zone: a part's own point can lie on
+        the cube's outline (a corner seen from an edge view), where the pointer grazes the cube."""
+        return tuple(js(c, """(async () => {
+            const m = await import('/static/js/viewcube.js');
+            const b = document.querySelector('.vc-stage').getBoundingClientRect();
+            const [x, y] = m.project(%s.viewFrame(), %s);
+            return [b.left + b.width / 2 + x, b.top + b.height / 2 + y]; })()"""
+                        % (renderer, json.dumps([0.8 * v for v in region])), wait=True))
+
+    def double(x: float, y: float) -> None:
+        c.move(x, y)
+        for count in (1, 2):
+            c.send('Input.dispatchMouseEvent', type='mousePressed', x=x, y=y, button='left', buttons=1,
+                   clickCount=count)
+            c.send('Input.dispatchMouseEvent', type='mouseReleased', x=x, y=y, button='left', buttons=0,
+                   clickCount=count)
+
+    def frame() -> dict:
+        return js(c, f'{renderer}.viewFrame()')
+
+    def near(a: list[float], b: list[float], eps: float = 1e-6) -> bool:
+        return all(abs(x - y) <= eps for x, y in zip(a, b, strict=True))
+
+    def arrived(back: list[float], up: list[float], seconds: float = 3.0) -> bool:
+        end = time.time() + seconds
+        while time.time() < end:
+            f = frame()
+            if near(f['back'], back) and near(f['up'], up):
+                return True
+            time.sleep(0.05)
+        return False
+
+    def still() -> dict:
+        """The camera once it has stopped moving (a load's framing and glide come after the mesh)."""
+        last = js(c, f'{renderer}.cameraState()')
+        for _ in range(40):
+            time.sleep(0.25)
+            now = js(c, f'{renderer}.cameraState()')
+            if same(now, last):
+                return now
+            last = now
+        return last
+
+    def same(a: dict, b: dict, eps: float = 1e-9) -> bool:
+        return all(near(a[k], b[k], eps) for k in ('position', 'target', 'up'))
+
+    steps = lambda: js(c, 'window.sbfsem.history().undo.length')  # noqa: E731
+    h = 2 ** -0.5
+
+    before = still()
+    c.click(*at([0, 0, 1]))
+    time.sleep(1.0)
+    r.check('a single click on a face turns nothing', same(js(c, f'{renderer}.cameraState()'), before))
+
+    count = steps()
+    double(*at([0, 0, 1]))
+    r.check('a double-click on +Z looks down Z, Y up', arrived([0, 0, 1], [0, 1, 0]), frame())
+    c.wait_for('window.sbfsem.history().undo.length > %d' % count, 5)
+    r.check('and is an undo step', steps() == count + 1, f'{count} -> {steps()}')
+    cube = js(c, f'{renderer}.cameraState()')
+    js(c, "document.querySelector('[data-viewpoint=\"xy1\"]').click()")
+    c.settle(2)
+    button = js(c, f'{renderer}.cameraState()')
+    r.check('exactly where the XY1 button puts the camera', same(cube, button, 1e-6), (cube, button))
+    r.check('the face controls are offered, face on',
+            js(c, "document.querySelector('.viewcube').classList.contains('face-on')"))
+
+    def press(which: str) -> None:
+        box = js(c, """(() => { const b = document.querySelector('.vc-%s').getBoundingClientRect();
+            return [b.left + b.width / 2, b.top + b.height / 2]; })()""" % which)
+        c.move(*at([0, 0, 1]))       # the controls show while the pointer is on the cube
+        c.settle(2)
+        c.click(*box)
+
+    pivot = js(c, f'{renderer}.controls.target.toArray()')
+    press('nudge-down')
+    r.check('the bottom triangle brings −Y round: XZ1', arrived([0, -1, 0], [0, 0, 1]), frame())
+    press('roll-cw')
+    r.check('the clockwise arrow turns the picture a quarter (+X, on the right, goes down)',
+            arrived([0, -1, 0], [-1, 0, 0]), frame())
+    press('roll-ccw')
+    r.check('and the other arrow turns it back', arrived([0, -1, 0], [0, 0, 1]), frame())
+    for which in ('nudge-left', 'nudge-left', 'nudge-left', 'nudge-left', 'nudge-up'):
+        press(which)
+        c.wait_for(f'!{renderer}._endFlight', 3)
+    r.check('four turns round the sides and one up: back on XY1', arrived([0, 0, 1], [0, 1, 0]), frame())
+    after = js(c, f'{renderer}.controls.target.toArray()')
+    r.check('every quarter turn kept the pivot (no creep)', near(after, pivot, 1e-6), (pivot, after))
+
+    # From XY1 the edges round the top face are in sight (the upright ones are end on).
+    double(*at([1, 0, 1]))
+    r.check('an edge is the 45 degree view between its faces, Z as upright as it goes',
+            arrived([h, 0, h], [-h, 0, h]), frame())
+    js(c, "document.querySelector('[data-viewpoint=\"xz1\"]').click()")
+    c.settle(2)
+    double(*at([1, -1, 0]))
+    r.check('an upright edge, from XZ1: Z up', arrived([h, -h, 0], [0, 0, 1]), frame())
+    s3 = 3 ** -0.5
+    double(*at([1, -1, 1]))
+    corner_up = [-1 / 6 ** 0.5, 1 / 6 ** 0.5, 2 / 6 ** 0.5]
+    r.check('a corner is the view between three faces', arrived([s3, -s3, s3], corner_up), frame())
+    r.check('not face on, no face controls',
+            not js(c, "document.querySelector('.viewcube').classList.contains('face-on')"))
+
+    # Straight after the turn: a drag begun within 350 ms of one used to be caught halfway by a
+    # second history step of the turn's.
+    count = steps()
+    start = frame()['back']
+    x, y = at([1, -1, 1])
+    c.press(x, y)
+    for i in range(1, 21):
+        c.move(x - i * 2, y, buttons=1)
+        time.sleep(0.02)
+    c.release(x - 40, y)
+    c.wait_for(f'!{renderer}._spin.yaw && !{renderer}._spin.endPending', 10)     # the glide
+    turned = math.degrees(math.acos(max(-1.0, min(1.0, sum(a * b for a, b in zip(
+        frame()['back'], start, strict=True))))))
+    rate = js(c, "import('/static/js/viewcube.js').then((m) => m.DRAG_RADIANS_PER_PX)", wait=True)
+    asked = math.degrees(40 * rate)
+    r.check('a drag on the cube orbits the view, about a quarter turn for the cube\'s width',
+            0.85 * asked < turned <= asked + 0.1, f'{turned:.1f} degrees for 40 px ({asked:.1f} at most)')
+    c.wait_for('window.sbfsem.history().undo.length > %d' % count, 5)
+    r.check('and is one undo step', steps() == count + 1, f'{count} -> {steps()}')
+    js(c, "document.getElementById('undo-btn').click()")
+    r.check('Undo puts the corner view back', arrived([s3, -s3, s3], corner_up), frame())
+
+    c.move(*at([1, -1, 1]))
+    c.settle(2)
+    home = js(c, """(() => { const b = document.querySelector('.vc-home').getBoundingClientRect();
+        return [b.left + b.width / 2, b.top + b.height / 2]; })()""")
+    c.click(*home)
+    c.settle(2)
+    homed = js(c, f'{renderer}.cameraState()')
+    js(c, "document.getElementById('reset-view').click()")
+    c.settle(2)
+    reset = js(c, f'{renderer}.cameraState()')
+    r.check('the house is Reset view', same(homed, reset, 1e-6), (homed, reset))
+
+    js(c, "document.getElementById('opt-flipz').click()")
+    c.settle(3)
+    top = js(c, "document.querySelector('.vc-face-pz .vc-label').textContent")
+    r.check('under Flip Z the face on top is the volume\'s −Z', top == '−Z', top)
+    js(c, "document.getElementById('opt-flipz').click()")
+    c.settle(3)
+
+    js(c, "document.getElementById('show-viewcube').click()")
+    c.settle(2)
+    hidden = js(c, "document.querySelector('.viewcube').hidden")
+    inset = js(c, "getComputedStyle(document.querySelector('.viewport-overlay')).right")
+    r.check('unticked, the cube goes and the overlay row has the corner back', hidden and inset == '12px', inset)
+    time.sleep(1.0)
+    boot(c, ctx.url, keep=True)
+    c.wait_for("!document.getElementById('restore-banner').hidden", 30)
+    js(c, "document.getElementById('restore-yes').click()")
+    c.wait_for('window.sbfsem.renderer.meshes.size === 1', 120)
+    c.settle(2)
+    r.check('and stays hidden after a reload and Restore',
+            js(c, "!document.getElementById('show-viewcube').checked && document.querySelector('.viewcube').hidden"))
+
+
 SECTIONS = {
     'notice': notice, 'waiting': waiting, 'draws': draws, 'undo': undo, 'idle': idle,
     'picker': picker, 'save': save, 'analysis': analysis, 'strata': strata, 'twod': twod, 'sheets': sheets, 'volume': volume,
@@ -2364,6 +2548,7 @@ SECTIONS = {
     'settings': settings,
     'visualizations': visualizations,
     'locate': locate,
+    'viewcube': viewcube,
 }
 
 

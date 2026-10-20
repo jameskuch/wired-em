@@ -1357,6 +1357,85 @@ body.fullscreen .update-banner { padding-left: 100px; }
 @keyframes rec-pulse { 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) { .rec-dot { animation: none; } }
 
+/* -- The view cube (viewcube.js) ------------------------------------------------
+   Top right of the 3D view, as in Fusion 360: a cube that turns with the view.
+   The overlay row (readout and hint) and the notices give it the corner rather
+   than lie under it.  Faded until the pointer is on it.  The box itself takes
+   no pointer events, only the faces and buttons, so a drag that starts beside
+   the cube still orbits the scene.  The stage is 144 px (STAGE): the 64 px cube
+   (HALF) with room for the face controls and the axis letters around it, and
+   the caption under it. */
+.view.with-viewcube .viewport-overlay { right: 152px; }
+.view.with-viewcube .render-notice { right: 152px; }
+.viewcube {
+  position: absolute; top: 2px; right: 4px; z-index: 3;
+  width: 144px; height: 172px;
+  pointer-events: none; user-select: none; -webkit-user-select: none;
+  opacity: 0.8; transition: opacity 0.15s;
+}
+.viewcube[hidden] { display: none; }
+.viewcube:hover, .viewcube.dragging { opacity: 1; }
+.vc-stage { position: absolute; left: 0; top: 0; width: 144px; height: 144px; perspective-origin: 50% 50%; }
+.vc-cube {
+  position: absolute; left: 50%; top: 50%; width: 64px; height: 64px; margin: -32px 0 0 -32px;
+  transform-style: preserve-3d;
+}
+.vc-face {
+  position: absolute; inset: 0; box-sizing: border-box;
+  display: grid; grid-template: 20% 60% 20% / 20% 60% 20%;
+  background: linear-gradient(155deg, #f5f7f9, #d2d7dd);
+  border: 1px solid #6f7883; border-radius: 2px;
+  backface-visibility: hidden; -webkit-backface-visibility: hidden;
+  pointer-events: auto; cursor: pointer;
+}
+.viewcube.dragging .vc-face { cursor: grabbing; }
+.vc-cell.hot { background: rgb(64 150 255 / 0.55); }
+.vc-label {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font: 700 14px/1 system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: 0.02em;
+  pointer-events: none;
+}
+.vc-axis { position: absolute; height: 2px; border-radius: 1px; pointer-events: none; }
+.vc-tip {
+  position: absolute; transform: translate(-50%, -50%);
+  font: 700 11px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+  text-shadow: 0 0 3px rgb(0 0 0 / 0.9); pointer-events: none;
+}
+#viewport.inverted .vc-tip { text-shadow: 0 0 3px rgb(255 255 255 / 0.95); }
+.vc-btn {
+  position: absolute; width: 18px; height: 18px; padding: 0; margin: 0;
+  display: grid; place-items: center;
+  border: none; border-radius: 4px; background: none; color: #cfd6de;
+  cursor: pointer; pointer-events: auto; opacity: 0; transition: opacity 0.15s;
+}
+.vc-btn svg { width: 100%; height: 100%; display: block; }
+.viewcube:hover .vc-btn { opacity: 0.85; }
+.viewcube .vc-btn:hover { opacity: 1; color: #6fb6ff; background: rgb(255 255 255 / 0.1); }
+.vc-btn:focus-visible { opacity: 1; outline: 1px solid var(--accent); }
+#viewport.inverted .vc-btn { color: #3a434d; }
+#viewport.inverted .viewcube .vc-btn:hover { color: #1f6fd6; background: rgb(0 0 0 / 0.06); }
+/* The face controls are there only while the view looks straight at a face. */
+.viewcube:not(.face-on) .vc-turn { visibility: hidden; }
+/* Around the stage's middle (72, 72): the face drawn face on is 70 px across. */
+.vc-home { left: 4px; top: 4px; width: 20px; height: 20px; padding: 2px; }
+.vc-nudge { width: 14px; height: 14px; padding: 1px; }
+.vc-nudge-up { left: 65px; top: 17px; }
+.vc-nudge-down { left: 65px; top: 113px; transform: rotate(180deg); }
+.vc-nudge-left { left: 17px; top: 65px; transform: rotate(-90deg); }
+.vc-nudge-right { left: 113px; top: 65px; transform: rotate(90deg); }
+.vc-roll { top: 6px; padding: 1px; }
+.vc-roll-ccw { left: 103px; }
+.vc-roll-cw { left: 122px; }
+.vc-caption {
+  position: absolute; left: 0; right: 0; top: 146px;
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  font-size: 11px; line-height: 1.2; color: #e8eaed; white-space: nowrap;
+  text-shadow: 0 1px 3px rgb(0 0 0 / 0.9); pointer-events: none;
+}
+.vc-caption span { font-size: 10px; color: #aeb7c1; }
+#viewport.inverted .vc-caption { color: #16191d; text-shadow: 0 1px 3px rgb(255 255 255 / 0.9); }
+#viewport.inverted .vc-caption span { color: #4b5560; }
+
 /* -- Render compare -------------------------------------------------------- */
 /* A grid of independent viewports over the same cell.  A pane header carries
    the technique, the display toggles and the arrow that opens the pane's render

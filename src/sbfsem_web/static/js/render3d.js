@@ -243,6 +243,9 @@ export class Renderer3D {
     // The viewport changed background (setInverted): `(inverted) => void`, for
     // what is drawn over it in its colors (the Position shift legend).
     this.onInverted = null;
+    // After every frame drawn: `() => void`, for what follows the camera over
+    // the canvas (the view cube).
+    this.onFrame = null;
     this.bounds = new THREE.Box3();
     // Everything drawn, hidden or not, context included: what the far plane
     // has to reach.  Rebuilt lazily when something is added or removed.
@@ -608,6 +611,7 @@ export class Renderer3D {
     this.onStepZ = null;
     this.onSliceStep = null;
     this.onInverted = null;
+    this.onFrame = null;
     this.onContextMenu = null;
     this.selection = null;
     this.markers = { above: null, below: null };
@@ -655,6 +659,7 @@ export class Renderer3D {
     this.keyLight.position.copy(this.camera.position);
     this.fillLight.position.copy(this.camera.position).addScaledVector(dir, 2).negate();
     this.webgl.render(this.scene, this.camera);
+    this.onFrame?.();
   };
 
   // -- content ------------------------------------------------------------
@@ -2123,14 +2128,34 @@ export class Renderer3D {
     const key = String(name).toLowerCase();
     const spec = Renderer3D.VIEWPOINTS[Renderer3D.VIEWPOINT_ALIASES[key] ?? key];
     if (!spec || this.bounds.isEmpty()) return false;
+    // A view cube turn under way would carry on over this one.
+    this._settleFlight();
+    const direction = spec.dir
+      ? new THREE.Vector3().fromArray(spec.dir).normalize()
+      : DEFAULT_VIEW_DIR.clone();
+    this._placeView(direction, new THREE.Vector3().fromArray(spec.up), this._viewPivot());
+    return true;
+  }
+
+  /**
+   * Where a turn of the view pivots and how far the camera stays from it, for
+   * setViewpoint and the view cube's turns (`turnTo`): `{ pivot, distance,
+   * center, radius }`, the last two the scene's.
+   */
+  _viewPivot() {
     const center = this.bounds.getCenter(new THREE.Vector3());
     const radius = Math.max(this.bounds.getSize(new THREE.Vector3()).length() * 0.5, 1e-3);
     const cam = this.camera;
     const pivot = center.clone();
     let distance;
     const last = this._lastViewpoint;
+    // "Nothing moved" to within a billionth of the scene: OrbitControls' update
+    // moves the camera and its target by a float bit or two in the frames after
+    // a view is placed (2e-14 um, measured on c943 after XY1, and a bit a frame
+    // after XZ1), which an exact comparison took for a move.
+    const still = (a, b) => a.distanceTo(b) <= 1e-9 * Math.max(1, radius);
     if (this.framed && last && last.camera === cam && last.zoom === cam.zoom
-        && last.position.equals(cam.position) && last.target.equals(this.controls.target)) {
+        && still(last.position, cam.position) && still(last.target, this.controls.target)) {
       // One viewpoint straight after another, nothing moved in between: turn
       // about the same point at the same distance.  Measuring again would
       // find a different column of content in each direction and creep
@@ -2148,13 +2173,16 @@ export class Renderer3D {
     } else {
       distance = radius * 3;
     }
-    const direction = spec.dir
-      ? new THREE.Vector3().fromArray(spec.dir).normalize()
-      : DEFAULT_VIEW_DIR.clone();
+    return { pivot, distance, center, radius };
+  }
+
+  /** Put the camera `distance` from `pivot` along `direction`, `up` up (see setViewpoint). */
+  _placeView(direction, up, { pivot, distance, center, radius }) {
+    const cam = this.camera;
     // A turn in progress would carry on about the new axis.
     this._spin.yaw = 0;
     this._spin.pitch = 0;
-    cam.up.fromArray(spec.up).normalize();
+    cam.up.copy(up).normalize();
     cam.position.copy(pivot).addScaledVector(direction, distance);
     this.controls.target.copy(pivot);
     // Far enough for the whole scene from wherever the pivot is in it.
@@ -2169,8 +2197,121 @@ export class Renderer3D {
       camera: cam, zoom: cam.zoom,
       position: cam.position.clone(), target: this.controls.target.clone(),
     };
-    return true;
   }
+
+  /**
+   * Turn the view to look along `dir` (from what is looked at toward the
+   * camera) with `up` up, both in the scene's frame, gliding there as Fusion
+   * 360's view cube does.  The view cube's way in (viewcube.js).
+   *
+   * It pivots as a viewpoint button does (setViewpoint): what is in view stays
+   * in view, at its zoom.  The camera's orientation is slerped, so the pivot
+   * stays in the middle of the picture throughout, and the glide is longer the
+   * further it turns (0.22 s, up to 0.6 s for a half turn; none with reduced
+   * motion asked for).  Resolves true once the view is there -- an undo step of
+   * its own ('end') -- or false with nothing to look at.
+   */
+  turnTo(dir, up, { duration = null } = {}) {
+    if (this.bounds.isEmpty()) return Promise.resolve(false);
+    this._settleFlight();
+    const cam = this.camera;
+    const direction = new THREE.Vector3().fromArray(dir).normalize();
+    const upward = new THREE.Vector3().fromArray(up).normalize();
+    const view = this._viewPivot();
+    const origin = new THREE.Vector3();
+    const facing = (eye, top) => new THREE.Quaternion()
+      .setFromRotationMatrix(new THREE.Matrix4().lookAt(eye, origin, top));
+    // From where the camera is now about the pivot, which lies on its view
+    // axis (or, for a scene never framed, is its center).
+    const from = facing(cam.position.clone().sub(view.pivot), cam.up);
+    const to = facing(direction, upward);
+    const angle = 2 * Math.acos(Math.min(1, Math.abs(from.dot(to))));
+    const still = typeof window !== 'undefined'
+      && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    const ms = duration ?? (still ? 0 : 220 + (380 * angle) / Math.PI);
+
+    this._spin.yaw = 0;
+    this._spin.pitch = 0;
+    this._spin.endPending = false;
+    // As in flyTo: damping would go on easing the target while this writes it.
+    const damping = this.controls.enableDamping;
+    this.controls.enableDamping = false;
+    this.controls.enabled = false;
+    this._setPlanes(cam, Math.max(view.distance / 2000, 1e-4),
+      (view.distance + view.pivot.distanceTo(view.center)) * 8 + view.radius * 20);
+    cam.updateProjectionMatrix();
+    const q = new THREE.Quaternion();
+    const place = (t) => {
+      q.slerpQuaternions(from, to, t);
+      cam.position.set(0, 0, view.distance).applyQuaternion(q).add(view.pivot);
+      cam.up.set(0, 1, 0).applyQuaternion(q);
+      this.controls.target.copy(view.pivot);
+      this._syncControlsUp();
+      this.controls.update();
+    };
+
+    return new Promise((resolve) => {
+      let late = null;
+      const finish = () => {
+        if (this._flight === null && this._endFlight === null) return;
+        if (this._flight) cancelAnimationFrame(this._flight);
+        this._flight = null;
+        this._endFlight = null;
+        clearTimeout(late);
+        document.removeEventListener('visibilitychange', onHide);
+        // Damping back on first: the arrival is placed by the update every later
+        // frame makes, so the camera stays on it to the bit and a viewpoint button
+        // pressed next turns about the same pivot (setViewpoint).
+        this.controls.enableDamping = damping;
+        this.controls.enabled = true;
+        this._placeView(direction, upward, view);
+        this.controls.dispatchEvent({ type: 'end' });
+        resolve(true);
+      };
+      // No frames come in a hidden document (see flyTo): arrive at once.
+      const onHide = () => { if (document.hidden) finish(); };
+      this._endFlight = finish;
+      if (document.hidden || ms <= 0) { finish(); return; }
+      document.addEventListener('visibilitychange', onHide);
+      // Nor in a page that is not hidden but not being drawn either (a pane out of
+      // sight in an embedding app): the turn lands when it should have ended, and
+      // the controls it disabled come back.
+      late = setTimeout(finish, ms + 250);
+      const start = performance.now();
+      const step = (now) => {
+        const raw = Math.min(1, (now - start) / ms);
+        if (raw >= 1) { finish(); return; }
+        place(raw * raw * (3 - 2 * raw));
+        this._flight = requestAnimationFrame(step);
+      };
+      this._flight = requestAnimationFrame(step);
+    });
+  }
+
+  /**
+   * The camera's own axes in the scene's frame (Flip Z not taken back, unlike
+   * viewAxes): unit vectors `right` and `up` along the screen and `back` out of
+   * it toward the viewer, as arrays.  What the view cube turns with.
+   */
+  viewFrame() {
+    const q = this.camera.quaternion;
+    const axis = (x, y, z) => new THREE.Vector3(x, y, z).applyQuaternion(q).toArray();
+    return { right: axis(1, 0, 0), up: axis(0, 1, 0), back: axis(0, 0, 1) };
+  }
+
+  /**
+   * Turn the view by a drag that is not on the canvas (the view cube's), eased
+   * as a plain drag is: `yaw` about the screen's vertical, `pitch` about its
+   * horizontal, radians.  `endSpin` when the drag lets go, so the glide's end
+   * is an undo step as a canvas drag's is.
+   */
+  spinBy(yaw, pitch) {
+    if (!this.controls.enabled) return;
+    this._spin.yaw += yaw;
+    this._spin.pitch += pitch;
+  }
+
+  endSpin() { this._spin.endPending = true; }
 
   /**
    * How far in front of the camera the content of the viewport lies: the
@@ -2465,6 +2606,8 @@ export class Renderer3D {
   }
 
   resetView() {
+    // A view cube turn under way would carry on over the reset.
+    this._settleFlight();
     if (this.bounds.isEmpty()) {
       // Nothing to frame, but the horizon can still be put back: pressing
       // Reset view with every cell hidden used to do nothing at all, which
@@ -3859,6 +4002,11 @@ export class Renderer3D {
       };
       this._flight = requestAnimationFrame(step);
     });
+  }
+
+  /** Settle a flight if one is under way; with none, touch nothing (not even the controls). */
+  _settleFlight() {
+    if (this._endFlight || this._flight) this._cancelFlight();
   }
 
   /** Settle any flight in progress, so a new one starts from a clean state. */
