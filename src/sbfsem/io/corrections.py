@@ -1258,9 +1258,9 @@ class CorrectionsProvider:
     def correct(self, neuron, mode: str = "neighbor") -> CellCorrection | None:
         """Apply Viking's correction to ``neuron`` in ``mode`` (see :func:`correct_neuron`).
 
-        ``None`` when its volume has no published set.  While the volume, or
-        this structure, is held after a failure in the service, only offsets
-        on disk are used.
+        ``None`` when its volume has no published set.  While the service is
+        paused, or the volume or this structure is held after a failure in the
+        service, only offsets on disk are used.
         """
         volume_name = neuron.volume.viking_name
         if not volume_name:
@@ -1271,6 +1271,8 @@ class CorrectionsProvider:
             return None
         structure = int(neuron.id)
         held = self.held(volume_name, mode, structure)
+        # Sets asked for within sets_ttl_s are fresh during a pause as well.
+        fresh = fresh and not self.paused
         try:
             if mode == "neighbor":
                 correction = fetch_offsets(neuron, self.client, cset, cache=self.cache,

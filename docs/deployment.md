@@ -152,7 +152,11 @@ volume and mode once two different cells of it fail so in a row (RC1 threw
 after 5-15 s on every call on 2026-09-24; on 2026-10-20 Cped's volume server
 refused connections on and off, and every Cped request failed meanwhile). Any
 other error from the service holds the volume and mode at once, and an
-unreachable service is left alone for two minutes. When the service answers
+unreachable service is left alone for two minutes, for every volume (one whose
+correction sets were asked for in the last ten minutes too: until 2.17.5 such a
+volume was still asked, and against a host that drops traffic each load waited
+out its 120 s deadline); a cell whose offsets are on disk is corrected from
+them meanwhile, and its status says so. When the service answers
 `UNAVAILABLE` naming the volume asked about (it could not reach that volume's
 own server: "volume mapping temporarily unavailable for 'cped'"), only that
 volume is left alone for two minutes, in Curve fit and Field + fit together

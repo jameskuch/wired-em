@@ -114,7 +114,10 @@ draws it keeps its place: its correction was worked out somewhere else. (Until
 the evening of 2026-09-24 the service placed lines and curves with empty
 section X and Y at the section's origin.) When the service does not answer, or
 has no correction of the kind chosen for the volume, the cell is drawn
-uncorrected and the chip reads `unavailable`, with why in its hover. When it answers with an error for a cell, it is not asked again
+uncorrected and the chip reads `unavailable`, with why in its hover. A service
+that cannot be reached is not asked again for two minutes, for any volume; a
+cell corrected before is drawn meanwhile with the correction it had then, and
+its hover says so. When it answers with an error for a cell, it is not asked again
 for that cell and correction for ten minutes, and once two cells of a volume
 fail in a row, for the whole volume, so the cells load at once; the chip's
 hover says until when. The other cells of the volume are still corrected while

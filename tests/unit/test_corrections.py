@@ -273,6 +273,7 @@ def service():
     server.add_generic_rpc_handlers((fake.handler(),))
     port = server.add_insecure_port("127.0.0.1:0")
     server.start()
+    fake.server = server  # a test may take the service away
     try:
         yield fake, f"http://127.0.0.1:{port}"
     finally:
@@ -1074,6 +1075,50 @@ def test_an_unavailable_naming_no_volume_asked_pauses_the_whole_service(structur
         with pytest.raises(corr.CorrectionsUnavailable):
             provider.correct(structure_neuron(476, "RC1"), "all")
         assert len(fake.structure_requests) == 1
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("outage", ["no healthy upstream", "unreachable"])
+def test_a_service_wide_pause_asks_no_volume_whose_sets_are_fresh(
+        structures, tmp_path, monkeypatch, outage):
+    """Until 2.17.5 a volume whose sets were asked for within ``sets_ttl_s`` was
+    asked all the same during the pause: RC1 c476 was (measured on 2.17.2), and
+    against a host that drops traffic each such load waited out its deadline
+    (120 s for ``CorrectStructures``) and moved the end of the pause later."""
+    fake, url = structures
+    fake.volumes = ["InferiorMonkey", "RC1"]
+    provider = corr.CorrectionsProvider(url, cache=DiskCache(tmp_path), timeout=3.0,
+                                        retry_after_s=60)
+    try:
+        # RC1's sets asked for just now, and c476's offsets on disk.
+        assert provider.correct(structure_neuron(476, "RC1"), "all") is not None
+        if outage == "unreachable":
+            fake.server.stop(None)  # gRPC's own UNAVAILABLE: "failed to connect ..."
+        else:
+            fake.volume_errors["InferiorMonkey"] = ("UNAVAILABLE", outage)
+        with pytest.raises(corr.CorrectionsUnavailable):
+            provider.correct(structure_neuron(9), "all")
+        assert provider.paused
+        down_until = provider._down_until
+        sent = []
+        call = provider.client.call
+        monkeypatch.setattr(provider.client, "call",
+                            lambda method, *a, **k: sent.append(method) or call(method, *a, **k))
+        # c476's offsets on disk are still applied, and its status says why they are old.
+        neuron = structure_neuron(476, "RC1")
+        kept = provider.correct(neuron, "all")
+        assert kept.cached and neuron.section_correction["n_moved"] == 3
+        assert neuron.section_correction["service_note"] == provider.last_error != ""
+        # Nothing on disk: refused without asking, in either call.
+        with pytest.raises(corr.CorrectionsUnavailable, match="no all offsets on disk"):
+            provider.correct(structure_neuron(477, "RC1"), "all")
+        with pytest.raises(corr.CorrectionsUnavailable, match="no offsets on disk"):
+            provider.correct(structure_neuron(476, "RC1"), "neighbor")
+        assert sent == []
+        assert provider._down_until == down_until  # a refusal does not lengthen the pause
+        assert [r["volume_name"] for r in fake.structure_requests] == (
+            ["RC1"] if outage == "unreachable" else ["RC1", "InferiorMonkey"])
     finally:
         provider.close()
 
