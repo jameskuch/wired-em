@@ -215,6 +215,57 @@ def canonical_method(method: object) -> str:
         ) from None
 
 
+def round_as_python(values, digits: int) -> np.ndarray:
+    """``[round(float(v), digits) for v in values]`` as float64, bit for bit, at NumPy's speed.
+
+    ``np.round`` scales, rounds the scaled number half to even and scales back;
+    Python rounds the exact binary value.  Both then land on the double nearest
+    the same decimal unless the scaled number sits within its rounding error of
+    a half (measured: 97,707 of 200,000 values made on a half, none of 2 million
+    uniform ones), is too large for the scaling to be exact, or is not finite.
+    Those few are rounded by Python itself.
+    """
+    x = np.asarray(values, dtype=np.float64).ravel()
+    scale = 10.0 ** digits
+    with np.errstate(over="ignore", invalid="ignore"):  # the huge and the non-finite are in doubt
+        scaled = x * scale
+        out = np.rint(scaled) / scale
+        size = np.abs(scaled)
+        doubt = ~np.isfinite(scaled) | (size >= 2.0 ** 50)
+        # The scaled number is off the exact one by at most 2**-53 of itself.
+        doubt |= np.abs(scaled - np.floor(scaled) - 0.5) <= 2.0 ** -40 * np.maximum(size, 1.0)
+    where = np.flatnonzero(doubt)
+    if where.size:
+        out[where] = [round(v, digits) for v in x[where].tolist()]
+    return out
+
+
+class MeshBuffers(NamedTuple):
+    """A render's numbers as :class:`MeshDTO` carries them, the three buffers
+    still NumPy arrays: ``head`` is the DTO with those three empty, ``vertices``
+    the flat float64 coordinates rounded to ``COORDINATE_DECIMALS``, ``faces``
+    the flat indices and ``vertex_data`` each value as Python's
+    ``round(v, 6)``, or ``None``.
+
+    The page's binary is made from the arrays (``sbfsem_web.mesh_binary``).
+    Made through the DTO's lists, a 7.07 M-triangle surface grew the web process
+    by 2,718 MB for 10.6 s, about 380 bytes a triangle (production, 2026-10-20).
+    """
+
+    head: MeshDTO
+    vertices: np.ndarray
+    faces: np.ndarray
+    vertex_data: np.ndarray | None
+
+    def dto(self) -> MeshDTO:
+        """The DTO with its lists: the JSON's numbers exactly."""
+        return self.head.model_copy(update={
+            "vertices": self.vertices.tolist(),
+            "faces": self.faces.tolist(),
+            "vertex_data": None if self.vertex_data is None else self.vertex_data.tolist(),
+        })
+
+
 @dataclass(frozen=True)
 class _Key:
     source: str
@@ -2173,37 +2224,68 @@ class SbfsemService:
         ``neuron`` is the copy of the cell to build from, when the caller took
         it earlier (a mesh job, keyed by that copy); otherwise the one loaded now.
         """
+        return self.render_buffers(
+            neuron_id, source, neuron=neuron, clip_z=clip_z, clip_ipl=clip_ipl,
+            keep_above=keep_above, color_by_strata=color_by_strata,
+            method=method, smooth_iterations=smooth_iterations,
+            reduce_fraction=reduce_fraction, pixel_size_um=pixel_size_um,
+            pathway=pathway, post_order=post_order,
+            voxel_detail=voxel_detail, voxel_smooth_um=voxel_smooth_um,
+            tie_um=tie_um, ring_arc_um=ring_arc_um, wrap_spacing_um=wrap_spacing_um,
+            wrap_blend=wrap_blend, wrap_reject_sigma=wrap_reject_sigma,
+            wrap_passes=wrap_passes, voxel2_um=voxel2_um,
+            voxel2_faces=voxel2_faces, voxel2_blend_um=voxel2_blend_um,
+            exact_tube_deg=exact_tube_deg, conv_support=conv_support, ultra_soma=ultra_soma,
+            ultra_smooth=ultra_smooth, ultra_lambda=ultra_lambda,
+            ultra_inflate=ultra_inflate, meshlab=meshlab,
+            meshlab_edge_um=meshlab_edge_um, meshlab_fraction=meshlab_fraction,
+            meshlab_depth=meshlab_depth, curve_avg_discs=curve_avg_discs,
+            curve_avg_paths=curve_avg_paths, curve_links_um=curve_links_um,
+            curve_bridge_um=curve_bridge_um, curve_link_bridge_um=curve_link_bridge_um,
+            curve_tie_um=curve_tie_um, surface_smooth_um=surface_smooth_um,
+        ).dto()
+
+    def render_buffers(
+        self,
+        neuron_id: int,
+        source,
+        *,
+        neuron: Neuron | None = None,
+        clip_z: float | None = None,
+        clip_ipl: float | None = None,
+        keep_above: bool = True,
+        color_by_strata: bool = False,
+        **options: Any,
+    ) -> MeshBuffers:
+        """:meth:`render_mesh`'s render as its arrays (:class:`MeshBuffers`): the
+        same numbers, before any of them is a Python object.
+
+        The mesh job makes the page's binary from these, and a JSON client's lists
+        only when one asks (``sbfsem_web.mesh_binary``).  ``options`` are
+        :meth:`render_mesh`'s render options, an unknown one refused
+        (:meth:`mesh_for`).  The cached mesh is read and never changed: a cut or a
+        coloring makes a new mesh over its arrays, where :meth:`render_mesh` once
+        copied the whole surface first.
+        """
         if neuron is None:
             neuron = self.neuron(neuron_id, source)
-        mesh = self._cached_mesh(
-            neuron, method, smooth_iterations, reduce_fraction, pixel_size_um,
-            {"pathway": pathway, "post_order": post_order,
-             "voxel_detail": voxel_detail, "voxel_smooth_um": voxel_smooth_um,
-             "tie_um": tie_um, "ring_arc_um": ring_arc_um, "wrap_spacing_um": wrap_spacing_um,
-             "wrap_blend": wrap_blend, "wrap_reject_sigma": wrap_reject_sigma,
-             "wrap_passes": wrap_passes, "voxel2_um": voxel2_um,
-             "voxel2_faces": voxel2_faces, "voxel2_blend_um": voxel2_blend_um,
-             "exact_tube_deg": exact_tube_deg, "conv_support": conv_support, "ultra_soma": ultra_soma,
-             "ultra_smooth": ultra_smooth, "ultra_lambda": ultra_lambda,
-             "ultra_inflate": ultra_inflate, "meshlab": meshlab,
-             "meshlab_edge_um": meshlab_edge_um, "meshlab_fraction": meshlab_fraction,
-             "meshlab_depth": meshlab_depth, "curve_avg_discs": curve_avg_discs,
-             "curve_avg_paths": curve_avg_paths, "curve_links_um": curve_links_um,
-             "curve_bridge_um": curve_bridge_um, "curve_link_bridge_um": curve_link_bridge_um,
-             "curve_tie_um": curve_tie_um, "surface_smooth_um": surface_smooth_um},
-        ).copy()
+        mesh = self.mesh_for(neuron, options)
+        cut = clip_z is not None or clip_ipl is not None
         if clip_z is not None:
             mesh = clip_mesh(mesh, clip_z, keep_above=keep_above)
         if clip_ipl is not None:
             mesh = clip_mesh_by_stratification(
                 mesh, self.boundaries(neuron.source), clip_ipl, keep_above=keep_above
             )
-        if clip_z is not None or clip_ipl is not None:
-            # A cut surface is not the cached render its id names.
-            mesh.meta.pop("mesh_id", None)
-        if color_by_strata and not mesh.is_empty:
-            mesh.vertex_data = self.boundaries(neuron.source).strata_cdata(mesh.vertices)
-        return self._mesh_dto(f"c{neuron.id}", mesh)
+        colored = color_by_strata and not mesh.is_empty
+        if cut or colored:
+            # A cut surface is not the cached render its id names (and a clip that
+            # removes nothing hands back the cached mesh itself).
+            meta = {key: value for key, value in mesh.meta.items() if not (cut and key == "mesh_id")}
+            vertex_data = (self.boundaries(neuron.source).strata_cdata(mesh.vertices)
+                           if colored else mesh.vertex_data)
+            mesh = Mesh(mesh.vertices, mesh.faces, vertex_data, meta)
+        return self.mesh_buffers(f"c{neuron.id}", mesh)
 
     #: Post-generation options with their defaults. The app overrides these;
     #: the defaults keep a bare call MATLAB-faithful.
@@ -2762,26 +2844,35 @@ class SbfsemService:
     #: the JSON payload of a large mesh, which is all float text.
     COORDINATE_DECIMALS = 4
 
+    #: ``vertex_data`` travels to six decimals.
+    VERTEX_DATA_DECIMALS = 6
+
     @classmethod
     def _mesh_dto(cls, name: str, mesh: Mesh) -> MeshDTO:
-        vertices = np.round(mesh.vertices, cls.COORDINATE_DECIMALS)
+        return cls.mesh_buffers(name, mesh).dto()
+
+    @classmethod
+    def mesh_buffers(cls, name: str, mesh: Mesh) -> MeshBuffers:
+        """``mesh`` as :class:`MeshDTO` carries it, its three buffers still arrays.
+
+        The faces are the mesh's own, read-only; nothing else is shared with it.
+        """
         meta = mesh.meta or {}
         voxel = meta.get("voxel2_um")
         coarsened = meta.get("voxel2_coarsened")
-        return MeshDTO(
+        vertices = np.round(mesh.vertices, cls.COORDINATE_DECIMALS).astype(np.float64, copy=False).ravel()
+        faces = mesh.faces.ravel()
+        faces.flags.writeable = False
+        vertex_data = (None if mesh.vertex_data is None
+                       else round_as_python(mesh.vertex_data, cls.VERTEX_DATA_DECIMALS))
+        area, volume = mesh.area_and_volume()
+        head = MeshDTO(
             name=name,
             n_vertices=mesh.n_vertices,
             n_faces=len(mesh.faces),
-            vertices=[float(v) for v in vertices.ravel()],
-            faces=[int(v) for v in mesh.faces.ravel()],
-            vertex_data=(
-                [round(float(v), 6) for v in mesh.vertex_data]
-                if mesh.vertex_data is not None
-                else None
-            ),
             bounding_box_um=[float(v) for v in mesh.bounding_box],
-            surface_area_um2=mesh.surface_area(),
-            volume_um3=mesh.volume(),
+            surface_area_um2=area,
+            volume_um3=volume,
             mesh_id=mesh.meta.get("mesh_id"),
             voxel2_um=float(voxel) if voxel is not None else None,
             voxel2_asked_um=(float(meta["voxel2_asked"])
@@ -2789,6 +2880,7 @@ class SbfsemService:
             voxel2_coarsened=bool(coarsened) if coarsened is not None else None,
             voxel2_reason=(str(meta["voxel2_reason"]) or None) if "voxel2_reason" in meta else None,
         )
+        return MeshBuffers(head, vertices, faces, vertex_data)
 
     @classmethod
     def _check_option_keys(cls, options: dict) -> None:

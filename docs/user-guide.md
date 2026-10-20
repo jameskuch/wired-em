@@ -945,7 +945,7 @@ and Nasal volumes, MATLAB's own was 0.01) to 1 µm; Enter or leaving the box set
 it, Escape or anything it cannot read puts the size back, and ArrowUp and
 ArrowDown step through the named sizes. As the size changes, the cost chip at the
 end of the row shows the server's estimate for the selected cells before anything
-is built — "≈ 9.6 M tri · 6.1 GB · 1 min 44 s" is RPC1 c2628 at 0.025 µm:
+is built — "≈ 9.6 M tri · 3.6 GB · 1 min 14 s" is RPC1 c2628 at 0.025 µm:
 triangles, the server's memory (the build plus sending it) and the production
 server's seconds; the reasoning, cell by cell, is in its hover. It turns amber
 past a minute, past half the memory the server gives builds (such a build waits

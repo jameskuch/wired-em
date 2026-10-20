@@ -145,6 +145,31 @@ def test_mesh_normals_and_areas(box):
     assert box.face_areas().sum() == pytest.approx(24.0)
 
 
+@pytest.mark.parametrize("chunk", [1, 777, 1 << 14, 1 << 18])
+def test_area_and_volume_a_chunk_of_faces_at_a_time_are_the_same_to_the_bit(monkeypatch, chunk):
+    """A finished render's area and volume (the mesh poll's header) are taken a chunk of
+    faces at a time, so its corners are never all held at once; each face's number, and
+    so each sum, is the one all the faces at once made."""
+    from sbfsem.geometry import mesh as mesh_module
+
+    rng = np.random.default_rng(11)
+    vertices = rng.normal(scale=40.0, size=(30_000, 3)) + 1000.0
+    faces = rng.integers(0, len(vertices), size=(300_001, 3))
+    surface = Mesh(vertices, faces)
+    corners = vertices[faces]
+    areas = 0.5 * np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=1)
+    signed = np.einsum("ij,ij->i", corners[:, 0], np.cross(corners[:, 1], corners[:, 2]))
+    monkeypatch.setattr(mesh_module, "FACE_CHUNK", chunk)
+    got = surface.face_areas()
+    assert got.dtype == areas.dtype and np.array_equal(got.view(np.uint64), areas.view(np.uint64))
+    assert surface.surface_area() == float(areas.sum())
+    assert surface.volume() == float(abs(signed.sum() / 6.0))
+    assert surface.area_and_volume() == (surface.surface_area(), surface.volume())
+    empty = Mesh(np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64))
+    assert empty.face_areas().shape == (0,) and empty.surface_area() == 0.0 and empty.volume() == 0.0
+    assert empty.area_and_volume() == (0.0, 0.0)
+
+
 def test_drop_nan():
     """F081: coincident annotations made the MATLAB mesher emit NaN vertices."""
     mesh = Mesh(

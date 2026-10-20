@@ -5,6 +5,10 @@ int32 vertices on the JSON's 1e-4 µm step, uint32 faces and float64 ``vertex_da
 (:mod:`sbfsem_web.mesh_binary`).  Every other client, and every status without a
 finished mesh, gets the JSON it always did, byte for byte.
 
+A render is encoded from its arrays (``SbfsemService.render_buffers``), never through
+the DTO's lists; ``_old_render_mesh`` below is the list path it replaced, kept to hold
+the arrays' replies to its bytes.
+
 ``tests/fixtures/mesh_binary.json`` is the replies the node test
 (``tests/js/test_meshbinary.mjs``) decodes with the page's own code; after a change to
 the encoding, regenerate it with ``python tests/unit/test_mesh_binary.py --write``.
@@ -23,8 +27,11 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from sbfsem.geometry.mesh import Mesh
+from sbfsem.geometry.meshops import clip_mesh, clip_mesh_by_stratification
 from sbfsem.io.legacy_json import read_legacy_json
 from sbfsem.service.dto import MeshDTO
+from sbfsem.service.facade import MeshBuffers, SbfsemService, round_as_python
 from sbfsem_web import mesh_binary
 from sbfsem_web.api.routes import _encoded_mesh, _job_status_body, _job_status_response, _json_bytes
 from sbfsem_web.app import create_app
@@ -224,6 +231,152 @@ def test_the_node_tests_fixture_is_what_the_encoder_makes():
         "the encoding changed: python tests/unit/test_mesh_binary.py --write")
 
 
+# -- a render, from its arrays -----------------------------------------------------------
+
+
+def _old_mesh_dto(name: str, mesh: Mesh) -> MeshDTO:
+    """``SbfsemService._mesh_dto`` as it was before 2.19.6: a Python number per coordinate."""
+    vertices = np.round(mesh.vertices, 4)
+    meta = mesh.meta or {}
+    voxel = meta.get("voxel2_um")
+    coarsened = meta.get("voxel2_coarsened")
+    return MeshDTO(
+        name=name, n_vertices=mesh.n_vertices, n_faces=len(mesh.faces),
+        vertices=[float(v) for v in vertices.ravel()], faces=[int(v) for v in mesh.faces.ravel()],
+        vertex_data=([round(float(v), 6) for v in mesh.vertex_data] if mesh.vertex_data is not None else None),
+        bounding_box_um=[float(v) for v in mesh.bounding_box], surface_area_um2=mesh.surface_area(),
+        volume_um3=mesh.volume(), mesh_id=mesh.meta.get("mesh_id"),
+        voxel2_um=float(voxel) if voxel is not None else None,
+        voxel2_asked_um=(float(meta["voxel2_asked"]) if meta.get("voxel2_asked") is not None else None),
+        voxel2_coarsened=bool(coarsened) if coarsened is not None else None,
+        voxel2_reason=(str(meta["voxel2_reason"]) or None) if "voxel2_reason" in meta else None)
+
+
+def _old_render_mesh(svc, neuron_id, source, *, clip_z=None, clip_ipl=None, keep_above=True,
+                     color_by_strata=False, **options) -> MeshDTO:
+    """``SbfsemService.render_mesh`` as it was before 2.19.6: the cached mesh copied, cut
+    and colored in place, then made into the DTO's lists."""
+    neuron = svc.neuron(neuron_id, source)
+    mesh = svc.mesh_for(neuron, options).copy()
+    if clip_z is not None:
+        mesh = clip_mesh(mesh, clip_z, keep_above=keep_above)
+    if clip_ipl is not None:
+        mesh = clip_mesh_by_stratification(mesh, svc.boundaries(neuron.source), clip_ipl, keep_above=keep_above)
+    if clip_z is not None or clip_ipl is not None:
+        mesh.meta.pop("mesh_id", None)
+    if color_by_strata and not mesh.is_empty:
+        mesh.vertex_data = svc.boundaries(neuron.source).strata_cdata(mesh.vertices)
+    return _old_mesh_dto(f"c{neuron.id}", mesh)
+
+
+@pytest.fixture(scope="module")
+def c943():
+    svc = SbfsemService(offline=True)
+    svc._disk_meshes = None
+    svc.add_neuron(read_legacy_json(ROOT / "fixtures" / "i943.json"))
+    return svc
+
+
+#: Real renders of c943: discs and a Voxel remesh, whole, cut along Z or by IPL depth
+#: (a cut that removes nothing included), colored by depth.
+RENDERS = {
+    "cylinder": {**QUICK},
+    "smoothed": {"method": "cylinder", "pathway": "original", "smooth_iterations": 1},
+    "clip_z": {**QUICK, "clip_z": 140.0},
+    "clip_z_below_colored": {**QUICK, "clip_z": 140.0, "keep_above": False, "color_by_strata": True},
+    "clip_nothing": {**QUICK, "clip_z": -1e6},
+    "clip_ipl": {**QUICK, "clip_ipl": 50.0},
+    "colored": {**QUICK, "color_by_strata": True},
+    "voxel2": {"method": "cylinder", "pathway": "voxel2", "voxel2_um": 0.1, "voxel2_faces": 0},
+    "voxel2_colored": {"method": "cylinder", "pathway": "voxel2", "voxel2_um": 0.1, "voxel2_faces": 0,
+                       "color_by_strata": True},
+}
+
+
+@pytest.mark.parametrize("name", list(RENDERS))
+def test_a_render_from_its_arrays_is_the_lists_reply_byte_for_byte(c943, name):
+    """The page's binary and a JSON client's text of a render made from its arrays are
+    the bytes the DTO's lists made: header, vertices, faces and ``vertex_data``."""
+    options = RENDERS[name]
+    old = _old_render_mesh(c943, 943, "i", **options)
+    buffers = c943.render_buffers(943, "i", **options)
+    assert isinstance(buffers, MeshBuffers)
+    assert _json_bytes(buffers.dto()) == _json_bytes(old)
+    assert _json_bytes(c943.render_mesh(943, "i", **options)) == _json_bytes(old), "the mesh route's JSON"
+    held, before = _encoded_mesh(buffers), _encoded_mesh(old)
+    assert isinstance(held, mesh_binary.EncodedMesh) and isinstance(before, mesh_binary.EncodedMesh)
+    assert held.fields == before.fields and list(held.fields) == list(before.fields)
+    assert held.arrays == before.arrays
+    assert held.data == before.data
+    for binary in (True, False):
+        assert (_job_status_response(_status(held), binary=binary).body
+                == _job_status_response(_status(before), binary=binary).body)
+    if options.get("color_by_strata"):
+        assert held.arrays["vertex_data"] is not None and old.vertex_data
+
+
+def test_a_render_leaves_the_cached_mesh_as_it_was(c943):
+    """No copy of the surface is made, so nothing may be written into the cached one: a
+    cut drops the id from its own mesh, a coloring sets its own data."""
+    neuron = c943.neuron(943, "i")
+    cached = c943.mesh_for(neuron, QUICK)
+    vertices, faces, meta = cached.vertices.copy(), cached.faces.copy(), dict(cached.meta)
+    for options in RENDERS.values():
+        if options.get("pathway") == "voxel2":
+            continue
+        buffers = c943.render_buffers(943, "i", **options)
+        cut = "clip_z" in options or "clip_ipl" in options
+        assert (buffers.head.mesh_id is None) == cut
+        with pytest.raises(ValueError):
+            buffers.faces[0] = 1  # the cached mesh's own faces, read-only
+    assert c943.mesh_for(neuron, QUICK) is cached
+    assert np.array_equal(cached.vertices, vertices) and np.array_equal(cached.faces, faces)
+    assert cached.meta == meta and cached.meta.get("mesh_id")
+    assert cached.vertex_data is None and cached.faces.flags.writeable
+
+
+@pytest.mark.filterwarnings("ignore:invalid value:RuntimeWarning")  # the area of an infinite triangle
+def test_a_render_the_binary_cannot_carry_stays_its_lists_json():
+    """Off the 1e-4 step, past int32's range or not finite: held as the JSON text the
+    DTO's lists make, as before."""
+    for vertices, data in (([[0.0, 0.0, 0.0], [214748.3648, 0.0, 0.0], [0.0, 1.0, 0.0]], None),
+                           ([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], [0.0, float("nan"), 1.0]),
+                           ([[0.0, 0.0, 0.0], [float("inf"), 0.0, 0.0], [0.0, 1.0, 0.0]], None)):
+        mesh = Mesh(np.array(vertices), np.array([[0, 1, 2]]), data, {"mesh_id": "x"})
+        held = _encoded_mesh(SbfsemService.mesh_buffers("odd", mesh))
+        assert isinstance(held, EncodedJSON)
+        assert bytes(held) == _json_bytes(_old_mesh_dto("odd", mesh))
+
+
+#: Values where scaling by 1e6 and rounding half to even differ from Python's round,
+#: or nearly do: halves and their neighbors, ties made exact in binary (1/128 is
+#: 7812.5e-6), the ends of the exact scaling, the tiny, the huge and the non-finite.
+def _hard_values() -> np.ndarray:
+    rng = np.random.default_rng(6)
+    halves = (rng.integers(-5_000_000, 5_000_000, 20_000) + 0.5) / 1e6
+    near = np.concatenate([np.nextafter(halves, np.inf), np.nextafter(halves, -np.inf)])
+    exact_ties = np.array([1 / 128, -1 / 128, 3 / 128, 0.5, 2.5e-6, 0.0000005, 1.0000005, 123456.7890125])
+    edges = np.array([2.0 ** 50 / 1e6, -(2.0 ** 50) / 1e6, 2.0 ** 53 / 1e6, 4.6e9, 1e300, -1e300, 1.7e308,
+                      5e-324, -5e-324, 1e-7, -1e-7, -3e-7, 4.9999999e-7, -4.9999999e-7, 0.0, -0.0,
+                      np.inf, -np.inf, np.nan])
+    uniform = rng.uniform(-3, 3, 200_000)
+    wide = rng.standard_normal(50_000) * 10.0 ** rng.integers(-12, 12, 50_000)
+    return np.concatenate([halves, near, exact_ties, edges, uniform, wide])
+
+
+@pytest.mark.parametrize("digits", [6, 4, 0])
+def test_rounding_as_python_is_pythons_round_bit_for_bit(digits):
+    values = _hard_values()
+    got = round_as_python(values, digits)
+    want = np.array([round(float(v), digits) for v in values])
+    assert got.dtype == np.float64 and got.shape == values.shape
+    same = (got.view(np.uint64) == want.view(np.uint64)) | (np.isnan(got) & np.isnan(want))
+    assert same.all(), values[~same][:5]
+    if digits == 6:
+        assert (np.round(values, 6).view(np.uint64) != want.view(np.uint64)).sum() > 1000, (
+            "np.round alone parts from Python here: the values reach the cases it gets wrong")
+
+
 # -- through the route -----------------------------------------------------------------
 
 
@@ -246,6 +399,27 @@ def test_a_finished_render_goes_to_the_page_as_binary_and_to_anyone_else_as_json
     assert "accept" in binary.headers.get("vary", "").lower()
     assert len(binary.content) < 0.7 * len(plain.content)
     assert_same_as_json(decode(binary.content), head)
+
+
+def test_a_render_job_never_makes_the_lists(web, monkeypatch):
+    """The job holds the binary made from the render's arrays, and a JSON poll reads it
+    back from the binary: the DTO's lists, 380 bytes a triangle in the web process, are
+    not made for either."""
+    client, _ = web
+
+    def no_lists(self):
+        raise AssertionError("the DTO's lists were made")
+
+    monkeypatch.setattr(MeshBuffers, "dto", no_lists)
+    started = client.get("/api/neurons/i/943/mesh-job", params={**QUICK, "color_by_strata": True}).json()
+    job = _wait(client, started["job_id"])
+    assert job.status == "done" and isinstance(job.result, mesh_binary.EncodedMesh), job.detail
+    binary = client.get(f"/api/mesh-jobs/{job.id}", headers=BINARY)
+    plain = client.get(f"/api/mesh-jobs/{job.id}")
+    assert binary.headers["content-type"] == mesh_binary.MEDIA_TYPE
+    assert plain.headers["content-type"] == "application/json"
+    assert_same_as_json(decode(binary.content), plain.json())
+    assert decode(binary.content)["mesh"]["vertex_data"] is not None
 
 
 def test_a_vertex_data_mesh_and_an_empty_mesh_through_the_route(web):

@@ -60,6 +60,7 @@ from sbfsem.service.dto import (
 )
 from sbfsem.service.estimate import FINEST_UM as ESTIMATE_FINEST_UM
 from sbfsem.service.facade import (
+    MeshBuffers,
     NeuronNotLoadedError,
     SbfsemService,
     curve_averaging,
@@ -903,7 +904,7 @@ def start_mesh_job(request: Request, source: str, neuron_id: int,
     except Exception:  # noqa: BLE001 - the estimate must never block a build
         weight = 0.0
     job = request.app.state.mesh_jobs.submit(
-        key, lambda: _encoded_mesh(svc.render_mesh(neuron_id, src, neuron=neuron, **params)),
+        key, lambda: _encoded_mesh(svc.render_buffers(neuron_id, src, neuron=neuron, **params)),
         weight_mb=weight, label=_job_label(neuron_id, src, params),
     )
     return {"job_id": job.id, "status": job.status, "weight_mb": weight}
@@ -1078,7 +1079,15 @@ def _encoded_mesh(mesh) -> mesh_binary.EncodedMesh | EncodedJSON:
     every finished render of every open tab used to pin the largest.  Made in
     the job's thread, so neither the poll nor the event loop pays for it.  A
     mesh the binary cannot carry exactly is held as its JSON text instead.
+
+    A render comes as its arrays (:class:`~sbfsem.service.facade.MeshBuffers`)
+    and is encoded from them: its lists, 380 bytes a triangle in this process
+    for as long as the encoding took (2,718 MB for 10.6 s on a 7.07 M-triangle
+    surface, production 2026-10-20), are made only for a mesh that stays JSON.
     """
+    if isinstance(mesh, MeshBuffers):
+        encoded = mesh_binary.encode_arrays(_plain(mesh.head), mesh.vertices, mesh.faces, mesh.vertex_data)
+        return encoded if encoded is not None else EncodedJSON(_json_bytes(mesh.dto()))
     plain = _plain(mesh)
     encoded = mesh_binary.encode(plain) if isinstance(plain, dict) else None
     return encoded if encoded is not None else EncodedJSON(_json_bytes(plain))

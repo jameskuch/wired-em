@@ -20,6 +20,20 @@ log = logging.getLogger(__name__)
 
 __all__ = ["Mesh", "concatenate", "EMPTY_MESH"]
 
+#: Faces a per-face measure takes at a time: their corners are 1.2 MB, and the area
+#: and volume of a 7.07 M-triangle surface took 1.27 s on production in chunks of
+#: this size, 1.73 s at 262,144 and 2.01 s at 1,048,576 (2026-10-20).
+FACE_CHUNK = 1 << 14
+
+
+def _face_areas(corners: np.ndarray) -> np.ndarray:
+    return 0.5 * np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=1)
+
+
+def _signed_volumes6(corners: np.ndarray) -> np.ndarray:
+    """Six times each face's signed volume against the origin."""
+    return np.einsum("ij,ij->i", corners[:, 0], np.cross(corners[:, 1], corners[:, 2]))
+
 
 @dataclass
 class Mesh:
@@ -78,11 +92,30 @@ class Mesh:
         with np.errstate(invalid="ignore", divide="ignore"):
             return np.where(lengths > 0, n / lengths, 0.0)
 
+    def _per_face(self, *measures) -> list[np.ndarray]:
+        """``measure(corners)`` of every face for each measure, ``corners`` being
+        ``(n, 3, 3)``, taken :data:`FACE_CHUNK` faces at a time.
+
+        Each face's number is computed as it was all at once, by the same
+        operations, so a sum over the result is the same to the bit; only the
+        corners stop being held together (509 MB for 7 M triangles), and two
+        measures share one gathering of them.
+        """
+        if len(self.faces) <= FACE_CHUNK:
+            corners = self.vertices[self.faces]
+            return [measure(corners) for measure in measures]
+        outs: list[np.ndarray] = []
+        for start in range(0, len(self.faces), FACE_CHUNK):
+            corners = self.vertices[self.faces[start:start + FACE_CHUNK]]
+            parts = [measure(corners) for measure in measures]
+            if not outs:
+                outs = [np.empty(len(self.faces), dtype=part.dtype) for part in parts]
+            for out, part in zip(outs, parts, strict=True):
+                out[start:start + len(part)] = part
+        return outs
+
     def face_areas(self) -> np.ndarray:
-        v = self.vertices[self.faces]
-        return 0.5 * np.linalg.norm(
-            np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0]), axis=1
-        )
+        return self._per_face(_face_areas)[0]
 
     def surface_area(self) -> float:
         return float(self.face_areas().sum())
@@ -91,8 +124,15 @@ class Mesh:
         """Signed volume by the divergence theorem; absolute value returned."""
         if self.is_empty:
             return 0.0
-        v = self.vertices[self.faces]
-        return float(abs(np.einsum("ij,ij->i", v[:, 0], np.cross(v[:, 1], v[:, 2])).sum() / 6.0))
+        return float(abs(self._per_face(_signed_volumes6)[0].sum() / 6.0))
+
+    def area_and_volume(self) -> tuple[float, float]:
+        """:meth:`surface_area` and :meth:`volume`, the same numbers, from one
+        gathering of the corners."""
+        if self.is_empty:
+            return self.surface_area(), 0.0
+        areas, signed = self._per_face(_face_areas, _signed_volumes6)
+        return float(areas.sum()), float(abs(signed.sum() / 6.0))
 
     # -- cleanup -----------------------------------------------------------
     def drop_nan(self) -> Mesh:

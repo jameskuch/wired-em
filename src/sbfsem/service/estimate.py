@@ -32,18 +32,22 @@ How each number is made:
   before gives its own ratio; otherwise the high end.
 * **Memory**: the build's peak, ``BUILD_BASE_MB`` plus
   ``BUILD_BYTES_PER_TRIANGLE``, times the averaging's share when it is on;
-  then what serving it as JSON adds in the web process,
+  then what serving it adds in the web process, ``SERVE_BASE_MB`` plus
   ``SERVE_BYTES_PER_TRIANGLE``.  Measured 2026-10-16, one process a build,
   peak resident memory with the loaded cell's own 180 to 430 MB in it:
   c2628 1.18 M triangles 857 MB, 3.41 M 1,307, 5.93 M 2,030, 10.1 M 3,307;
   c16137 0.34 M 358, 3.49 M 1,177, 8.95 M 2,455, 13.6 M 3,848; c410 0.61 M
   452, 3.08 M 1,167, 5.40 M 1,730, 9.54 M 3,087 (the build alone 269 to 299
-  bytes a triangle at the large end); serving 216 to 313 bytes a triangle
-  (439 on the smallest mesh).  The sum is held to the memory the server gives
-  builds (``SBFSEM_MESH_MEMORY_MB``, 9,000 MB in production).
+  bytes a triangle at the large end).  Serving, made from the mesh's arrays
+  since 2.19.6 (216 to 313 bytes a triangle through JSON lists before, 2.15.0's
+  binary through them 410), measured on production 2026-10-20 from cached
+  surfaces: 1.70 M triangles 97 MB, 3.40 M 146, 7.07 M 263.  The sum is held
+  to the memory the server gives builds (``SBFSEM_MESH_MEMORY_MB``, 9,000 MB in
+  production).
 * **Seconds**: production's, calibrated on the one build timed there (c2628 at
   0.025 um: 109 s from job start to the finished JSON, 2.5 times this Mac's
-  quiet 29.6 s build and 14 s serialization).
+  quiet 29.6 s build and 14 s serialization); serving since 2.19.6 0.29 to 0.31 s
+  a million triangles there.
 * **The page**: ``JSON_BYTES_PER_TRIANGLE`` of text (31.0 to 35.6 measured,
   rising with the mesh) and ``TAB_BYTES_PER_TRIANGLE`` of the tab's heap (c2628
   at 0.025 um: 37 -> 620 MB).  The text must fit in one JavaScript string to
@@ -140,8 +144,10 @@ AVERAGING_MAX_MB = 900.0
 JOIN_BYTES_PER_TRIANGLE = 260.0
 JOIN_MAX_MB = 260e-6 * 1.9 * MAX_SURFACE
 JOIN_TIME = 0.3
-#: What the web process holds while it turns a finished mesh into JSON.
-SERVE_BYTES_PER_TRIANGLE = 300.0
+#: What the web process holds while it turns a finished mesh into the binary the
+#: page collects, the reply's data included (2.19.6; 300 bytes a triangle before).
+SERVE_BASE_MB = 65.0
+SERVE_BYTES_PER_TRIANGLE = 28.0
 
 #: The page: the text it receives and the heap its tab grows by.
 JSON_BYTES_PER_TRIANGLE = 36.0
@@ -152,12 +158,13 @@ TAB_BYTES_PER_TRIANGLE = 60.0
 PAGE_JSON_LIMIT_MB = 500.0
 
 #: Production's seconds: a fixed start, each outline, each million triangles
-#: built, each million serialized (this Mac's quiet build of c2628 is 2.8 s a
-#: million triangles, its JSON 1.4 s; production is 2.5 times slower).
+#: built (this Mac's quiet build of c2628 is 2.8 s a million triangles;
+#: production is 2.5 times slower), each million served (2.19.6: 0.29 to 0.31 s
+#: there, 3.5 s through JSON lists before).
 SECONDS_START = 1.2
 SECONDS_PER_OUTLINE = 0.0006
 SECONDS_PER_MILLION_TRIANGLES = 7.0
-SERVE_SECONDS_PER_MILLION_TRIANGLES = 3.5
+SERVE_SECONDS_PER_MILLION_TRIANGLES = 0.31
 #: Averaging adds the chain fits, the labels and the surface passes: about a
 #: fifth more for discs (c16137 at 0.1 um: 2.5 s -> 3.0 s), four fifths for
 #: traced outlines (c2628: 3.0 s -> 5.5 s), as in renderoptions.js.
@@ -610,7 +617,7 @@ class CostEstimator:
         def costs(px: float, averaging: bool = averaging, joins: bool = joins) -> dict[str, float]:
             tri = triangles_at(px)
             peak = build_mb(tri, averaging, joins)
-            serve = SERVE_BYTES_PER_TRIANGLE * tri / 1e6
+            serve = SERVE_BASE_MB + SERVE_BYTES_PER_TRIANGLE * tri / 1e6
             return {"faces": ref.faces_at(px), "triangles": tri, "peak_mb": peak,
                     "serve_mb": serve, "server_mb": peak + serve,
                     "json_mb": JSON_BYTES_PER_TRIANGLE * tri / 1e6,

@@ -31,7 +31,7 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["MEDIA_TYPE", "NEGATIVE_ZERO", "EncodedMesh", "accepts", "encode"]
+__all__ = ["MEDIA_TYPE", "NEGATIVE_ZERO", "EncodedMesh", "accepts", "encode", "encode_arrays"]
 
 MEDIA_TYPE = "application/x-sbfsem-mesh"
 
@@ -63,11 +63,12 @@ class EncodedMesh:
 
     __slots__ = ("fields", "arrays", "data")
 
-    def __init__(self, fields: dict, arrays: dict, data: bytes):
+    def __init__(self, fields: dict, arrays: dict, data: bytes | memoryview):
         #: The mesh's model dump, in field order, with ``None`` for each array.
         self.fields = fields
         #: ``{name: [offset, count]}`` into ``data``, or ``None`` for an absent array.
         self.arrays = arrays
+        #: The arrays as they go out, read-only.
         self.data = data
 
     @property
@@ -110,7 +111,8 @@ class EncodedMesh:
 
 def _decode_vertices(steps: np.ndarray) -> np.ndarray:
     # A division, as the page does it: k * 1e-4 is not always the number k / 1e4 is.
-    vertices = steps.astype(np.float64) / STEPS_PER_UM
+    vertices = steps.astype(np.float64)
+    vertices /= STEPS_PER_UM
     vertices[steps == NEGATIVE_ZERO] = -0.0
     return vertices
 
@@ -122,40 +124,59 @@ def _same_bits(a: np.ndarray, b: np.ndarray) -> bool:
 def encode(fields: dict[str, Any]) -> EncodedMesh | None:
     """The binary form of a mesh's model dump, or ``None`` when it cannot carry
     the JSON's numbers exactly (see the module's notes)."""
-    vertices = np.asarray(fields.get("vertices") or [], dtype=np.float64)
+    vertex_data = fields.get("vertex_data")
+    return encode_arrays(
+        fields,
+        np.asarray(fields.get("vertices") or [], dtype=np.float64),
+        np.asarray(fields.get("faces") or [], dtype=np.int64),
+        None if vertex_data is None else np.asarray(vertex_data, dtype=np.float64),
+    )
+
+
+def encode_arrays(fields: dict[str, Any], vertices: np.ndarray, faces: np.ndarray,
+                  vertex_data: np.ndarray | None) -> EncodedMesh | None:
+    """:func:`encode` of a mesh whose three buffers are arrays: ``fields`` is the
+    model dump of the rest (whatever it holds for the buffers is not read), and
+    the arrays hold the numbers the dump's lists would, flat
+    (``SbfsemService.mesh_buffers``).  No Python number per coordinate is made."""
+    vertices = np.asarray(vertices, dtype=np.float64).ravel()
     if not np.isfinite(vertices).all():
         return None
-    scaled = np.rint(vertices * STEPS_PER_UM)
-    if scaled.size and np.abs(scaled).max() > 2**31 - 1:
+    scaled = vertices * STEPS_PER_UM
+    np.rint(scaled, out=scaled)
+    if scaled.size and max(-scaled.min(), scaled.max()) > 2**31 - 1:
         return None
     steps = scaled.astype(np.int32)
+    del scaled
     steps[(vertices == 0) & np.signbit(vertices)] = NEGATIVE_ZERO
     if not _same_bits(_decode_vertices(steps), vertices):
         return None  # a coordinate off the 1e-4 step: the JSON carries more digits
-    faces_list = fields.get("faces") or []
-    faces = np.asarray(faces_list, dtype=np.int64)
+    faces = np.asarray(faces).ravel()
     if faces.size and (faces.min() < 0 or faces.max() > 2**32 - 1):
         return None
-    vertex_data = fields.get("vertex_data")
     extra = None
     if vertex_data is not None:
-        extra = np.asarray(vertex_data, dtype=np.float64)
+        extra = np.asarray(vertex_data, dtype=np.float64).ravel()
         if not np.isfinite(extra).all():
             return None  # the JSON sends null there, and a float64 cannot say null
 
     values = {"vertices": steps, "faces": faces, "vertex_data": extra}
-    parts: list[bytes] = []
     arrays: dict[str, list[int] | None] = {}
+    layout: list[tuple[np.ndarray, str, int]] = []
     offset = 0
     for name, dtype in _ARRAYS:
         array = values[name]
         if array is None:
             arrays[name] = None
             continue
-        pad = -offset % np.dtype(dtype).itemsize  # each array on its own type's size
-        raw = array.astype(dtype).tobytes()
-        parts += [b"\0" * pad, raw]
-        arrays[name] = [offset + pad, int(array.size)]
-        offset += pad + len(raw)
+        offset += -offset % np.dtype(dtype).itemsize  # each array on its own type's size
+        arrays[name] = [offset, int(array.size)]
+        layout.append((array, dtype, offset))
+        offset += array.size * np.dtype(dtype).itemsize
+    # Each array is written once, straight into the data held, and the data is not
+    # copied again into bytes (127 MB for a 7.07 M-triangle surface).
+    data = bytearray(offset)
+    for array, dtype, start in layout:
+        np.frombuffer(data, dtype=dtype, count=array.size, offset=start)[:] = array
     held = {key: (None if key in arrays else value) for key, value in fields.items()}
-    return EncodedMesh(held, arrays, b"".join(parts))
+    return EncodedMesh(held, arrays, memoryview(data).toreadonly())
