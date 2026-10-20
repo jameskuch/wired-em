@@ -26,6 +26,47 @@ def skimage_mask(points, shape):
     return mask
 
 
+def unfused_mask(points, shape):
+    """skimage's rule in numpy, each product rounded on its own.
+
+    That is what an x86_64 build of skimage computes, bit for bit (all 3,600
+    random polygons below, 2026-10-20). An arm64 build fuses ``x0*y1 - x1*y0``
+    into one multiply-add, rounding ``x1*y0`` alone: on GitHub's macOS runner
+    the near-vertex and decimal polygons came out 11 and 1 pixels away from the
+    fill, exactly the pixels ``math.fma`` predicts. numpy never fuses, so where
+    skimage does the fill is held to this rule instead.
+    """
+    pts = np.asarray(points, dtype=float).reshape(-1, 2)
+    if len(pts) < 3:
+        return np.zeros(shape, dtype=bool)
+    rows, cols = shape
+    yy, xx = np.mgrid[0:rows, 0:cols].astype(float)
+    right = np.zeros(shape, dtype=bool)
+    left = np.zeros(shape, dtype=bool)
+    for i in range(len(pts)):
+        x0, y0 = pts[i, 0] - xx, pts[i, 1] - yy
+        x1, y1 = pts[i - 1, 0] - xx, pts[i - 1, 1] - yy
+        with np.errstate(divide="ignore", invalid="ignore"):
+            val = (x0 * y1 - x1 * y0) / (y1 - y0)
+        right ^= ((y0 > 0) != (y1 > 0)) & (val > 0)
+        left ^= ((y0 < 0) != (y1 < 0)) & (val < 0)
+    mask = right | left
+    for vx, vy in pts:
+        vc, vr = round(vx), round(vy)
+        if (abs(vx - vc) < rasterize.VERTEX_EPS and abs(vy - vr) < rasterize.VERTEX_EPS
+                and 0 <= vr < rows and 0 <= vc < cols):
+            mask[vr, vc] = True
+    return mask
+
+
+# The 134th decimal polygon, which one pixel tells apart: does this build of
+# skimage fuse the multiply-add?
+_PROBE = np.array([[458, 246], [438, 576], [344, 93], [437, 469], [588, 339], [264, 508], [21, 161],
+                   [279, 40], [188, 291], [110, 451], [577, 530], [544, 304], [65, 211], [24, 119],
+                   [284, 529], [523, 200], [312, 532], [426, 483], [53, 545]]) * 0.1
+SKIMAGE_FUSES = not np.array_equal(skimage_mask(_PROBE, (47, 59)), unfused_mask(_PROBE, (47, 59)))
+
+
 @pytest.fixture
 def fill_only(monkeypatch):
     def refuse(r, c, shape):
@@ -36,7 +77,7 @@ def fill_only(monkeypatch):
 
 
 def assert_same(points, shape):
-    expected = skimage_mask(points, shape)
+    expected = (unfused_mask if SKIMAGE_FUSES else skimage_mask)(points, shape)
     actual = polygon_mask(points, shape)
     assert actual.dtype == bool and actual.shape == expected.shape
     diff = np.argwhere(actual != expected)
@@ -104,6 +145,16 @@ def test_random_polygons_match_skimage(kind):
     rng = np.random.default_rng(sum(map(ord, kind)))
     for _ in range(300):
         assert_same(*_random_polygon(rng, kind))
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_unfused_rule_is_skimage_where_skimage_does_not_fuse(kind):
+    if SKIMAGE_FUSES:
+        pytest.skip("this build of skimage fuses x0*y1 - x1*y0; an x86_64 run checks the rule")
+    rng = np.random.default_rng(sum(map(ord, kind)))
+    for _ in range(300):
+        points, shape = _random_polygon(rng, kind)
+        assert np.array_equal(unfused_mask(points, shape), skimage_mask(points, shape))
 
 
 @pytest.mark.usefixtures("fill_only")
