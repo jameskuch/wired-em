@@ -64,6 +64,7 @@ __all__ = [
     "CorrectionsError",
     "CorrectionsUnavailable",
     "CorrectionNotFound",
+    "REQUEST_CODES",
     "CorrectionSet",
     "CellCorrection",
     "CorrectionsClient",
@@ -121,7 +122,20 @@ def correction_mode(value) -> str:
 
 # -- errors -----------------------------------------------------------------
 class CorrectionsError(RuntimeError):
-    """The corrections service answered with an error."""
+    """The corrections service answered with an error.
+
+    ``code`` is the gRPC status's name (``"UNKNOWN"``), ``""`` for an error
+    raised here rather than by the service.
+    """
+
+    code = ""
+
+
+#: gRPC statuses about the one request sent, not about its volume or the
+#: service: an exception in the service's handler (``UNKNOWN`` "Exception was
+#: thrown by handler.", ``INTERNAL``) and a request it refused.  A provider
+#: holds the structure asked about after one of these, not its volume.
+REQUEST_CODES = frozenset({"UNKNOWN", "INTERNAL", "INVALID_ARGUMENT"})
 
 
 class CorrectionsUnavailable(CorrectionsError):
@@ -592,12 +606,16 @@ class CorrectionsClient:
         except grpc.RpcError as exc:
             code = exc.code() if hasattr(exc, "code") else None
             details = exc.details() if hasattr(exc, "details") else str(exc)
-            text = f"{method} at {self.url}: {getattr(code, 'name', code)} {details}"
+            name = str(getattr(code, "name", code or ""))
+            text = f"{method} at {self.url}: {name} {details}"
             if code == grpc.StatusCode.NOT_FOUND:
-                raise CorrectionNotFound(text) from exc
-            if code in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED):
-                raise CorrectionsUnavailable(text) from exc
-            raise CorrectionsError(text) from exc
+                error: CorrectionsError = CorrectionNotFound(text)
+            elif code in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED):
+                error = CorrectionsUnavailable(text)
+            else:
+                error = CorrectionsError(text)
+            error.code = name
+            raise error from exc
 
     # -- RPCs, in the proto's order ------------------------------------------
     def list_volumes(self) -> list[dict]:
@@ -1011,16 +1029,23 @@ class CorrectionsProvider:
     asked again for ``retry_after_s``, and meanwhile a cell whose offsets are
     on disk is still corrected (its status says so).  A correction that fails
     inside the service -- an exception there, not an unreachable host -- is
-    not asked for again for that volume and mode for ``volume_retry_s``: on
+    not asked for again for ``volume_retry_s``: for that structure and mode
+    when the service's handler threw on its request (:data:`REQUEST_CODES`),
+    and for the whole volume and mode once ``volume_after`` different
+    structures of it fail so in a row, or after any other error.  On
     2026-09-24 every RC1 ``CorrectStructures`` call threw after 5-15 s, which
-    every RC1 load then waited out.  ``offline`` never asks at all.
+    every RC1 load then waited out; on 2026-10-20 one failure of Cped c1 under
+    ``all`` held all of Cped, and cells the service answered for again a
+    minute later were drawn uncorrected for ten minutes.  ``offline`` never
+    asks at all.
     """
 
     def __init__(self, target: str | None = None, *, cache=None,
                  stos_group: str | None = None, timeout: float = 15.0,
                  structures_timeout: float = 120.0,
                  sets_ttl_s: float = 600.0, retry_after_s: float = 120.0,
-                 volume_retry_s: float = 600.0, offline: bool = False):
+                 volume_retry_s: float = 600.0, volume_after: int = 2,
+                 offline: bool = False):
         self.client = CorrectionsClient(target, timeout=timeout)
         #: ``CorrectStructures`` fits the whole cell: 5-10 s for c21768's 1,680
         #: Locations (2026-09-24), so it gets longer than the other calls.
@@ -1030,6 +1055,7 @@ class CorrectionsProvider:
         self.sets_ttl_s = sets_ttl_s
         self.retry_after_s = retry_after_s
         self.volume_retry_s = volume_retry_s
+        self.volume_after = volume_after
         self.offline = offline
         self._sets: dict[str, tuple[float, list[CorrectionSet]]] = {}
         # (monotonic time asked, service_stamp); asked as often as the sets
@@ -1037,6 +1063,11 @@ class CorrectionsProvider:
         self._down_until = 0.0
         # (volume, mode) -> (monotonic time it may be asked again, the error)
         self._held: dict[tuple[str, str], tuple[float, str]] = {}
+        # (volume, mode, structure) -> the same, after its request threw
+        self._held_structures: dict[tuple[str, str, int], tuple[float, str]] = {}
+        # (volume, mode) -> {structure: monotonic time its request threw}, the
+        # failures since the service last answered for that volume and mode
+        self._failing: dict[tuple[str, str], dict[int, float]] = {}
         self.last_error = ""
         self._lock = threading.Lock()
 
@@ -1048,26 +1079,62 @@ class CorrectionsProvider:
         """Offline, or inside the pause after a failure: the service is not asked."""
         return self.offline or time.monotonic() < self._down_until
 
-    def held(self, volume_name: str, mode: str) -> str:
-        """Why this volume is not asked for ``mode`` just now: the service's
-        error and until when (UTC); empty when it may be asked."""
+    def held(self, volume_name: str, mode: str, structure: int | None = None) -> str:
+        """Why this volume (or, with ``structure``, that structure of it) is
+        not asked for ``mode`` just now: the service's error and until when
+        (UTC); empty when it may be asked.  A held volume holds every structure."""
+        now = time.monotonic()
         with self._lock:
             until, error = self._held.get((volume_name, mode), (0.0, ""))
-        left = until - time.monotonic()
+            what = volume_name
+            if until <= now and structure is not None:
+                until, error = self._held_structures.get(
+                    (volume_name, mode, int(structure)), (0.0, ""))
+                what = f"c{int(structure)} of {volume_name}"
+        left = until - now
         if left <= 0:
             return ""
         again = datetime.now(UTC) + timedelta(seconds=left)
-        return f"{error} (not asked again for {volume_name} until {again:%H:%M} UTC)"
+        return f"{error} (not asked again for {what} until {again:%H:%M} UTC)"
 
-    def paused_for(self, volume_name: str, mode: str) -> bool:
-        """Is a load of this volume in ``mode`` not to ask the service now?"""
-        return self.paused or bool(self.held(volume_name, mode))
+    def paused_for(self, volume_name: str, mode: str, structure: int | None = None) -> bool:
+        """Is a load of this volume (and ``structure``) in ``mode`` not to ask the service now?"""
+        return self.paused or bool(self.held(volume_name, mode, structure))
 
-    def _hold(self, volume_name: str, mode: str, exc: Exception) -> None:
+    def _hold(self, volume_name: str, mode: str, exc: Exception,
+              structure: int | None = None) -> None:
+        """Hold ``structure`` after its request threw in the service, and the
+        volume once ``volume_after`` structures have in a row; the volume at
+        once after any other error, or with no ``structure``."""
+        now = time.monotonic()
+        until = now + self.volume_retry_s
+        sid = (int(structure) if structure is not None
+               and getattr(exc, "code", "") in REQUEST_CODES else None)
+        alone = False
         with self._lock:
-            self._held[(volume_name, mode)] = (time.monotonic() + self.volume_retry_s, str(exc))
-        log.warning("section correction (%s) failed for %s; not asked again for %.0f s: %s",
-                    mode, volume_name, self.volume_retry_s, exc)
+            if sid is not None:
+                self._held_structures = {k: v for k, v in self._held_structures.items()
+                                         if v[0] > now}
+                self._held_structures[(volume_name, mode, sid)] = (until, str(exc))
+                failing = {s: t for s, t in self._failing.get((volume_name, mode), {}).items()
+                           if t > now - self.volume_retry_s}
+                failing[sid] = now
+                self._failing[(volume_name, mode)] = failing
+                alone = len(failing) < self.volume_after
+            if not alone:
+                self._held[(volume_name, mode)] = (until, str(exc))
+                self._failing.pop((volume_name, mode), None)
+        if alone:
+            log.warning("section correction (%s) failed for c%s of %s; not asked again for "
+                        "%.0f s: %s", mode, structure, volume_name, self.volume_retry_s, exc)
+        else:
+            log.warning("section correction (%s) failed for %s; not asked again for %.0f s: %s",
+                        mode, volume_name, self.volume_retry_s, exc)
+
+    def _answered(self, volume_name: str, mode: str) -> None:
+        """The service answered for this volume and mode: no failures in a row."""
+        with self._lock:
+            self._failing.pop((volume_name, mode), None)
 
     def _sets_key(self, volume_name: str) -> str:
         return f"corrections:{self.client.url}/sets/{volume_name}"
@@ -1144,8 +1211,9 @@ class CorrectionsProvider:
     def correct(self, neuron, mode: str = "neighbor") -> CellCorrection | None:
         """Apply Viking's correction to ``neuron`` in ``mode`` (see :func:`correct_neuron`).
 
-        ``None`` when its volume has no published set.  While the volume is
-        held after a failure in the service, only offsets on disk are used.
+        ``None`` when its volume has no published set.  While the volume, or
+        this structure, is held after a failure in the service, only offsets
+        on disk are used.
         """
         volume_name = neuron.volume.viking_name
         if not volume_name:
@@ -1154,7 +1222,8 @@ class CorrectionsProvider:
         cset = choose_set(sets, self.stos_group)
         if cset is None:
             return None
-        held = self.held(volume_name, mode)
+        structure = int(neuron.id)
+        held = self.held(volume_name, mode, structure)
         try:
             if mode == "neighbor":
                 correction = fetch_offsets(neuron, self.client, cset, cache=self.cache,
@@ -1174,8 +1243,10 @@ class CorrectionsProvider:
         except CorrectionNotFound:
             raise
         except CorrectionsError as exc:
-            self._hold(volume_name, mode, exc)
+            self._hold(volume_name, mode, exc, structure)
             raise
+        if not correction.cached:
+            self._answered(volume_name, mode)
         if held or not fresh:
             correction.extras["service_note"] = held or self.last_error or "offline"
         apply_offsets(neuron, correction)

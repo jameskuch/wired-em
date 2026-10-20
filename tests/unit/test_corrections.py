@@ -156,11 +156,14 @@ class FakeService:
         self.points_seen = 0
         # CorrectStructures: the Locations it knows (location_id, structure_id,
         # z, x, y), the (dx, dy) each mode number adds to every one of them, the
-        # requests it was sent, and whether it throws as the live one did.
+        # requests it was sent, and whether it throws as the live one did:
+        # for every request (True), or for the structures in a set, with
+        # ``fail_code``.
         self.locations: list[dict] = []
         self.fit: dict[int, tuple[float, float]] = {}
         self.structure_requests: list[dict] = []
-        self.fail_structures = False
+        self.fail_structures: bool | set[int] = False
+        self.fail_code = "UNKNOWN"
         # GetRebuildStatus: when the last rebuild finished (the service
         # rebuilds on every start, so a restart moves it).
         self.rebuilt = 1790300000
@@ -216,8 +219,10 @@ class FakeService:
 
         def structures(request, context):
             self.structure_requests.append(request)
-            if self.fail_structures:
-                context.abort(grpc.StatusCode.UNKNOWN, "Exception was thrown by handler.")
+            failing = self.fail_structures
+            if failing is True or (failing and set(request["structure_ids"]) & failing):
+                context.abort(getattr(grpc.StatusCode, self.fail_code),
+                              "Exception was thrown by handler.")
             if request["stos_group"] != "Grid16":
                 context.abort(grpc.StatusCode.NOT_FOUND, "no correction set")
             mode = 3 if request["correction"] is None else request["correction"]
@@ -813,7 +818,7 @@ def test_a_lab_can_have_its_own_default_mode(web):
     assert named.summary.section_correction.mode == "curvefit"
 
 
-def test_a_failure_in_the_service_holds_that_volume_and_mode(web):
+def test_a_failure_in_the_service_holds_that_cell_and_mode(web):
     fake, svc = web
     fake.fail_structures = True
     svc.corrections().volume_retry_s = 0.3
@@ -827,6 +832,9 @@ def test_a_failure_in_the_service_holds_that_volume_and_mode(web):
     fake.fail_structures = False
     svc.load_neuron(1178, "i", include_synapses=False, section_corrections="curvefit")
     assert svc.neuron(1178, "i") is first and len(fake.structure_requests) == 1
+    provider = svc.corrections()
+    assert provider.paused_for("InferiorMonkey", "curvefit", 1178)
+    assert not provider.paused_for("InferiorMonkey", "curvefit"), "only that cell is held"
     # Another mode is not held.
     other = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
     assert other.summary.section_correction.applied
@@ -834,6 +842,35 @@ def test_a_failure_in_the_service_holds_that_volume_and_mode(web):
     time.sleep(0.35)
     again = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="curvefit")
     assert again.summary.section_correction.applied
+    assert len(fake.structure_requests) == 2
+
+
+def test_a_cell_the_service_throws_on_leaves_the_rest_of_its_volume_corrected(web):
+    """Cped c1 on 2026-10-20: one structure whose ``all`` request threw held
+    Field + fit for all of Cped for ten minutes, and the cells loaded after it
+    were drawn uncorrected though the service answered for them."""
+    fake, svc = web
+    svc.load_neuron(1178, "i", include_synapses=False, section_corrections="off")
+    loaded = svc.neuron(1178, "i")
+    sx, sy = map(float, loaded.volume_scale[:2])
+    fake.locations = [{"location_id": int(r.ID), "structure_id": 1178, "z": int(r.Z),
+                       "x": r.VolumeX * sx, "y": r.VolumeY * sy} for r in loaded.nodes.itertuples()]
+    fake.fit = {3: (60.0, 40.0)}
+    fake.fail_structures = {9}
+    provider = svc.corrections()
+    with pytest.raises(corr.CorrectionsError, match="Exception was thrown by handler") as failed:
+        provider.correct(make_structure_neuron(), "all")  # c9 of the same volume
+    detail = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="all")
+    sc = detail.summary.section_correction
+    assert sc.applied and sc.mode == "all" and sc.n_moved == len(loaded.nodes), sc.note
+    assert [r["structure_ids"] for r in fake.structure_requests] == [[9], [1178]]
+    assert failed.value.code == "UNKNOWN"
+    assert provider.paused_for("InferiorMonkey", "all", 9)
+    assert not provider.paused_for("InferiorMonkey", "all")
+    # c9 itself stays held: asked again, it is not sent.
+    with pytest.raises(corr.CorrectionsError,
+                       match="not asked again for c9 of InferiorMonkey until .* UTC"):
+        provider.correct(make_structure_neuron(), "all")
     assert len(fake.structure_requests) == 2
 
 
@@ -892,22 +929,80 @@ def test_a_correction_the_service_could_not_make_is_keyed_as_the_stored_position
     assert corrected[:-1] == uncorrected and corrected[-1] == f"section-correction:{token}"
 
 
-def test_provider_holds_a_volume_after_a_failure_in_the_service(structures):
+def structure_neuron(sid: int) -> Neuron:
+    neuron = make_structure_neuron()
+    neuron.id = sid
+    return neuron
+
+
+def test_provider_holds_a_structure_then_its_volume_after_failures_in_the_service(structures):
     fake, url = structures
     fake.fail_structures = True
     provider = corr.CorrectionsProvider(url, volume_retry_s=60)
     try:
         with pytest.raises(corr.CorrectionsError, match="Exception was thrown by handler"):
-            provider.correct(make_structure_neuron(), "curvefit")
+            provider.correct(structure_neuron(9), "curvefit")
+        with pytest.raises(corr.CorrectionsError,
+                           match="not asked again for c9 of InferiorMonkey until .* UTC"):
+            provider.correct(structure_neuron(9), "curvefit")
+        assert len(fake.structure_requests) == 1
+        assert provider.paused_for("InferiorMonkey", "curvefit", 9)
+        assert not provider.paused_for("InferiorMonkey", "curvefit")
+        # A second structure throws, with no answer between: the volume is held
+        # (RC1 on 2026-09-24, Cped while its volume server refused on 2026-10-20).
+        with pytest.raises(corr.CorrectionsError, match="Exception was thrown by handler"):
+            provider.correct(structure_neuron(10), "curvefit")
         with pytest.raises(corr.CorrectionsError,
                            match="not asked again for InferiorMonkey until .* UTC"):
-            provider.correct(make_structure_neuron(), "curvefit")
-        assert len(fake.structure_requests) == 1
+            provider.correct(structure_neuron(11), "curvefit")
+        assert len(fake.structure_requests) == 2
         assert provider.paused_for("InferiorMonkey", "curvefit")
+        assert provider.paused_for("InferiorMonkey", "curvefit", 11)
         assert not provider.paused_for("InferiorMonkey", "neighbor")
         assert not provider.paused  # the host answered: nothing else waits
         # The residual field for the same volume is still asked for.
         assert provider.correct(make_structure_neuron(), "neighbor") is not None
+    finally:
+        provider.close()
+
+
+def test_an_answer_between_two_failures_keeps_the_volume_asked(structures):
+    fake, url = structures
+    fake.fail_structures = {9, 10, 12}
+    provider = corr.CorrectionsProvider(url, volume_retry_s=0.3)
+    try:
+        with pytest.raises(corr.CorrectionsError):
+            provider.correct(structure_neuron(9), "all")
+        assert provider.correct(structure_neuron(11), "all") is not None
+        with pytest.raises(corr.CorrectionsError, match="Exception was thrown by handler"):
+            provider.correct(structure_neuron(10), "all")
+        assert not provider.paused_for("InferiorMonkey", "all")
+        # Nor does a failure count once its hold is over.
+        time.sleep(0.35)
+        with pytest.raises(corr.CorrectionsError, match="Exception was thrown by handler"):
+            provider.correct(structure_neuron(12), "all")
+        assert not provider.paused_for("InferiorMonkey", "all")
+        assert provider.correct(structure_neuron(13), "all") is not None
+        assert [r["structure_ids"] for r in fake.structure_requests] == [
+            [9], [11], [10], [12], [13]]
+    finally:
+        provider.close()
+
+
+def test_an_error_about_more_than_the_request_holds_the_volume_at_once(structures):
+    fake, url = structures
+    fake.fail_structures = {9}
+    fake.fail_code = "PERMISSION_DENIED"
+    provider = corr.CorrectionsProvider(url, volume_retry_s=60)
+    try:
+        with pytest.raises(corr.CorrectionsError) as failed:
+            provider.correct(structure_neuron(9), "curvefit")
+        assert failed.value.code == "PERMISSION_DENIED"
+        assert provider.paused_for("InferiorMonkey", "curvefit")
+        with pytest.raises(corr.CorrectionsError,
+                           match="not asked again for InferiorMonkey until .* UTC"):
+            provider.correct(structure_neuron(10), "curvefit")
+        assert len(fake.structure_requests) == 1
     finally:
         provider.close()
 

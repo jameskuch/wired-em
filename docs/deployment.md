@@ -145,10 +145,14 @@ on 2026-09-23), `all`, or `off`. A `CorrectStructures` call takes 5-10 s for
 a cell of 1,700 annotations and is kept on disk until the service's version
 moves (the `service_version` its `GetRebuildStatus` reports is part of the
 key; a restart does not move it, and only a service that reports none falls
-back to its last rebuild's completion time, which every restart refreshes). A failure inside the service
-holds that volume and mode for ten minutes (RC1 threw after 5-15 s on every
-call on 2026-09-24), and an unreachable service is left alone for two
-minutes. `SBFSEM_CORRECTIONS_URL` names the service (default
+back to its last rebuild's completion time, which every restart refreshes). An exception
+inside the service on one cell's request (gRPC `UNKNOWN`, `INTERNAL` or
+`INVALID_ARGUMENT`) holds that cell and mode for ten minutes, and the whole
+volume and mode once two different cells of it fail so in a row (RC1 threw
+after 5-15 s on every call on 2026-09-24; on 2026-10-20 Cped's volume server
+refused connections on and off, and every Cped request failed meanwhile). Any
+other error from the service holds the volume and mode at once, and an
+unreachable service is left alone for two minutes. `SBFSEM_CORRECTIONS_URL` names the service (default
 `https://corrections.codepharm.net`; an `http://` URL means cleartext
 HTTP/2), and `SBFSEM_CORRECTIONS_STOS_GROUP` picks a set by name (default: the
 first by name, as Viking's DataExport picks). None of them is set in the

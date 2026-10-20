@@ -1137,7 +1137,7 @@ class SbfsemService:
         ``want`` is a correction mode; a cell corrected in another mode is
         not.  A correction or registration asked for and not applied (a
         server down) is tried again, but not while its provider pauses after a
-        failure, or holds the cell's volume after a failure in the service.
+        failure, or holds the cell (or its volume) after a failure in the service.
         Only the copy loaded with this setting is asked: a copy another tab
         loaded with another setting is not this one.
 
@@ -1162,7 +1162,8 @@ class SbfsemService:
         else:
             corrected = bool(status.get("requested")) and same_mode and (
                 self._corrections is None
-                or self._corrections.paused_for(neuron.volume.viking_name or "", want))
+                or self._corrections.paused_for(neuron.volume.viking_name or "", want,
+                                                int(neuron.id)))
         reg = getattr(neuron, "registration_status", None) or {}
         if not live:
             registered = not reg.get("requested")
