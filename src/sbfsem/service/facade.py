@@ -65,7 +65,7 @@ from ..geometry.curve_average import (
     smooth_surface,
 )
 from ..geometry.curve_ties import tie_bodies
-from ..geometry.cylinder import FIELD_PATHWAYS, cylinder_render
+from ..geometry.cylinder import FIELD_PATHWAYS, cylinder_render, field_pieces
 from ..geometry.mesh import EMPTY_MESH, Mesh, concatenate
 from ..geometry.meshdiff import (
     AreaStats,
@@ -160,7 +160,7 @@ from .dto import (
     SynapseTypeCountDTO,
     VolumeInfoDTO,
 )
-from .estimate import CURVE_RASTER_META, CostEstimator, raster_record
+from .estimate import CURVE_RASTER_META, CostEstimator, FieldPlanner, raster_record
 from .meshcache import MeshDiskCache
 
 if TYPE_CHECKING:
@@ -173,6 +173,20 @@ log = logging.getLogger(__name__)
 
 class NeuronNotLoadedError(KeyError):
     """The requested neuron is not in the service's cache."""
+
+
+class BuildInterrupted(RuntimeError):
+    """A build stopped because the service is stopping (a deploy or a restart),
+    not because of anything in the build: it is to be asked for again once the
+    service is back, not reported as a failure of its settings."""
+
+
+#: How long a build whose process died waits to hear that the service is
+#: stopping before it is taken for an out-of-memory kill.  systemd stops the
+#: whole unit at once, so the build processes get the SIGTERM this process does,
+#: and the pool breaks within a second of it, before or after this process has
+#: run its handler (``SbfsemService.note_stopping``).
+STOP_GRACE_S = 2.0
 
 
 #: The method names a build answers to, each as the name a mesh is cached under
@@ -538,6 +552,9 @@ class SbfsemService:
         # 0 or less: a worker is never replaced for what it holds.
         self._build_recycle_mb = float(
             self.BUILD_RECYCLE_MB if build_recycle_mb is None else build_recycle_mb)
+        # Set when this process is told to stop (note_stopping): a build process
+        # that dies then was stopped with it, not killed for memory.
+        self.stopping = threading.Event()
         self._process_pool: ProcessPoolExecutor | None = None
         # How many pools were replaced for what a worker held (_retire_pool).
         self.pool_recycles = 0
@@ -613,6 +630,20 @@ class SbfsemService:
             lambda neuron, discs: _curve_outlines(neuron, discs=discs),
             self._disc_half_peak_mb,
         )
+        # And the Fine voxel a Voxel remesh, Convolution or Ultraliser build would
+        # contour at, sized as the build sizes it, before it is built.
+        self._field_planner = FieldPlanner(
+            self._field_pieces,
+            lambda neuron, o: self.estimate_peak_mb(
+                neuron.id, neuron.source, method=str(o.get("method", "cylinder")),
+                pathway=str(o["pathway"]), meshlab=str(o.get("meshlab", "none")),
+                meshlab_depth=int(o.get("meshlab_depth", 9)),
+                voxel2_faces=int(o["voxel2_faces"]), voxel2_um=float(o["voxel2_um"]),
+                neuron=neuron),
+            lambda raw, capped: FIELD_SHEET_BASE_MB + raw * (
+                FIELD_SHEET_BYTES_PER_FACE
+                + (FIELD_SHEET_BYTES_PER_DECIMATED_FACE if capped else 0.0)) / 1e6,
+        )
         self._lock = threading.RLock()
 
     # -- infrastructure ----------------------------------------------------
@@ -647,6 +678,11 @@ class SbfsemService:
         if queue is not None:
             with contextlib.suppress(Exception):
                 queue.put(None)
+
+    def note_stopping(self) -> None:
+        """This process has been told to stop: a build process dying from now on
+        stopped with it (:class:`BuildInterrupted`)."""
+        self.stopping.set()
 
     def _pool(self) -> ProcessPoolExecutor | None:
         if not self._build_processes:
@@ -900,11 +936,20 @@ class SbfsemService:
             try:
                 mesh, held_mb, grid_out = future.result()
             except BrokenProcessPool as exc:
-                # A worker died while this build was running (almost always
-                # the out-of-memory killer).  Running it again would likely
-                # kill the next one, so say so; the pool is made anew for
+                # A worker died while this build was running: stopped with the
+                # service (a deploy or a restart stops the whole unit), or else
+                # almost always the out-of-memory killer.  Running it again would
+                # likely kill the next one, so say so; the pool is made anew for
                 # whatever is asked next.
                 self._drop_pool(pool)
+                if self.stopping.wait(STOP_GRACE_S):
+                    # On 2026-10-20 a deploy at 17:42:41 UTC stopped c1178's build,
+                    # and the page said the server had most likely run out of
+                    # memory and to ask for a coarser setting.
+                    log.info("c%s's build (%s) stopped with the service", neuron.id, method)
+                    raise BuildInterrupted(
+                        "the server restarted during this build (a new version was being "
+                        "installed): ask for it again in a moment") from exc
                 log.error("a build process died during c%s's build (%s): %s",
                           neuron.id, method, exc)
                 raise RuntimeError(
@@ -1424,6 +1469,20 @@ class SbfsemService:
                 str(meshlab) == "poisson" and int(meshlab_depth) > 9) else self.MESHLAB_MB
         return float(round(estimate))
 
+    def _field_pieces(self, neuron: Neuron, options: dict) -> list:
+        """The pieces a field pathway's build contours ``neuron`` from, under
+        ``options`` (``_mesh_options``'s): what :meth:`_cylinder_mesh` hands
+        :func:`~sbfsem.geometry.cylinder.cylinder_render`, Smooth discs included."""
+        avg = float(options.get("curve_avg_discs", 0.0) or 0.0)
+        if avg > 0:
+            neuron = _averaged_discs(neuron, avg)
+        return field_pieces(
+            neuron, pathway=str(options["pathway"]),
+            voxel_detail=options["voxel_detail"], voxel_smooth_um=options["voxel_smooth_um"],
+            target_arc_um=options["ring_arc_um"], wrap_spacing_um=options["wrap_spacing_um"],
+            wrap_blend=options["wrap_blend"], wrap_reject_sigma=options["wrap_reject_sigma"],
+            wrap_passes=int(options["wrap_passes"]), ultra_soma=str(options["ultra_soma"]))
+
     def _disc_half_peak_mb(self, neuron: Neuron, options: dict) -> float:
         """The memory a Hybrid's disc half builds in (``estimate_peak_mb`` of the discs alone)."""
         discs = _disc_subset(neuron)
@@ -1466,6 +1525,9 @@ class SbfsemService:
                 meshlab_depth=int(opts.get("meshlab_depth", 9)),
                 voxel2_faces=opts.get("voxel2_faces"), voxel2_um=opts.get("voxel2_um"),
                 neuron=neuron)
+            field = {**self._mesh_options(**opts), "method": method}
+            if FieldPlanner.applies(method, field):
+                answer["field"] = self._field_planner.estimate(neuron, field)
         answer["cell"] = int(neuron.id)
         answer["source"] = str(neuron.source)
         answer["copy"] = getattr(neuron, "copy_tag", None)
@@ -1569,6 +1631,7 @@ class SbfsemService:
             for store in (self._deviations, self._deviation_maps, self._differences,
                           self._outline_replies):
                 store.clear()
+        self._field_planner.forget()
         report = {"memory_meshes": held, "disk_files": 0, "disk_bytes": 0}
         if disk and self._disk_meshes is not None:
             gone = self._disk_meshes.clear()

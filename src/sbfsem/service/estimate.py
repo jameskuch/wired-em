@@ -91,6 +91,7 @@ __all__ = [
     "CURVE_METHODS",
     "CURVE_RASTER_META",
     "CostEstimator",
+    "FieldPlanner",
     "RasterCount",
     "raster_record",
 ]
@@ -596,7 +597,7 @@ class CostEstimator:
         def triangles_at(px: float) -> float:
             return per_face * ref.faces_at(px) + hybrid_discs * DISC_TRIANGLES
 
-        def build_mb(tri: float) -> float:
+        def build_mb(tri: float, averaging: bool = averaging, joins: bool = joins) -> float:
             curve = tri - hybrid_discs * DISC_TRIANGLES
             peak = BUILD_BASE_MB + BUILD_BYTES_PER_TRIANGLE * curve / 1e6
             if averaging:
@@ -605,17 +606,18 @@ class CostEstimator:
                 peak += min(JOIN_BYTES_PER_TRIANGLE * curve / 1e6, JOIN_MAX_MB)
             return peak + disc_mb
 
-        def costs(px: float) -> dict[str, float]:
+        def costs(px: float, averaging: bool = averaging, joins: bool = joins) -> dict[str, float]:
             tri = triangles_at(px)
-            peak = build_mb(tri)
+            peak = build_mb(tri, averaging, joins)
             serve = SERVE_BYTES_PER_TRIANGLE * tri / 1e6
             return {"faces": ref.faces_at(px), "triangles": tri, "peak_mb": peak,
                     "serve_mb": serve, "server_mb": peak + serve,
                     "json_mb": JSON_BYTES_PER_TRIANGLE * tri / 1e6,
                     "tab_mb": TAB_BYTES_PER_TRIANGLE * tri / 1e6}
 
-        def over_at(px: float, share: float = 1.0) -> list[str]:
-            c = costs(px)
+        def over_at(px: float, share: float = 1.0, averaging: bool = averaging,
+                    joins: bool = joins) -> list[str]:
+            c = costs(px, averaging, joins)
             over = []
             if c["faces"] > share * MAX_SURFACE:
                 over.append("faces")
@@ -641,6 +643,32 @@ class CostEstimator:
         if finest is not None and over and self._voxels(cell, finest) > MAX_VOXELS:
             finest = finest_fitting_pixel(lambda px: self._voxels(cell, px), finest, MAX_VOXELS)
             binding = "voxels"
+        # Past the memory with the averaging or the joining of bodies on, both of
+        # which only add memory: the finest Voxel size with each of them off, when
+        # it is finer than with them on (the faces, the voxels and the page do
+        # not change with either).
+        alternatives: list[dict[str, Any]] = []
+        if over and finest is not None:
+            turned = []
+            if joins:
+                turned.append(("joins", {"curve_tie_um": 0.0}, averaging, False))
+            if averaging:
+                off = {k: 0.0 for k, v in (("curve_avg_discs", avg_discs),
+                                           ("curve_avg_paths", avg_paths)) if v > 0}
+                turned.append(("averaging", off, False, joins))
+            if joins and averaging:
+                turned.append(("both", {"curve_tie_um": 0.0, **turned[1][1]}, False, False))
+            for name, sets, with_avg, with_joins in turned:
+                def fits_without(px: float, a: bool = with_avg, j: bool = with_joins) -> bool:
+                    return not over_at(px, HEADROOM, a, j)
+
+                alt = finest_by(fits_without)
+                if alt is not None and self._voxels(cell, alt) > MAX_VOXELS:
+                    alt = finest_fitting_pixel(lambda px: self._voxels(cell, px), alt, MAX_VOXELS)
+                if alt is not None and alt < finest - 1e-9:
+                    alternatives.append({"off": name, "set": sets, "finest_um": alt,
+                                         "fits": not over_at(pixel, 1.0, with_avg, with_joins)
+                                         and voxels <= MAX_VOXELS})
         seconds = (SECONDS_START + SECONDS_PER_OUTLINE * cell.n_outlines
                    + SECONDS_PER_MILLION_TRIANGLES * (now["triangles"] - hybrid_discs * DISC_TRIANGLES) / 1e6)
         seconds *= 1.0 + (AVERAGING_DISCS_TIME if avg_discs > 0 else 0.0) + (
@@ -678,4 +706,213 @@ class CostEstimator:
             "over": over,
             "finest_um": finest,
             "binding": binding,
+            "alternatives": alternatives,
         }
+
+
+# -- the whole-cell field's Fine voxel (Voxel remesh, Convolution, Ultraliser) --------
+
+#: The field each field pathway contours (``unify.MODES``).
+FIELD_MODES = {"voxel2": "min", "convolution": "sum", "ultraliser": "occupancy"}
+
+#: A Face cap the estimate suggests is rounded up to this many triangles.
+CAP_STEP = 10_000
+
+#: The options that decide a cell's field pieces (``cylinder.field_pieces``) and
+#: so its bodies: anything else (the Fine voxel, the Face cap, the fillet) only
+#: sizes the grid they are contoured on.
+FIELD_PIECE_KEYS = ("pathway", "voxel_detail", "voxel_smooth_um", "ring_arc_um",
+                    "wrap_spacing_um", "wrap_blend", "wrap_reject_sigma", "wrap_passes",
+                    "ultra_soma", "exact_tube_deg", "conv_support", "curve_avg_discs")
+
+
+class FieldPlanner:
+    """What Fine voxel a field pathway's build would contour a cell at, before it is built.
+
+    A Voxel remesh, Convolution or Ultraliser build sizes its whole-cell grid
+    first (:func:`~sbfsem.geometry.unify.plan_voxel`): the Fine voxel typed, or
+    the annotations' own when it is automatic, then held to the raw-triangle
+    budget its Face cap gives (three raw triangles a kept one, at most 10
+    million; :func:`~sbfsem.geometry.unify.raw_budget`) and to the field
+    evaluations that budget may spend.  A voxel finer than they allow is built
+    coarser, and until 2.18.0 the page learned so only from the finished mesh.
+    Here the same sizing runs on the same pieces without contouring (0.04 to
+    0.45 s to make a cell's pieces, measured 2026-10-20 on Inferior c1178 and
+    c16137 and RPC1 c430; 0.04 to 0.11 s a plan), and says what a build would
+    use, why, the least Face cap that builds the voxel asked for, the voxel
+    Face cap 0 builds, and the finest any budget allows.
+
+    ``pieces_of(neuron, options)`` makes the pieces as a build would (the
+    facade's ``_field_pieces``); ``peak_mb(neuron, options)`` is the build
+    gate's memory price for those options, which prices the whole raw budget
+    a Face cap allows; ``sheet_mb(raw_triangles, capped)`` is what a build
+    that draws that many raw triangles peaks at (measured on Inferior c1178,
+    the facade's ``FIELD_SHEET_*``; c16137 at 0.04 um with every triangle
+    kept, 2.52 million: 1,422 MB from it, 1,429 MB measured on 2026-10-20),
+    which is what the page is told.
+    """
+
+    #: Cells (copy and pieces) and answers kept.
+    CELLS_KEPT = 8
+    ANSWERS_KEPT = 256
+
+    def __init__(self, pieces_of: Callable[[Neuron, dict], list],
+                 peak_mb: Callable[[Neuron, dict], float],
+                 sheet_mb: Callable[[int, bool], float]) -> None:
+        self._pieces_of = pieces_of
+        self._peak_mb = peak_mb
+        self._sheet_mb = sheet_mb
+        self._bodies: OrderedDict[tuple, tuple[list, list]] = OrderedDict()
+        self._answers: OrderedDict[tuple, dict] = OrderedDict()
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def applies(method: str, options: dict) -> bool:
+        """A Cylinder or Tube build whose pathway contours one whole-cell field."""
+        return method in ("cylinder", "curvemesh") and options.get("pathway") in FIELD_MODES
+
+    def _cell(self, neuron: Neuron, options: dict) -> tuple[list, list]:
+        from ..geometry.cylinder import STRAND_COIN_HALF_UM
+        from ..geometry.unify import field_bodies
+
+        key = self._cell_key(neuron, options)
+        with self._lock:
+            held = self._bodies.get(key)
+            if held is not None:
+                self._bodies.move_to_end(key)
+                return held
+        mode = FIELD_MODES[str(options["pathway"])]
+        made = field_bodies(self._pieces_of(neuron, options), mode=mode,
+                            lens_h=STRAND_COIN_HALF_UM,
+                            support=float(options.get("conv_support", 2.0)),
+                            hull_tilt_deg=(float(options.get("exact_tube_deg", 0.0) or 0.0)
+                                           if mode != "sum" else 0.0))
+        with self._lock:
+            self._bodies[key] = made
+            while len(self._bodies) > self.CELLS_KEPT:
+                self._bodies.popitem(last=False)
+        return made
+
+    @staticmethod
+    def _cell_key(neuron: Neuron, options: dict) -> tuple:
+        return (str(neuron.source), int(neuron.id), getattr(neuron, "load_serial", None),
+                *(repr(options.get(k)) for k in FIELD_PIECE_KEYS))
+
+    def forget(self) -> None:
+        with self._lock:
+            self._bodies.clear()
+            self._answers.clear()
+
+    def estimate(self, neuron: Neuron, options: dict) -> dict[str, Any]:
+        """The Fine voxel a build of ``neuron`` with ``options`` (the mesh route's,
+        method already canonical) would contour at, and what would change it."""
+        key = (*self._cell_key(neuron, options), str(options.get("method")),
+               *(repr(options.get(k)) for k in ("voxel2_um", "voxel2_faces", "voxel2_blend_um",
+                                                "meshlab", "meshlab_depth")))
+        with self._lock:
+            held = self._answers.get(key)
+            if held is not None:
+                self._answers.move_to_end(key)
+                return dict(held)
+        answer = self._estimate(neuron, options)
+        with self._lock:
+            self._answers[key] = answer
+            while len(self._answers) > self.ANSWERS_KEPT:
+                self._answers.popitem(last=False)
+        return dict(answer)
+
+    def _estimate(self, neuron: Neuron, options: dict) -> dict[str, Any]:
+        from ..geometry.unify import (
+            FACES_PER_SURFACE_VOXEL,
+            MAX_RAW_FACES,
+            MAX_WORK_VOXELS,
+            RAW_PER_CAPPED_FACE,
+            TYPED_MIN_VOXEL_UM,
+            WORK_PER_RAW_FACE,
+            plan_voxel,
+            raw_budget,
+        )
+
+        t0 = time.perf_counter()
+        pathway = str(options["pathway"])
+        bodies, thin = self._cell(neuron, options)
+        typed = float(options.get("voxel2_um", 0.0) or 0.0)
+        cap = int(options.get("voxel2_faces", 0) or 0)
+        blend = float(options.get("voxel2_blend_um", 0.0) or 0.0) if pathway == "voxel2" else 0.0
+        mode = FIELD_MODES[pathway]
+
+        def plan(voxel_um: float, faces: int):
+            return plan_voxel(bodies, thin, voxel_um=voxel_um, max_raw_faces=raw_budget(faces),
+                              blend_um=blend, mode=mode)
+
+        now = plan(typed, cap)
+        if now is None:
+            return {"applies": True, "empty": True, "pathway": pathway}
+
+        def kept(p, faces: int) -> int:
+            raw = min(p.raw_faces, p.raw_budget)
+            return min(raw, faces) if faces > 0 else raw
+
+        def option(p, faces: int) -> dict[str, Any]:
+            raw = int(min(p.raw_faces, p.raw_budget))
+            return {"voxel2_faces": int(faces), "voxel2_um": typed,
+                    "voxel_um": round(p.voxel_um, 4), "reason": p.reason,
+                    "raw_triangles": raw, "triangles": kept(p, faces),
+                    "peak_mb": round(float(self._sheet_mb(raw, faces > 0))),
+                    "gate_mb": round(float(self._peak_mb(
+                        neuron, {**options, "voxel2_faces": int(faces), "voxel2_um": typed})))}
+
+        # What the build is held to: the voxel typed (within the floor and the
+        # ceiling), or the one the annotations ask for.
+        target = now.asked_um
+        uncapped = plan(typed, 0) if cap > 0 else now
+        cap_for: dict[str, Any] | None = None
+        if cap > 0 and now.voxel_um > target + 1e-9 and uncapped.voxel_um <= target + 1e-9:
+            # The least Face cap whose budgets hold the target: the raw triangles
+            # it draws there, and the evaluations it spends there (a raw budget
+            # over 3 million may spend 20 a triangle), then checked by planning.
+            raw = FACES_PER_SURFACE_VOXEL * now.area_um2 / target ** 2
+            if uncapped.work > MAX_WORK_VOXELS:
+                raw = max(raw, uncapped.work / WORK_PER_RAW_FACE)
+            faces = int(math.ceil(raw / RAW_PER_CAPPED_FACE / CAP_STEP) * CAP_STEP)
+            for _ in range(6):
+                if RAW_PER_CAPPED_FACE * faces >= MAX_RAW_FACES:
+                    faces = 0
+                    break
+                if plan(typed, faces).voxel_um <= target + 1e-9:
+                    break
+                faces = int(math.ceil(faces * 1.05 / CAP_STEP) * CAP_STEP)
+            cap_for = option(plan(typed, faces), faces) if faces else None
+        finest = plan(TYPED_MIN_VOXEL_UM, 0)
+        finest_cap = plan(TYPED_MIN_VOXEL_UM, cap) if cap > 0 else finest
+        assert finest is not None and finest_cap is not None and uncapped is not None
+        answer = {
+            "applies": True,
+            "pathway": pathway,
+            "typed": typed > 0,
+            "typed_um": round(now.typed_um, 4),
+            "asked_um": round(now.asked_um, 4),
+            "floor_um": now.floor_um,
+            "voxel_um": round(now.voxel_um, 4),
+            "coarsened": bool(now.coarsened),
+            "reason": now.reason,
+            "area_um2": round(now.area_um2, 1),
+            "voxel2_faces": cap,
+            "raw_budget": int(now.raw_budget),
+            "raw_triangles": int(min(now.raw_faces, now.raw_budget)),
+            "triangles": kept(now, cap),
+            "work": int(now.work),
+            "work_budget": int(now.work_budget),
+            "peak_mb": round(float(self._sheet_mb(int(min(now.raw_faces, now.raw_budget)), cap > 0))),
+            "gate_mb": round(float(self._peak_mb(neuron, options))),
+            # The least Face cap that builds the target voxel; None when the
+            # build is not held back by its cap, or no cap reaches the target.
+            "cap_for_asked": cap_for,
+            # Face cap 0 (every triangle kept, the 10 million budget).
+            "uncapped": option(uncapped, 0) if cap > 0 else None,
+            # The finest voxel any Face cap allows this cell, and this one.
+            "finest_um": round(finest.voxel_um, 4),
+            "finest_at_cap_um": round(finest_cap.voxel_um, 4),
+        }
+        answer["estimate_s"] = round(time.perf_counter() - t0, 3)
+        return answer

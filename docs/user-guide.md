@@ -911,6 +911,53 @@ the INL border, red at the GCL border. **Clip IPL depth** cuts the mesh at a
 depth fraction, keeping the ON or OFF side. Both need the volume to have cached
 IPL boundary markers.
 
+### Settings that will not build as set
+
+Since 2.18.0 the render panel says so before Apply. The controls to change turn
+black with red text, and a row at the top of the panel says why, cell by cell, and
+lists what to change, best first. Each fix is a button that puts its settings into
+the controls; nothing is built until Apply, and Apply as set still builds (see the
+row's last line). The server answers it from the selected cells' estimates
+(`render-estimate`, `docs/api.md`), worked out the way the build works them out,
+without building:
+
+- **Closed curve and Hybrid: a Voxel size past a limit** (the raster's voxels, its
+  voxel faces, the server's memory, the page's text). **Voxel** is marked; the first
+  fix is the finest size that fits every selected cell (each cell's own is named).
+  When the limit is the server's memory and **Join bodies** or the smoothing (Smooth
+  discs, Smooth outlines) is on, each of which only adds memory, it is marked too, and
+  the fix with it off names the finer size that then fits. Applied as set, each cell
+  is built at the finest size that fits it, as before, and a notice says which.
+- **Voxel remesh, Convolution and Ultraliser: a typed Fine voxel the build would
+  contour coarser.** The whole-cell grid's voxel is held to the raw triangles the
+  **Face cap** allows (three for each one kept, at most 10 million), to the field
+  evaluations those allow, and to 0.02 µm, the finest a build takes. **Fine voxel** is
+  marked, and **Face cap** when a larger cap would help. The fixes: the least Face
+  cap that builds the voxel as typed (to 10,000 triangles), Face cap 0 (every triangle
+  kept, the 10 million budget), and the Fine voxel the cap holds the cell to, each
+  with the raw triangles and the build's memory (about 310 MB plus 0.445 MB for every
+  1,000 raw triangles, and 0.37 MB more under a cap, which keeps a second copy to
+  decimate). When no cap reaches the typed voxel, the finest any budget allows is
+  named. An automatic Fine voxel (0) the cap holds coarser than the cell's annotations
+  ask is not marked, since that is what the cap is for; the cost chip's hover says
+  which cap would build it at theirs.
+
+On 2026-10-20, for example: RPC1 c430 under the default Voxel remesh is built at
+0.076 µm, where its annotations ask for 0.040 µm (the default cap allows 1.2 million
+raw triangles; c430 has about 2,000 µm² of surface); Face cap 1,460,000 builds it at
+0.040 µm (4.4 million raw triangles decimated to 1.46 million, about 3.9 GB) and Face
+cap 0 too (all 4.4 million kept, about 2.3 GB, as nothing is decimated),
+and the finest any budget allows it is 0.030 µm. Inferior c1178 is built at 0.120 µm
+under the default cap and can go no finer than 0.042 µm, where it fills the 10 million.
+How long the server takes to say so, on production: 2.7 to 3.1 s for a cell's first
+answer (c430, c1178), 0.7 to 0.9 s for each new Fine voxel or Face cap, and nothing for
+an answer already given; the marks appear when it comes.
+
+A build cut short by a restart of the server (every deploy restarts it) is no longer
+reported as one that ran out of memory with advice to ask for a coarser setting
+(c1178 at 0.05 µm on 2026-10-20, a 1.2 GB build): the page waits out the restart and
+asks for it again.
+
 ### Hybrid is one surface
 
 Until 2.7.0 Hybrid built its two halves apart, the traced outlines as a Closed curve

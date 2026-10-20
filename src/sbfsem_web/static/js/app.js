@@ -35,6 +35,8 @@ import {
   coarsenedNotice,
   fineVoxelNotice, LONG_WAIT_S,
 } from './renderestimate.js';
+import { renderConflicts, buildsField, fieldNotes } from './renderconflicts.js';
+import { ConflictPanel } from './conflictpanel.js';
 
 import { Renderer3D } from './render3d.js';
 import { CompareView } from './compare.js';
@@ -2018,6 +2020,8 @@ function updateMethodControls() {
   // Cost: a compact chip, with the reasoning behind it on hover rather than
   // occupying a paragraph of the toolbar.
   const targets = selectedRecords();
+  // Settings that will not build as set for these cells, marked before Apply.
+  const notes = updateConflicts(targets, options);
   const chip = $('cost-chip');
   if (!chip) return;
   if (!targets.length) { chip.hidden = true; return; }
@@ -2062,8 +2066,40 @@ function updateMethodControls() {
     }
     if (slowest > 120) help += ' The browser waits the whole time.';
   }
+  if (notes.length) help += `\n\n${notes.join('\n')}`;
   chip.dataset.help = help;
   chip.title = '';
+}
+
+// The render panel's row for settings that will not build as set (conflictpanel.js).
+let conflictPanel = null;
+
+/**
+ * Mark the render settings that will not build as set for the selected cells
+ * and list what to change (renderconflicts.js), from the server's estimates:
+ * the outline methods' Voxel size, and the Fine voxel and Face cap of a
+ * whole-cell field.  An answer not yet in is asked for once typing stops, and
+ * the panel is drawn again when it comes.  Returns the field notes for the
+ * chip's hover (an automatic Fine voxel the Face cap holds coarser).
+ */
+function updateConflicts(targets, options) {
+  if (!conflictPanel) return [];
+  const o = normalizeRender(options);
+  if (!targets.length || !(CURVE_METHODS.has(o.method) || buildsField(o))) {
+    conflictPanel.show(null);
+    return [];
+  }
+  const held = targets.map((r) => estimates.peek(r, o));
+  if (held.some((e) => e === undefined)) {
+    const wanted = estimateFor(targets, o);
+    estimates.soon('conflicts', targets, o, () => {
+      if (estimateFor(selectedRecords(), readControls()) === wanted) updateMethodControls();
+    });
+  }
+  const entries = targets.map((r, i) => ({ name: `c${r.id}`, estimate: held[i] }))
+    .filter((x) => x.estimate);
+  conflictPanel.show(renderConflicts(entries, o));
+  return fieldNotes(entries, o);
 }
 
 // The chip's next look at an interim answer.
@@ -2207,6 +2243,15 @@ function buildRenderPanel() {
     // Editing any control re-states what Apply would affect, but never
     // rebuilds on its own.
     onInput: () => { updateScopeNote(); syncQuickTechnique(); },
+  });
+  conflictPanel = new ConflictPanel({
+    form: renderForm,
+    mount: $('panel-render'),
+    // A suggestion goes into the controls as if typed; Apply builds it.
+    onPick: (set) => {
+      writeControls({ ...readControls(), ...set });
+      updateScopeNote();
+    },
   });
 }
 

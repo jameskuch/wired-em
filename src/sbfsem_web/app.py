@@ -15,6 +15,8 @@ import json
 import logging
 import math
 import os
+import signal
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -474,6 +476,29 @@ class RevalidatingStatic(StaticFiles):
         return response
 
 
+def _watch_stop(service: SbfsemService) -> None:
+    """Tell the service the moment this process is told to stop, ahead of
+    uvicorn's own handler, which it then runs.
+
+    systemd's stop (every deploy, and the Settings tab's restart) sends SIGTERM
+    to the build processes too, and a build whose process stopped must not be
+    reported as one that ran out of memory (``BuildInterrupted``).  Only from
+    the main thread, where uvicorn runs the lifespan; a test client runs it
+    elsewhere and is never sent a signal.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+    if not callable(previous):
+        return
+
+    def on_stop(signum, frame):
+        service.note_stopping()
+        previous(signum, frame)
+
+    signal.signal(signal.SIGTERM, on_stop)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.service = SbfsemService(
@@ -548,6 +573,7 @@ async def lifespan(app: FastAPI):
             log.info("purged %d expired viking session(s)", gone)
     app.state.mesh_jobs = MeshJobStore()
     log.info("mesh builds: %s", app.state.mesh_jobs.load())
+    _watch_stop(app.state.service)
     app.state.instance_id = uuid.uuid4().hex[:12]
     app.state.started_at = time.time()
     app.state.assets = asset_version()

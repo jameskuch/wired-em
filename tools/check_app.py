@@ -49,6 +49,11 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   Render compare's pane form and builds (needs --big, RPC1 c2628 by default).
 * ``race`` -- a size applied while an estimate was out is not overwritten when it comes back.
 * ``fine`` -- a Fine voxel the server built coarser than typed is named, with why.
+* ``conflicts`` -- before Apply, a typed Fine voxel the Face cap holds coarser marks both controls
+  black with red text and lists the fixes, the least Face cap first; picking one puts it in the
+  controls and clears the marks, and Apply then builds it as typed; a Closed curve size past the
+  server's memory marks Voxel and Join bodies, and the other way sets both; a method that reads
+  neither marks nothing.
 * ``compare`` -- Render compare's pane header: it keeps its height in every state (idle, waiting,
   building, measuring, out of date, stopped, failed) at 900, 1140, 1440 and 1920 px, 3 and 6 panes, 1 and
   4 layers, annotations on, and through a real build; Tab walks the buttons and then the chips under
@@ -1357,6 +1362,91 @@ def fine(c: Chrome, r: Report, ctx):
         document.getElementById('render-notice-text').textContent]""")
     r.check('the notice says which Fine voxel was used and why', shown and '0.01 µm typed' in note[1]
             and ('finest typed voxel' in note[1] or 'raw triangles' in note[1] or 'field evaluations' in note[1]), note)
+
+CONFLICT = "document.getElementById('render-conflict')"
+MARKED = "[...document.querySelectorAll('#panel-render .field.conflict')].map((e) => e.dataset.key).sort()"
+
+
+def conflicts(c: Chrome, r: Report, ctx):
+    r.start('conflicts: settings that will not build as set turn black and red, with fixes to pick')
+    boot(c, ctx.url)
+    key = load(c, ctx.cell)
+    select_only(c, [key])
+    js(c, "document.getElementById('panel-render').hidden && document.getElementById('toggle-render').click()")
+    set_control(c, 'render-method', 'cylinder')
+    set_control(c, 'pathway', 'voxel2')
+    r.check('settings that build as set mark nothing', c.wait_for(f'{CONFLICT}.hidden', 30)
+            and js(c, MARKED) == [], js(c, MARKED))
+    # c943 (121 um2 of surface) under a Face cap of 20,000 is held to 0.027 um; 0.02 is typed.
+    set_control(c, 'voxel2-faces', '20000')
+    set_control(c, 'voxel2-um', '0.02')
+    shown = c.wait_for(f'!{CONFLICT}.hidden', 60)
+    got = js(c, f"""(() => {{
+        const style = (el) => {{ const s = getComputedStyle(el); return [s.backgroundColor, s.color]; }};
+        const field = document.getElementById('voxel2-um-field');
+        return {{ marked: {MARKED}, text: {CONFLICT}.innerText,
+          field: style(field), box: style(document.getElementById('voxel2-um')),
+          fixes: [...{CONFLICT}.querySelectorAll('.render-conflict-use')].map((b) => [b.textContent, b.classList.contains('best')]),
+          invalid: document.getElementById('voxel2-um').getAttribute('aria-invalid') }};
+    }})()""")
+    r.check('a typed Fine voxel the Face cap holds coarser marks both', shown
+            and got['marked'] == ['voxel2_faces', 'voxel2_um'] and got['invalid'] == 'true', got)
+    r.check('black, with red text: the field and its box', got['field'] == ['rgb(0, 0, 0)', 'rgb(255, 0, 0)']
+            and got['box'] == ['rgb(0, 0, 0)', 'rgb(255, 0, 0)'], got)
+    r.check('the row says why and lists the fixes, the least Face cap first', f'coarser for c{ctx.cell}' in got['text']
+            and got['fixes'] and got['fixes'][0][0].startswith('Face cap ') and got['fixes'][0][1]
+            and any(f[0] == 'Face cap 0 (keep every triangle)' for f in got['fixes'])
+            and got['fixes'][-1][0].startswith('Fine voxel '), got['fixes'])
+    x, y, *_ = c.center('#render-conflict .render-conflict-use.best')
+    c.click(x, y)
+    cleared = c.wait_for(f'{CONFLICT}.hidden', 60)
+    now = js(c, f"[document.getElementById('voxel2-faces').value, document.getElementById('voxel2-um').value, {MARKED}]")
+    cap = int(got['fixes'][0][0].removeprefix('Face cap ').replace(',', ''))
+    r.check('picking the best fix puts it in the controls and clears the marks; nothing is built yet',
+            cleared and now[0] == str(cap) and now[1] == '0.02' and now[2] == [], now)
+    meshes = js(c, 'window.sbfsem.renderer.meshes.size')
+    x, y, *_ = c.center('#apply-selected')
+    c.click(x, y)
+    c.wait_for("document.getElementById('status').textContent.startsWith('Rebuilt')", 240)
+    c.settle(2)
+    note = js(c, "document.getElementById('render-notice').hidden ? '' : "
+                 "document.getElementById('render-notice-title').textContent")
+    r.check('Apply builds it as typed: no Fine voxel notice', not note.startswith('Fine voxel')
+            and js(c, 'window.sbfsem.renderer.meshes.size') == meshes, note)
+
+    # Closed curve past the server's memory, with Join bodies on: an estimate held to it.
+    js(c, r"""(() => {
+      const api = window.sbfsem.api;
+      const real = api.renderEstimate;
+      api.renderEstimate = async (source, id, opts, extra) => {
+        if (opts.method !== 'closedcurve' || opts.pixel_size_um !== 0.006) return real(source, id, opts, extra);
+        return { applies: true, method: 'closedcurve', pixel_size_um: 0.006, voxels: 1e7, faces: 8e6,
+          triangles: 1.5e7, peak_mb: 9000, serve_mb: 4500, server_mb: 13500, json_mb: 540, tab_mb: 900,
+          seconds: 240, over: ['memory', 'page'], finest_um: 0.011, binding: 'memory',
+          alternatives: [{ off: 'joins', set: { curve_tie_um: 0 }, finest_um: 0.009, fits: false }],
+          limits: { voxels: 3e8, faces: 1e7, memory_mb: 9000, json_mb: 500 },
+          basis: { kind: 'built', pixel_um: 0.1 }, approximate: false };
+      };
+    })()""")
+    set_control(c, 'render-method', 'closedcurve')
+    type_into(c, BOX, '0.006')
+    press_key(c, BOX, 'Enter')
+    shown = c.wait_for(f'!{CONFLICT}.hidden', 60)
+    got = js(c, f"({{ marked: {MARKED}, fixes: [...{CONFLICT}.querySelectorAll('.render-conflict-use')].map((b) => b.textContent) }})")
+    r.check('Closed curve too fine: Voxel and Join bodies are marked, the finest size first',
+            shown and got['marked'] == ['curve_tie_um', 'pixel_size_um']
+            and got['fixes'] == ['Voxel 0.011 µm', 'Join bodies off, Voxel 0.009 µm'], got)
+    buttons = js(c, f"[...{CONFLICT}.querySelectorAll('.render-conflict-use')].length")
+    del buttons
+    x, y, *_ = c.center('#render-conflict li:nth-child(2) .render-conflict-use')
+    c.click(x, y)
+    c.wait_for(f'{CONFLICT}.hidden', 60)
+    now = js(c, f"[{BOX}.value, document.getElementById('curve-tie').value, {MARKED}]")
+    r.check('the other way is two settings at once', now == ['0.009', '0', []], now)
+    set_control(c, 'render-method', 'cylinder')
+    set_control(c, 'pathway', 'original')
+    r.check('a method that reads neither marks nothing', c.wait_for(f'{CONFLICT}.hidden', 10)
+            and js(c, MARKED) == [], js(c, MARKED))
 # -- compare -----------------------------------------------------------------------------
 
 COMPARE = 'window.sbfsem.compare'
@@ -2267,6 +2357,7 @@ SECTIONS = {
     'voxel': voxel,
     'race': race,
     'fine': fine,
+    'conflicts': conflicts,
     'compare': compare, 'comparekeys': comparekeys, 'comparestate': comparestate,
     'comparetoolbar': comparetoolbar,
     'helpmovie': helpmovie,

@@ -79,9 +79,12 @@ __all__ = [
     "RAW_FACES_KEYED_ABOVE",
     "TYPED_MIN_VOXEL_UM",
     "VOXELS_PER_THIN_RADIUS",
+    "VoxelPlan",
     "WORK_PER_RAW_FACE",
     "auto_voxel_um",
+    "field_bodies",
     "hull_pairs",
+    "plan_voxel",
     "raw_budget",
     "split_components",
     "unified_mesh",
@@ -1392,6 +1395,135 @@ def _bodies_from_items(items, *, lens_h: float, mode: str = "min",
     return bodies, thin
 
 
+@dataclass(frozen=True)
+class VoxelPlan:
+    """The fine voxel a build contours at, decided before anything is contoured.
+
+    ``voxel_um`` is the voxel used; ``typed_um`` what was typed (or the
+    annotations' own, for an automatic Fine voxel); ``asked_um`` that held to
+    the floor and the ceiling; ``reason`` why ``voxel_um`` is coarser than
+    ``typed_um`` (``"floor"``, ``"faces"`` for the raw-triangle budget,
+    ``"work"`` for the evaluation budget; empty when it is not).  ``raw_budget``
+    is the raw-triangle budget after an outline half widened it, ``work`` the
+    field evaluations at ``voxel_um`` and ``work_budget`` what the build may
+    spend (0 for both from :func:`_size_voxel` alone)."""
+
+    voxel_um: float
+    typed_um: float
+    asked_um: float
+    floor_um: float
+    coarsened: bool
+    reason: str
+    area_um2: float
+    raw_budget: int
+    work: int = 0
+    work_budget: int = 0
+
+    @property
+    def raw_faces(self) -> int:
+        """The raw triangles marching cubes is expected to draw at ``voxel_um``."""
+        return int(FACES_PER_SURFACE_VOXEL * self.area_um2 / self.voxel_um ** 2)
+
+
+def _size_voxel(bodies: list[_Body], thin: list[float], *, voxel_um: float, max_raw_faces: int,
+                max_auto_um: float | None, curve_raw_faces: int) -> VoxelPlan:
+    """The voxel the annotations and the raw-triangle budget ask for (no work budget yet)."""
+    area = float(sum(b.area_um2 for b in bodies))
+    curve_area = float(sum(b.area_um2 for b in bodies
+                           if any(isinstance(leaf, _CurveLeaf) for leaf in b.leaves)))
+    if curve_area > 0:
+        rest = max(area - curve_area, 1e-9)
+        widen = max(int(curve_raw_faces), int(max_raw_faces * curve_area / rest))
+        max_raw_faces = int(min(max_raw_faces + widen, MAX_RAW_FACES))
+    # What the geometry asks for, before any budget: the user's voxel, or the
+    # one the thin annotations want.
+    if voxel_um and voxel_um > 0:
+        typed = float(voxel_um)
+        floor = TYPED_MIN_VOXEL_UM
+        asked = float(np.clip(typed, floor, MAX_VOXEL_UM))
+    else:
+        asked = typed = auto_voxel_um(thin, 0.0)
+        if max_auto_um and max_auto_um > 0:
+            # A raster in the field (Hybrid's outlines) is not to be contoured
+            # coarser than it was drawn.
+            asked = typed = float(max(min(asked, max_auto_um), MIN_VOXEL_UM))
+        floor = MIN_VOXEL_UM
+    # The raw-face budget applies to both.
+    v_faces = float(np.sqrt(FACES_PER_SURFACE_VOXEL * max(area, 0.0) / max_raw_faces))
+    voxel = float(np.clip(max(asked, v_faces), floor, MAX_VOXEL_UM))
+    # Coarser than what was typed counts, the floor's raise of a value under
+    # it included: a 0.01 asked for came out as 0.04 and said nothing.
+    coarsened = voxel > typed + 1e-9
+    # Why, for the page to say (2026-10-16): the raw-face budget, else the floor.
+    # The work budget overrides both when it steps in (_fit_work).
+    reason = ("faces" if v_faces > asked + 1e-9 else "floor") if coarsened else ""
+    return VoxelPlan(voxel, typed, asked, floor, coarsened, reason, area, int(max_raw_faces))
+
+
+def _grid_maker(bodies: list[_Body], lo_all: np.ndarray, *, blend_um: float, block: int,
+                mode: str) -> Callable[[float], _BlockGrid]:
+    """A function making the whole-cell grid at a voxel, every body added (nothing evaluated)."""
+    def build(v: float) -> _BlockGrid:
+        pad = PAD_VOXELS * v + max(blend_um, 0.0)
+        origin = np.floor((lo_all - pad) / v) * v - 2.0 * v
+        grid = _BlockGrid(v, origin, block=block, blend_um=blend_um, mode=mode)
+        for body in bodies:
+            grid.add(body)
+        return grid
+    return build
+
+
+def _fit_work(build: Callable[[float], _BlockGrid], grid: _BlockGrid, voxel: float,
+              limit: int) -> tuple[_BlockGrid, float, bool]:
+    """Coarsen ``voxel`` until the grid's field evaluations fit ``limit``: the grid,
+    the voxel, and whether the work budget coarsened it."""
+    worked = False
+    for _ in range(4):
+        if grid.work <= limit:
+            break
+        # Work scales roughly with 1/voxel^3 for the padded boxes of thin
+        # geometry; step and re-measure rather than trust the exponent.
+        voxel = float(min(voxel * (grid.work / limit) ** (1.0 / 3.0) * 1.05, MAX_VOXEL_UM))
+        worked = True
+        grid = build(voxel)
+        if voxel >= MAX_VOXEL_UM:
+            break
+    return grid, voxel, worked
+
+
+def field_bodies(items, *, mode: str = "min", lens_h: float = 0.1,
+                 support: float = SUPPORT_FACTOR,
+                 hull_tilt_deg: float = 0.0) -> tuple[list[_Body], list[float]]:
+    """The bodies and thin radii :func:`unified_mesh` would make of ``items``,
+    for :func:`plan_voxel` to size more than one Fine voxel and Face cap from."""
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}; got {mode!r}")
+    return _bodies_from_items(items, lens_h=lens_h, mode=mode, support=support,
+                              hull_tilt_deg=float(hull_tilt_deg))
+
+
+def plan_voxel(bodies: list[_Body], thin: list[float], *, voxel_um: float = 0.0,
+               max_raw_faces: int = MAX_RAW_FACES, max_work: int | None = None,
+               blend_um: float = 0.0, block: int = BLOCK, mode: str = "min",
+               max_auto_um: float | None = None, curve_raw_faces: int = 0) -> VoxelPlan | None:
+    """The voxel :func:`unified_mesh` would contour ``bodies`` at, and why, without
+    contouring: the same sizing, then the grid made (blocks counted, no field
+    evaluated) and coarsened until its work fits, as a build does.  ``None``
+    when there is nothing to contour.  What the render estimate says about a
+    Fine voxel and a Face cap before a build (``service.estimate``)."""
+    if not bodies:
+        return None
+    size = _size_voxel(bodies, thin, voxel_um=voxel_um, max_raw_faces=max_raw_faces,
+                       max_auto_um=max_auto_um, curve_raw_faces=curve_raw_faces)
+    lo_all = np.min([leaf.bounds()[0] for b in bodies for leaf in b.leaves], axis=0)
+    build = _grid_maker(bodies, lo_all, blend_um=blend_um, block=block, mode=mode)
+    limit = work_budget(size.raw_budget) if max_work is None else int(max_work)
+    grid, voxel, worked = _fit_work(build, build(size.voxel_um), size.voxel_um, limit)
+    return dataclasses.replace(
+        size, voxel_um=voxel, coarsened=size.coarsened or worked,
+        reason="work" if worked else size.reason, work=int(grid.work), work_budget=int(limit))
+
+
 def unified_mesh(
     items,
     *,
@@ -1454,45 +1586,12 @@ def unified_mesh(
                                       hull_tilt_deg=float(hull_tilt_deg))
     if not bodies:
         return EMPTY_MESH
-    area = float(sum(b.area_um2 for b in bodies))
-    curve_area = float(sum(b.area_um2 for b in bodies
-                           if any(isinstance(leaf, _CurveLeaf) for leaf in b.leaves)))
-    if curve_area > 0:
-        rest = max(area - curve_area, 1e-9)
-        widen = max(int(curve_raw_faces), int(max_raw_faces * curve_area / rest))
-        max_raw_faces = int(min(max_raw_faces + widen, MAX_RAW_FACES))
-    # What the geometry asks for, before any budget: the user's voxel, or the
-    # one the thin annotations want.
-    if voxel_um and voxel_um > 0:
-        typed = float(voxel_um)
-        floor = TYPED_MIN_VOXEL_UM
-        asked = float(np.clip(typed, floor, MAX_VOXEL_UM))
-    else:
-        asked = typed = auto_voxel_um(thin, 0.0)
-        if max_auto_um and max_auto_um > 0:
-            # A raster in the field (Hybrid's outlines) is not to be contoured
-            # coarser than it was drawn.
-            asked = typed = float(max(min(asked, max_auto_um), MIN_VOXEL_UM))
-        floor = MIN_VOXEL_UM
-    # The raw-face budget applies to both.
-    v_faces = float(np.sqrt(FACES_PER_SURFACE_VOXEL * max(area, 0.0) / max_raw_faces))
-    voxel = float(np.clip(max(asked, v_faces), floor, MAX_VOXEL_UM))
-    # Coarser than what was typed counts, the floor's raise of a value under
-    # it included: a 0.01 asked for came out as 0.04 and said nothing.
-    coarsened = voxel > typed + 1e-9
-    # Why, for the page to say (2026-10-16): the raw-face budget, else the floor.
-    # The work budget below overrides both when it steps in.
-    reason = ("faces" if v_faces > asked + 1e-9 else "floor") if coarsened else ""
-
+    size = _size_voxel(bodies, thin, voxel_um=voxel_um, max_raw_faces=max_raw_faces,
+                       max_auto_um=max_auto_um, curve_raw_faces=curve_raw_faces)
+    area, max_raw_faces, typed = size.area_um2, size.raw_budget, size.typed_um
+    voxel, coarsened, reason = size.voxel_um, size.coarsened, size.reason
     lo_all = np.min([leaf.bounds()[0] for b in bodies for leaf in b.leaves], axis=0)
-
-    def build(v: float) -> _BlockGrid:
-        pad = PAD_VOXELS * v + max(blend_um, 0.0)
-        origin = np.floor((lo_all - pad) / v) * v - 2.0 * v
-        grid = _BlockGrid(v, origin, block=block, blend_um=blend_um, mode=mode)
-        for body in bodies:
-            grid.add(body)
-        return grid
+    build = _grid_maker(bodies, lo_all, blend_um=blend_um, block=block, mode=mode)
 
     # The evaluation budget follows the raw budget above 3 million (work_budget).
     limit = work_budget(max_raw_faces) if max_work is None else int(max_work)
@@ -1529,17 +1628,10 @@ def unified_mesh(
             voxel = reuse.voxel
     if grid is None:
         grid = build(voxel)
-    for _ in range(4 if reuse is None else 0):
-        if grid.work <= limit:
-            break
-        # Work scales roughly with 1/voxel^3 for the padded boxes of thin
-        # geometry; step and re-measure rather than trust the exponent.
-        voxel = float(min(voxel * (grid.work / limit) ** (1.0 / 3.0) * 1.05, MAX_VOXEL_UM))
-        coarsened = True
-        reason = "work"
-        grid = build(voxel)
-        if voxel >= MAX_VOXEL_UM:
-            break
+    if reuse is None:
+        grid, voxel, worked = _fit_work(build, grid, voxel, limit)
+        if worked:
+            coarsened, reason = True, "work"
     if coarsened:
         log.warning("voxel2: contouring at %.3f um (%s voxel evaluations, ~%.0f um2 of "
                     "surface) -- coarser than asked",

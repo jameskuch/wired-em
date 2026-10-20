@@ -1011,6 +1011,81 @@ PATHWAYS: dict[str, tuple[str, bool, str]] = {
 FIELD_PATHWAYS = ("voxel2", "convolution", "ultraliser")
 
 
+def _remesh_items(rows, use_remesh: str, *, voxel_detail: float, voxel_smooth_um: float,
+                  voxel_min_radius_um: float, target_arc_um: float, wrap_spacing_um: float,
+                  wrap_blend: float, wrap_reject_sigma: float, wrap_passes: int,
+                  ultra_soma: str) -> list:
+    """The pieces a remeshing pathway builds a cell from (the segmentation's
+    ``rows``): what :func:`cylinder_render` meshes or, for a field pathway,
+    contours as one field, and what :func:`field_pieces` hands an estimate."""
+    polylines = [
+        (np.asarray(row.XYZum, dtype=float).reshape(-1, 3),
+         np.asarray(row.Rum, dtype=float).ravel())
+        for row in rows
+    ]
+    if use_remesh == "convolution":
+        # The paper convolves along the whole skeleton: every annotation
+        # pair is a segment, same-section jumps are links, strands are
+        # points.  No cluster fields -- the soma is the skeleton too.
+        items = _skeleton_items(polylines, voxel_min_radius_um)
+    else:
+        items = _assemble_pieces(
+            polylines, remesh="voxel2" if use_remesh == "ultraliser" else use_remesh,
+            voxel_detail=voxel_detail,
+            voxel_smooth_um=voxel_smooth_um, voxel_min_radius_um=voxel_min_radius_um,
+            target_arc_um=target_arc_um, wrap_spacing_um=wrap_spacing_um,
+            wrap_blend=wrap_blend, wrap_reject_sigma=wrap_reject_sigma,
+            wrap_passes=wrap_passes,
+        )
+    if use_remesh == "ultraliser" and ultra_soma == "sphere":
+        # Ultraliser's soma starts as an icosphere of the soma's mean
+        # radius (then pulled toward the neurites); offered here so the
+        # skeleton-tool reading of our soma sections can be seen.
+        from .remesh import flatten_cell
+
+        spheres: list[tuple] = []
+        flat = flatten_cell(polylines, min_radius_um=voxel_min_radius_um)
+        if flat is not None:
+            P_all, R_all, _fin, _fat, _ia, _ib, _st, _ln, clusters = flat
+            for members in clusters.values():
+                marr = np.array(members, dtype=int)
+                spheres.append(("sphere", P_all[marr].mean(axis=0),
+                                float(R_all[marr].mean())))
+        items = spheres + [it for it in items
+                           if not (it[0] == "field" and len(it) > 2 and it[2] == "cluster")]
+    return items
+
+
+def field_pieces(
+    neuron,
+    *,
+    pathway: str,
+    segmentation=None,
+    voxel_detail: float = 1.0,
+    voxel_smooth_um: float = 0.5,
+    voxel_min_radius_um: float = REMESH_MIN_RADIUS_UM,
+    target_arc_um: float = TARGET_RING_ARC_UM,
+    wrap_spacing_um: float = WRAP_SPACING_UM,
+    wrap_blend: float = WRAP_BLEND,
+    wrap_reject_sigma: float = WRAP_REJECT_SIGMA,
+    wrap_passes: int = WRAP_PASSES,
+    ultra_soma: str = "discs",
+) -> list:
+    """The pieces a field pathway (``voxel2``, ``convolution``, ``ultraliser``)
+    contours ``neuron`` from, as :func:`cylinder_render` makes them, for sizing
+    its grid before a build (:func:`~sbfsem.geometry.unify.plan_voxel`)."""
+    from .segmentation import dendrite_segmentation
+
+    if pathway not in FIELD_PATHWAYS:
+        raise ValueError(f"pathway must be one of {FIELD_PATHWAYS}; got {pathway!r}")
+    result = segmentation if segmentation is not None else dendrite_segmentation(neuron)
+    return _remesh_items(
+        list(result.table.itertuples()), pathway, voxel_detail=voxel_detail,
+        voxel_smooth_um=voxel_smooth_um, voxel_min_radius_um=voxel_min_radius_um,
+        target_arc_um=target_arc_um, wrap_spacing_um=wrap_spacing_um, wrap_blend=wrap_blend,
+        wrap_reject_sigma=wrap_reject_sigma, wrap_passes=wrap_passes, ultra_soma=ultra_soma)
+
+
 def cylinder_render(
     neuron,
     *,
@@ -1133,41 +1208,11 @@ def cylinder_render(
     meshes = []
     if use_remesh in ("voxel", "wrap", *FIELD_PATHWAYS):
         report("assembling pieces")
-        polylines = [
-            (np.asarray(row.XYZum, dtype=float).reshape(-1, 3),
-             np.asarray(row.Rum, dtype=float).ravel())
-            for row in rows
-        ]
-        if use_remesh == "convolution":
-            # The paper convolves along the whole skeleton: every annotation
-            # pair is a segment, same-section jumps are links, strands are
-            # points.  No cluster fields -- the soma is the skeleton too.
-            items = _skeleton_items(polylines, voxel_min_radius_um)
-        else:
-            items = _assemble_pieces(
-                polylines, remesh="voxel2" if use_remesh == "ultraliser" else use_remesh,
-                voxel_detail=voxel_detail,
-                voxel_smooth_um=voxel_smooth_um, voxel_min_radius_um=voxel_min_radius_um,
-                target_arc_um=target_arc_um, wrap_spacing_um=wrap_spacing_um,
-                wrap_blend=wrap_blend, wrap_reject_sigma=wrap_reject_sigma,
-                wrap_passes=wrap_passes,
-            )
-        if use_remesh == "ultraliser" and ultra_soma == "sphere":
-            # Ultraliser's soma starts as an icosphere of the soma's mean
-            # radius (then pulled toward the neurites); offered here so the
-            # skeleton-tool reading of our soma sections can be seen.
-            from .remesh import flatten_cell
-
-            spheres: list[tuple] = []
-            flat = flatten_cell(polylines, min_radius_um=voxel_min_radius_um)
-            if flat is not None:
-                P_all, R_all, _fin, _fat, _ia, _ib, _st, _ln, clusters = flat
-                for members in clusters.values():
-                    marr = np.array(members, dtype=int)
-                    spheres.append(("sphere", P_all[marr].mean(axis=0),
-                                    float(R_all[marr].mean())))
-            items = spheres + [it for it in items
-                               if not (it[0] == "field" and len(it) > 2 and it[2] == "cluster")]
+        items = _remesh_items(
+            rows, use_remesh, voxel_detail=voxel_detail, voxel_smooth_um=voxel_smooth_um,
+            voxel_min_radius_um=voxel_min_radius_um, target_arc_um=target_arc_um,
+            wrap_spacing_um=wrap_spacing_um, wrap_blend=wrap_blend,
+            wrap_reject_sigma=wrap_reject_sigma, wrap_passes=wrap_passes, ultra_soma=ultra_soma)
         if use_remesh in FIELD_PATHWAYS:
             # Everything -- the cluster fields, the thin stretches as exact
             # round cones, links and coins -- is one field, contoured once

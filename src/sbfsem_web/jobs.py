@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sbfsem import progress
+from sbfsem.service.facade import BuildInterrupted
 
 log = logging.getLogger(__name__)
 
@@ -228,6 +229,18 @@ class MeshJobStore:
             try:
                 with progress.reporting(listen):
                     result = fn()
+            except BuildInterrupted:
+                # The service is stopping (a deploy or a restart) and took the build
+                # with it.  Left running, not failed: the page polls on through the
+                # restart, is told the job is gone by the new process, and asks for
+                # it again once (api.js pollJob), instead of reporting a failure that
+                # was nobody's settings.
+                log.info("%s job %s (%s) stopped with the service during %r", job.kind,
+                         job.id, job.label or "-", job.stage)
+                with self._lock:
+                    job.stage, job.done, job.total = "the server is restarting", None, None
+                    _wake(job)
+                return
             except Exception as exc:  # surfaced to the poller, never lost
                 log.warning("%s job %s (%s) failed during %r after %.0f s: %s", job.kind, job.id,
                             job.label or "-", job.stage,

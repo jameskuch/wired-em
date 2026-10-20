@@ -900,6 +900,34 @@ body.fullscreen .update-banner { padding-left: 100px; }
    silently doing nothing. */
 .field.inert { opacity: .4; }
 .field.inert input, .field.inert output, .field.inert select { pointer-events: none; }
+/* A setting that will not build as set (conflictpanel.js): black, its text red, in
+   either theme, so it cannot be read past (the user's request of 2026-10-20). */
+.field.conflict {
+  background: rgb(0, 0, 0); color: rgb(255, 0, 0);
+  border-radius: 4px; padding: 1px 4px; opacity: 1;
+}
+.field.conflict input, .field.conflict select {
+  background: rgb(0, 0, 0); color: rgb(255, 0, 0); border-color: rgb(255, 0, 0);
+}
+.field.conflict .numchoice-unit { color: rgb(255, 0, 0); }
+.render-conflict {
+  flex: 0 0 100%; box-sizing: border-box;
+  background: rgb(0, 0, 0); color: rgb(255, 0, 0);
+  border: 1px solid rgb(255, 0, 0); border-radius: 6px;
+  padding: 6px 10px; font-size: 12.5px; line-height: 1.45;
+}
+.render-conflict[hidden] { display: none; }
+.render-conflict-why { color: rgb(255, 150, 150); }
+.render-conflict-fixes { margin: 4px 0 0; padding-left: 20px; }
+.render-conflict-fixes li { margin: 2px 0; }
+.render-conflict-use {
+  background: rgb(0, 0, 0); color: rgb(255, 255, 255);
+  border: 1px solid rgb(255, 0, 0); border-radius: 4px; padding: 1px 8px; font-size: 12px;
+}
+.render-conflict-use.best { border-width: 2px; font-weight: 600; }
+.render-conflict-use:hover, .render-conflict-use:focus-visible { background: rgb(60, 0, 0); }
+.render-conflict-detail { color: rgb(255, 150, 150); }
+.render-conflict-note { margin-top: 3px; color: rgb(200, 200, 200); }
 
 /* -- deferred help panel --------------------------------------------------- */
 /* Fixed rather than absolute: the toolbar scrolls sideways, and a panel
