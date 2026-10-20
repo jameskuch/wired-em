@@ -45,7 +45,7 @@ transforms switch where a volume has none):
   surface, not before it (2026-10-20); its polls ask the server to wait (``?wait=1``, which the page
   sends only over HTTP/2, so here it is turned on by hand) and are no more than one a second.
 * ``slicecolors`` -- One slice at a time (2026-10-20): the plane is the size of its section's
-  annotations, not the cell; the window's arrows on the plane's section are drawn in the selection's
+  annotations and their arrows, not the cell; the window's arrows on the plane's section are drawn in the selection's
   yellow at full strength, those above in red and below in blue at Off the plane (0.06); a selected
   annotation of the cell pales the section's yellow and keeps the selection fade off; a step recolors.
 * ``moveset`` -- moving a set by hand (2026-10-20): Its section moves every annotation of the
@@ -732,18 +732,23 @@ def s_focus(c: Chrome, r: Report, ctx):
     r.check('and the other arrows at Others when selected (0.06, almost nothing) of their opacity',
             on and on['dim'] == 0.06 and abs(on['opacity'] - 0.054) < 1e-6, on)
     # On the screen: the focused arrow lights pixels of the selection's color that are not there without it.
-    lit = js(c, """(() => { const R = window.sbfsem.renderer; R.meshes.get(%s).visible = false;
+    # Close in on it, then let the page draw: the selection's tube is a few pixels wide at the zoom it
+    # was drawn for, and the frame loop draws it again for the new one.  Counted in the frame before
+    # that, it is the cell view's tube seen from 25 um, several times as wide, and the arrow lies inside it.
+    js(c, """(() => { const R = window.sbfsem.renderer; R.meshes.get(%s).visible = false;
+      const p = window.__focusCands.low.point; const w = R.toWorld(p, R._sourceOf(%s));
+      R.camera.position.set(w[0], w[1], w[2] + 25); R.camera.up.set(0, 1, 0); R.controls.target.set(w[0], w[1], w[2]);
+      R.camera.near = 0.05; R.camera.far = 500; R.camera.updateProjectionMatrix(); R.controls.update(); })()""" % (q, q))
+    c.settle(1)
+    lit = js(c, """(() => { const R = window.sbfsem.renderer;
       const t = R._tint('primary', %s).clone().convertLinearToSRGB(); const want = [t.r * 255, t.g * 255, t.b * 255];
       const count = () => { const px = window.__pixels(); let n = 0;
         for (let i = 0; i < px.data.length; i += 4) {
           if (Math.abs(px.data[i] - want[0]) + Math.abs(px.data[i + 1] - want[1]) + Math.abs(px.data[i + 2] - want[2]) < 60) n += 1; }
         return n; };
-      const p = window.__focusCands.low.point; const w = R.toWorld(p, R._sourceOf(%s));
-      R.camera.position.set(w[0], w[1], w[2] + 25); R.camera.up.set(0, 1, 0); R.controls.target.set(w[0], w[1], w[2]);
-      R.camera.near = 0.05; R.camera.far = 500; R.camera.updateProjectionMatrix(); R.controls.update();
       const withIt = count(); const marks = R.shifts.get(%s).children.filter((c) => c.userData.role === 'focus');
       marks.forEach((m) => { m.visible = false; }); const without = count(); marks.forEach((m) => { m.visible = true; });
-      R.meshes.get(%s).visible = true; return [withIt, without]; })()""" % (q, q, q, q, q))
+      R.meshes.get(%s).visible = true; return [withIt, without]; })()""" % (q, q, q))
     r.check('on the screen the arrow lights pixels of that color that are not lit without it',
             bool(lit) and lit[0] > lit[1] + 30, lit)
     if plan.get('up'):
@@ -795,9 +800,13 @@ def s_moves(c: Chrome, r: Report, ctx):
       const n = nodes.find((x) => x.radius_um > 0.5 && x.type_code === 1 && !x.manual_shift_um);
       R.select({ kind: 'annotation', key: rec.key, locationId: n.id, point: n.xyz_um, section: n.z_section, zUm: n.xyz_um[2] });
       R.webgl.domElement.focus(); return { id: n.id, xyz: n.xyz_um, section: n.z_section, tag: rec.summary.copy_tag }; })()""" % q, wait=True)
-    r.check('a disc of c1178 is selected on the plain copy', bool(picked) and picked['tag'] == 'curvefit.1', picked)
+    # The plain copy is the volume's default setting's (Field + fit, `all.1`, for the Neitz volumes
+    # since 2.17.0): its moves are kept under it, and a moved copy is named after it.
+    r.check('a disc of c1178 is selected on the plain copy',
+            bool(picked) and bool(picked['tag']) and '.m' not in picked['tag'], picked)
     if not picked:
         return
+    base = picked['tag']
     c.key('g')
     c.settle(2)
     panel = js(c, """(() => { const p = document.getElementById('move-panel'); if (!p || p.hidden) return null;
@@ -815,7 +824,7 @@ def s_moves(c: Chrome, r: Report, ctx):
     kept = js(c, """(() => { const rec = window.sbfsem.state.neurons.get(%s); const R = window.sbfsem.renderer;
       return { store: rec.manualMoves, nudge: R._nudges.get('primary') || null,
                moved: document.querySelector('#move-panel .mv-moved').textContent }; })()""" % q)
-    move = ((kept or {}).get('store') or {}).get('curvefit.1', {}).get(str(picked['id']))
+    move = ((kept or {}).get('store') or {}).get(base, {}).get(str(picked['id']))
     r.check('four steps of 0.05 um along X and one section in Z are kept on the cell, under its setting',
             bool(move) and abs(move['dx'] - 0.2) < 1e-9 and move['dy'] == 0 and move['dz'] == 1, kept)
     r.check('the ring is drawn ahead of the render by the move, and the panel says it is not applied yet',
@@ -830,8 +839,9 @@ def s_moves(c: Chrome, r: Report, ctx):
       (await import('/static/js/api.js')).POLL_TIMING.wait = 1;
       performance.setResourceTimingBufferSize(2000); performance.clearResourceTimings(); })()""", wait=True)
     c.key('Enter')
-    applied = c.wait_for("(window.sbfsem.state.neurons.get(%s).summary.copy_tag || '').startsWith('curvefit.1.m')"
-                         " && !window.sbfsem.moves.applying && window.sbfsem.renderer.meshes.has(%s)" % (q, q), 90)
+    applied = c.wait_for("(window.sbfsem.state.neurons.get(%s).summary.copy_tag || '').startsWith(%s)"
+                         " && !window.sbfsem.moves.applying && window.sbfsem.renderer.meshes.has(%s)"
+                         % (q, json.dumps(base + '.m'), q), 90)
     c.settle(3)
     order = js(c, """(async () => { const key = %s; const tag = window.sbfsem.state.neurons.get(key).summary.copy_tag;
       const res = performance.getEntriesByType('resource').map((e) => [e.name, e.startTime, e.responseEnd]);
@@ -846,7 +856,10 @@ def s_moves(c: Chrome, r: Report, ctx):
                setMesh: at('setMesh'), setDiscs: at('setDiscs') }; })()""" % q, wait=True)
     r.check("the moved copy's annotations and outlines are asked for once each, while its surface builds",
             bool(order) and len(order['nodes']) == 1 and len(order['curves']) == 1 and order['job'] is not None
-            and max(order['nodes'][0], order['curves'][0]) < order['lastPoll'], order)
+            and order['lastPoll'] is not None
+            # No later than the last poll: a surface the server holds is answered by the first
+            # poll, sent in the same tick, and the two can share a 0.1 ms timestamp.
+            and max(order['nodes'][0], order['curves'][0]) <= order['lastPoll'], order)
     r.check('the rings are drawn with the surface, not before it',
             bool(order) and order['setMesh'] is not None and order['setDiscs'] is not None
             and 0 <= order['setDiscs'] - order['setMesh'] < 500, order)
@@ -882,7 +895,7 @@ def s_moves(c: Chrome, r: Report, ctx):
         js(c, "document.getElementById('restore-yes').click()")
     js(c, HELPERS)
     back = c.wait_for("!!window.sbfsem && (window.sbfsem.state.neurons.get(%s)?.summary?.copy_tag || '')"
-                      ".startsWith('curvefit.1.m')" % q, 90)
+                      ".startsWith(%s)" % (q, json.dumps(base + '.m')), 90)
     r.check('a reload of the page restores the cell with its move applied', back,
             js(c, "window.sbfsem && window.sbfsem.state.neurons.get(%s)?.summary?.copy_tag" % q))
     c.wait_for('window.sbfsem.renderer.meshes.has(%s)' % q, 90)
@@ -891,7 +904,7 @@ def s_moves(c: Chrome, r: Report, ctx):
       return { tag: now.summary.copy_tag, mm: now.summary.manual_moves, store: now.manualMoves,
                arrows: window.sbfsem.renderer.moveArrows.has(now.key) }; })()""" % (q, q), wait=True)
     r.check('Reset all puts the cell back on its plain copy, with no move and no arrow',
-            bool(reset) and reset['tag'] == 'curvefit.1' and reset['mm'] is None and not reset['store']
+            bool(reset) and reset['tag'] == base and reset['mm'] is None and not reset['store']
             and not reset['arrows'], reset)
 
 
@@ -910,9 +923,19 @@ SLICE_STATE = r"""(() => {
   const box = l.field.bbox;
   const center = window.sbfsem.shifts.centerOf(window.sbfsem.state.neurons.get(key));
   const ext = l.extents.get(center);
+  // What the section holds: its annotations and its arrows, head to exaggerated tail.
+  let frame = ext ? [...ext] : null;
+  const { sel, field, scales } = l;
+  for (let i = 0; i < sel.n; i += 1) {
+    if (sel.section[i] !== center) continue;
+    const r = sel.rows[i];
+    for (const [x, y] of [[field.hx[r], field.hy[r]], [field.hx[r] - scales[i] * field.dx[r], field.hy[r] - scales[i] * field.dy[r]]]) {
+      frame = frame ? [Math.min(frame[0], x), Math.min(frame[1], y), Math.max(frame[2], x), Math.max(frame[3], y)] : [x, y, x, y];
+    }
+  }
   return { center, groups, colors: { above: r3(sc.above), on: r3(sc.on), below: r3(sc.below) },
            plane: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
-           cell: [box.max[0] - box.min[0], box.max[1] - box.min[1]], ext: ext ? [...ext] : null,
+           cell: [box.max[0] - box.min[0], box.max[1] - box.min[1]], ext: ext ? [...ext] : null, frame,
            dim: g.userData.dim ?? 1, visible: g.userData.plane[0].visible };
 })()"""
 
@@ -927,15 +950,20 @@ def s_slicecolors(c: Chrome, r: Report, ctx):
     st = js(c, SLICE_STATE % q)
     w = st['plane'][2] - st['plane'][0]
     h = st['plane'][3] - st['plane'][1]
-    # A ganglion cell's dendrites spread through a section (c1178's section 1114: 69 x 137 um), so
-    # the plane is what that section holds: around its annotations, a fraction of the cell's box.
+    # A ganglion cell's dendrites spread through a section, so the plane is what that section holds:
+    # its annotations and the arrows drawn on it, tails included (planeRect), a fraction of the cell's
+    # box.  The tails count: under Field + fit a closed curve on c1178's section 1159 moves 10.9 um,
+    # and its arrow's tail reaches 17 um past the annotations' 21 um.
     ew = st['ext'][2] - st['ext'][0] if st['ext'] else 0
     eh = st['ext'][3] - st['ext'][1] if st['ext'] else 0
-    r.check('the plane is the size of its section\'s annotations, not the whole cell',
-            st['visible'] and bool(st['ext']) and st['plane'][0] <= st['ext'][0] and st['plane'][2] >= st['ext'][2]
-            and st['plane'][1] <= st['ext'][1] and st['plane'][3] >= st['ext'][3]
-            and w * h < 0.6 * st['cell'][0] * st['cell'][1] and w < ew * 1.5 + 4 and h < eh * 1.5 + 4,
-            [round(w, 1), round(h, 1), round(ew, 1), round(eh, 1), st['cell']])
+    fr = st['frame'] or [0, 0, 0, 0]
+    fw = fr[2] - fr[0]
+    fh = fr[3] - fr[1]
+    r.check('the plane is the size of its section\'s annotations and their arrows, not the whole cell',
+            st['visible'] and bool(st['ext']) and st['plane'][0] <= fr[0] and st['plane'][2] >= fr[2]
+            and st['plane'][1] <= fr[1] and st['plane'][3] >= fr[3]
+            and w * h < 0.6 * st['cell'][0] * st['cell'][1] and w < fw * 1.5 + 4 and h < fh * 1.5 + 4,
+            [round(w, 1), round(h, 1), round(ew, 1), round(eh, 1), round(fw, 1), round(fh, 1), st['cell']])
     on = '1.00|' + ','.join(str(v) for v in st['colors']['on'])
     above = '0.06|' + ','.join(str(v) for v in st['colors']['above'])
     below = '0.06|' + ','.join(str(v) for v in st['colors']['below'])
@@ -977,10 +1005,11 @@ def s_moveset(c: Chrome, r: Report, ctx):
       R.select(cand(y)); R.setMarker('above', cand(up)); R.setMarker('below', cand(down));
       window.__mv = { cand, far: cand(far) };
       return { sec, n: by.get(sec).length, n3: by.get(sec).length + by.get(sec + 1).length + by.get(sec - 1).length,
-               y: y.id, up: up.id, down: down.id, far: far.id }; })()""" % q, wait=True)
+               y: y.id, up: up.id, down: down.id, far: far.id, tag: rec.summary.copy_tag }; })()""" % q, wait=True)
     r.check('c1178 has a section with three or more annotations and annotations on the sections beside it', bool(plan), plan)
     if not plan:
         return
+    base = json.dumps(plan['tag'])
     js(c, "(async () => { const m = window.sbfsem.moves; await m.start(); m.setScope('section'); m.setAxis('x'); })()", wait=True)
     c.settle(1)
     # The panel moves the marker the arrow keys act on (the one moved last): count its section.
@@ -995,8 +1024,8 @@ def s_moveset(c: Chrome, r: Report, ctx):
             sec['members'] == sec['expected'] and sec['members'] >= 2 and sec['rings']
             and f"on section {sec['section']}" in sec['count'], sec)
     js(c, "(() => { const m = window.sbfsem.moves; m.nudge(1); m.nudge(1); })()")
-    moved = js(c, """(() => { const rec = window.sbfsem.state.neurons.get(%s); const set = rec.manualMoves['curvefit.1'] || {};
-      return Object.values(set).map((m) => m.dx); })()""" % q)
+    moved = js(c, """(() => { const rec = window.sbfsem.state.neurons.get(%s); const set = rec.manualMoves[%s] || {};
+      return Object.values(set).map((m) => m.dx); })()""" % (q, base))
     r.check('a step moves all of them by the same 0.1 um', len(moved) == sec['expected']
             and all(abs(x - 0.1) < 1e-9 for x in moved), moved)
     # The red and blue markers bound a run of sections.
@@ -1016,11 +1045,11 @@ def s_moveset(c: Chrome, r: Report, ctx):
     js(c, "window.sbfsem.moves.setAxis('y'); window.sbfsem.moves.nudge(-1)")
     js(c, 'window.sbfsem.renderer.webgl.domElement.focus(); true')
     c.key('Enter')
-    ok = c.wait_for("(window.sbfsem.state.neurons.get(%s).summary.copy_tag || '').startsWith('curvefit.1.m')"
-                    " && !window.sbfsem.moves.applying" % q, 120)
+    ok = c.wait_for("(window.sbfsem.state.neurons.get(%s).summary.copy_tag || '').startsWith(%s)"
+                    " && !window.sbfsem.moves.applying" % (q, json.dumps(plan['tag'] + '.m')), 120)
     c.settle(3)
     got = js(c, """(() => { const rec = window.sbfsem.state.neurons.get(%s); return { mm: rec.summary.manual_moves,
-      stored: Object.keys(rec.manualMoves['curvefit.1'] || {}).length }; })()""" % q)
+      stored: Object.keys(rec.manualMoves[%s] || {}).length }; })()""" % (q, base))
     r.check('Enter applies the whole set on the server', ok and got['mm'] and got['mm']['n_moved'] == plan['n3'] + 1
             and got['stored'] == plan['n3'] + 1, got)
     js(c, "window.sbfsem.moves.stop({ apply: false }); window.__openSection('Manual moves')")
@@ -1058,7 +1087,7 @@ def s_moveplane(c: Chrome, r: Report, ctx):
       const n = nodes.find((x) => x.id === id);
       R.select({ kind: 'annotation', key: rec.key, locationId: n.id, point: n.xyz_um, section: n.z_section, zUm: n.xyz_um[2] });
       R.webgl.domElement.focus();
-      return { id, xyz: n.xyz_um, section: n.z_section,
+      return { id, xyz: n.xyz_um, section: n.z_section, tag: rec.summary.copy_tag,
                point: seg.points_um[seg.location_ids.indexOf(id)] }; })()""" % q, wait=True)
     r.check('an annotation in the middle of a skeleton segment is selected', bool(picked), picked)
     if not picked:
@@ -1095,7 +1124,8 @@ def s_moveplane(c: Chrome, r: Report, ctx):
     c.key('6')
     c.key('ArrowRight')
     c.settle(1)
-    zp = js(c, "window.sbfsem.state.neurons.get(%s).manualMoves['curvefit.1'][%s]" % (q, json.dumps(str(picked['id']))))
+    zp = js(c, "window.sbfsem.state.neurons.get(%s).manualMoves[%s]?.[%s]"
+            % (q, json.dumps(picked['tag']), json.dumps(str(picked['id']))))
     r.check('from the side, Zp moves in the section plane (toward the viewer, -Y), never in Z',
             bool(zp) and zp['dz'] == 0 and abs(zp['dy'] + 0.05) < 1e-9 and abs(zp['dx'] - 0.2) < 1e-9, zp)
     # Apply: the old surface and skeleton stay on screen until the moved copy's replace them.
@@ -1104,8 +1134,9 @@ def s_moveplane(c: Chrome, r: Report, ctx):
         if (!R.meshes.has(key)) window.__gaps.mesh += 1; if (!R.skeletons.has(key)) window.__gaps.skeleton += 1; }, 15);
       })()""" % q)
     c.key('Enter')
-    applied = c.wait_for("(window.sbfsem.state.neurons.get(%s).summary.copy_tag || '').startsWith('curvefit.1.m')"
-                         " && !window.sbfsem.moves.applying && window.sbfsem.renderer.meshes.has(%s)" % (q, q), 120)
+    applied = c.wait_for("(window.sbfsem.state.neurons.get(%s).summary.copy_tag || '').startsWith(%s)"
+                         " && !window.sbfsem.moves.applying && window.sbfsem.renderer.meshes.has(%s)"
+                         % (q, json.dumps(picked['tag'] + '.m'), q), 120)
     c.settle(2)
     gaps = js(c, "(() => { clearInterval(window.__watch); return window.__gaps; })()")
     r.check('Apply never takes the surface or the skeleton off the screen while the moved copy builds',
