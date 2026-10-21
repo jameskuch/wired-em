@@ -596,6 +596,18 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(withMoves(body)),
     }, `loading c${body.id}…`).then((r) => r.json()).then(remember)),
+  /**
+   * Load another copy of a cell -- the cell under another registration setting
+   * (`live_registration`, `section_corrections`) -- without making it this tab's:
+   * Render compare builds a layer from it by naming its `copy_tag` (registrations.js).
+   * Not counted as a load of the tab's cell, and the person's own moves are not
+   * sent, so the copy is the setting's plain one.
+   */
+  loadCopy: (body) => request('/api/neurons', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }, `loading c${body.id} under another registration…`).then((r) => r.json()),
   importFile: (file) => {
     const form = new FormData();
     form.append('file', file);
@@ -617,13 +629,14 @@ export const api = {
       .finally(() => copies.delete(cellKey(source, id))),
 
   detail: (source, id) => getJSON(`/api/neurons/${source}/${id}`).then(remember),
-  nodes: (source, id, cellOnly = true) =>
-    getJSON(`/api/neurons/${source}/${id}/nodes${q({ cell_only: cellOnly })}`, 'annotations…'),
+  /** The cell's annotations; `copy` names another copy of it than the tab's (a Render compare layer's). */
+  nodes: (source, id, cellOnly = true, { copy } = {}) =>
+    getJSON(`/api/neurons/${source}/${id}/nodes${q({ cell_only: cellOnly, copy })}`, 'annotations…'),
   /** The links between annotations: `{ structure_id, a, b }` Location ID pairs. */
   edges: (source, id) => getJSON(`/api/neurons/${source}/${id}/edges`, 'annotation links…'),
   /** Splined closed-curve outlines (TypeCode 6), in microns, in the cell's frame. */
-  closedCurves: (source, id) =>
-    getJSON(`/api/neurons/${source}/${id}/closed-curves`, 'outlines…'),
+  closedCurves: (source, id, { copy } = {}) =>
+    getJSON(`/api/neurons/${source}/${id}/closed-curves${copyQuery(copy)}`, 'outlines…'),
   skeleton: (source, id) => getJSON(`/api/neurons/${source}/${id}/skeleton`, 'skeleton…'),
   /** The annotations as an averaged wireframe: rings, lines along, ties. */
   annotationWire: (source, id, params = {}) =>

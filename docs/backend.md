@@ -790,6 +790,20 @@ measurements by index: `mesh(i)`, `deviation(i)` (a `RenderingDeviation`: the
 (Location IDs and sections). The web service's source reads its own caches
 (`SbfsemService.compare_report`); a test builds meshes and passes them in.
 
+Renderings may be of different copies of the cell (registrations: the
+transforms on or off, a correction mode): `ReportRendering.copy` and
+`registration` name each one's, and `SbfsemService.compare_report(neuron,
+spec, copies)` takes the copy each was built from. Its source then builds and
+measures each on its own copy, holds a pair across two to each its own
+(`_cached_difference(..., neuron_b=)`), and also answers `annotations_of(i)`,
+`annotation_names_of(i)` (the section cuts and worst places of that copy) and
+`registration_facts()`, one entry per copy: what its transforms and correction
+moved of the cell's own annotations and the link steps at each stage
+(`sbfsem.analysis.shifts.shift_summary(neuron, "both")`), its coherent sections,
+and the curve fit's pulls at the default ratio (`correction_checks`). With two
+or more copies the plan holds a "Summary: the registrations" page after the
+renderings' (`Plan`; the page's `estimatePages` counts it too).
+
 ```python
 from sbfsem.export.compare_pdf import ReportRendering, ReportSpec, write_compare_report
 from sbfsem.geometry.raster import NAMED_VIEWS

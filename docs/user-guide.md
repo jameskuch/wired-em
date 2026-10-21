@@ -2842,6 +2842,43 @@ the arrow keys on any pane step the slice in all of them. Compare again after
 changing the cell's Registration in the main tab: the arrows follow the new
 copy of the cell.
 
+### Registrations: one cell under several
+
+Where Viking draws an annotation depends on its **registration**: at its stored
+position, or through the volume's current section transforms, and then moved,
+or not, by Viking's section correction (Residual field, Curve fit, or Field +
+fit; see *Registration* in the cell panel). Render compare can show the same
+rendering of the cell under several registrations side by side, to see what
+each does to the surface.
+
+- **A layer's Registration** is in its editor, under Color: **As loaded** (the
+  cell as the 3D render has it, your own moves included; the default) or any of
+  the eight registrations (four where the volume's transforms are not read
+  here). Any other than As loaded is that registration's own copy of the cell,
+  without moves, which the server loads the first time a layer asks for it and
+  keeps beside the page's own. Changing it marks the layer out of date; Compare
+  builds it. The chip says it first: `current+field+fit · Voxel remesh`, so the
+  panes stay told apart when the chips are cut short.
+- **Registrations…** in the toolbar sets several up at once. It copies the layer
+  being edited in the focused pane (its technique and every option) once per
+  registration you tick, in a grid of the corrections (none, Residual field,
+  Curve fit, Field + fit) by the positions (stored, current transforms), and
+  puts them **one pane each** (up to six; the pane count follows) or as the
+  **layers of that pane** (up to four, drawn over each other in the palette's
+  colors). It starts with six ticked: the stored positions, the current
+  transforms, the transforms with each correction, and the volume's default
+  correction on the stored positions. **Set up and compare** builds them at once.
+  The choice is remembered in this browser.
+- **Each layer is measured against its own registration**: its error map holds
+  it to its own copy's annotations, a pane's annotations overlay and Position
+  shift arrows are its first layer's copy, and a Difference between two panes
+  on different registrations holds each surface to its own. A copy whose
+  correction the service did not apply (the service down) is drawn without it,
+  and the status line and the layer's chip say so.
+
+On Inferior c1178 the six registrations of the Original built in 13 s together
+on a dev server, and loading a copy takes about as long as loading the cell.
+
 ### Progress, Stop, and what a failure looks like
 
 Builds, error maps and Differences in this tab are background jobs on the
@@ -3026,8 +3063,9 @@ with all of its settings); you choose:
   Difference pane shows it. The quick picks: **All**, **None**, **Same
   technique** (one technique under different settings: what each setting
   does), **Across techniques**, **Panes** (the first layer of every pane against
-  the others), **Within panes**, and **Differences on screen** (the pairs the
-  Difference panes show). Up to 15 pairs every pair starts ticked; beyond, the
+  the others), **Within panes**, **Across registrations** (one technique with the
+  same settings on two registrations: what each registration does to the
+  surface) and **Differences on screen** (the pairs the Difference panes show). Up to 15 pairs every pair starts ticked; beyond, the
   panes, the layers within each pane and the Differences on screen.
 - **Viewpoints**: **This view** (the panes' camera now; under Flip Z, mirrored
   as on screen), **XY1**, **XZ1** and **YZ1**, the viewer's named views. Every
@@ -3050,10 +3088,17 @@ already made costs nothing.
 What is in it, in order (the PDF's bookmarks follow it, and every page number
 in the contents, the tables and the matrices is a link):
 
-1. **The cover**: the cell, its volume and copy (registration setting), when,
-   the renderings, and the panes as they were on screen.
+1. **The cover**: the cell, its volume and copy (registration setting) or, for
+   renderings of several registrations, each of them; when; the renderings, and
+   the panes as they were on screen. Each rendering is held to its own
+   registration's annotations, and a pair across two registrations holds each
+   surface to its own.
 2. **The summary**: every rendering's size and shape (triangles, area, volume,
-   visual bodies) and its error against the annotations; four **matrices** of
+   visual bodies) and its error against the annotations; with two or more
+   registrations, a page comparing them (what each moved of the cell's own
+   annotations, how far each link steps sideways between its sections at its
+   positions, the sections that moved as one and the curve fit's pulls toward a
+   soma, with what those numbers can and cannot say); four **matrices** of
    the error between every pair (the symmetric mean distance, the Hausdorff
    distance, and, row against column, the mean signed distance and the 95th
    percentile); every pair **ranked**, most different first; charts of the

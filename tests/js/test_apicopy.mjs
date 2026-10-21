@@ -137,6 +137,32 @@ test('a build estimate asks for the tab\'s copy, quietly, and says why when it c
   await assert.rejects(() => api.renderEstimate('i', 943, {}), /c943 is not loaded/);
 });
 
+test('another registration\'s copy is loaded without becoming the tab\'s, and its annotations are asked of it', async () => {
+  const calls = server({ loadedCopy: 'all.1' });
+  await api.load({ id: 943, source: 'i' });
+  // Render compare loads a layer's copy (registrations.js copyLoadBody): the answer names it ...
+  globalThis.fetch = (wrap => async (url, options = {}) => {
+    const answer = await wrap(url, options);
+    if ((options.method || 'GET') === 'POST' && String(url) === '/api/neurons') {
+      return { ...answer, json: async () => ({ summary: { source: 'i', id: 943, copy_tag: 'off.0' } }) };
+    }
+    return answer;
+  })(globalThis.fetch);
+  const detail = await api.loadCopy({ id: 943, source: 'i', live_registration: false, section_corrections: 'off' });
+  assert.equal(detail.summary.copy_tag, 'off.0');
+  const [, second] = calls.filter((c) => c.method === 'POST' && c.route === '/api/neurons');
+  assert.equal('manual_moves' in second.body, false, 'the copy is the setting\'s plain one');
+  // ... and the tab's own requests still name the copy it loaded.
+  await api.deviationJob('i', 943, A);
+  assert.equal(starts(calls).at(-1).url, '/api/neurons/i/943/mesh-deviation-job?copy=all.1');
+  await api.nodes('i', 943, true, { copy: 'off.0' });
+  await api.closedCurves('i', 943, { copy: 'off.0' });
+  await api.nodes('i', 943);
+  const asked = calls.filter((c) => /\/(nodes|closed-curves)$/.test(c.route))
+    .map((c) => new URL(c.url, 'http://x').searchParams.getAll('copy'));
+  assert.deepEqual(asked, [['off.0'], ['off.0'], ['all.1']]);
+});
+
 let failed = 0;
 for (const [name, fn] of cases) {
   try {

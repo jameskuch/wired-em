@@ -112,8 +112,13 @@ export function pickOptions(options) {
 /** A stable text for a set of picked options: equal settings, equal key. */
 export const stableKey = (picked) => JSON.stringify(picked);
 
-/** What a downloaded mesh is filed under: the cell, which load of it, and the options. */
-export const meshKey = (record, picked) => `${record.key}#${record.loadGen}|${stableKey(picked)}`;
+/**
+ * What a downloaded mesh is filed under: the cell, which load of it, the copy it
+ * was built from (`copy`, a registration's tag; none for the cell as loaded) and
+ * the options.
+ */
+export const meshKey = (record, picked, copy = null) =>
+  `${record.key}#${record.loadGen}${copy ? `@${copy}` : ''}|${stableKey(picked)}`;
 
 // -- states --------------------------------------------------------------------
 

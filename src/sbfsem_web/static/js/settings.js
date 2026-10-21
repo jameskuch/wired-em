@@ -52,6 +52,11 @@ export const STORAGE_GROUPS = [
     help: 'Render compare’s report: the viewpoints, sign, paper and what to include, as last chosen',
     keys: ['sbfsem:compare-report'],
   },
+  {
+    id: 'registrations', label: 'Registrations choice',
+    help: 'Render compare’s Registrations…: the registrations ticked and where they go, as last set up',
+    keys: ['sbfsem:compare-registrations'],
+  },
   { id: 'dropdowns', label: 'Dropdown lists', help: 'Whether dropdowns open as the page’s own lists', keys: ['sbfsem:select-lists'] },
   {
     id: 'viking', label: 'Viking programs',

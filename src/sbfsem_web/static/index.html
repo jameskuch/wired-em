@@ -506,6 +506,8 @@ Opening the editor changes nothing on screen; each edit previews on the depth-co
           <label class="check" title="Orbiting one pane orbits all of them">
             <input type="checkbox" id="compare-sync" checked> Sync cameras
           </label>
+          <button id="compare-registrations" data-help-delay="2000"
+                  data-help="The same rendering of the cell under several registrations, side by side: Viking's current section transforms on or off, and Viking's section correction off or as Residual field, Curve fit or Field + fit. Copies the layer being edited (its technique and every option) once per registration you tick, into one pane each or as the layers of one pane; Compare builds them, each from its own copy of the cell, and measures each against its own annotations. A layer's own Registration is in its editor.">Registrations…</button>
           <button id="compare-report" data-help-delay="2000"
                   data-help="A color PDF of what the panes hold: each rendering you choose held to the annotations, and every pair you choose measured against each other both ways, whether or not a Difference pane shows it, with a summary table of the error between every pair, pictures from the viewpoints you choose, and an addendum that defines every number with its formula and a figure. Made on the server; the dialog says how long it will take.">Report…</button>
           <!-- Error paint on every solid surface layer of every pane, and back (compare.js);
@@ -746,6 +748,10 @@ Opening the editor changes nothing on screen; each edit previews on the depth-co
 
 <!-- Render compare's report: built by reportdialog.js from the panes it is opened over. -->
 <dialog id="compare-report-dialog" class="dlg dlg-report" aria-label="Comparison report">
+  <form method="dialog" class="dlg-body"></form>
+</dialog>
+
+<dialog id="compare-registrations-dialog" class="dlg dlg-registrations" aria-label="Registrations">
   <form method="dialog" class="dlg-body"></form>
 </dialog>
 

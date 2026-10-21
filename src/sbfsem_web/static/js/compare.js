@@ -67,6 +67,10 @@ import {
   newLayerStyle, nextColor, clampOpacity, wireColorFor, shortName, pickOptions, stableKey, meshKey,
   worstState, moveItem, normalizeZRange, normalizeHex, MeshCache, WorkQueues,
 } from './comparelayers.js';
+import {
+  normalizeRegistration, registrationTag, registrationOfTag, registrationLabel, registrationShort,
+  registrationChoices, copyLoadBody, correctionName, copyLabel,
+} from './registrations.js';
 
 /** The render options the measurement endpoints accept: the whole of a layer's
  * snapshot (`builtOptions`).  They come from the render schema, so a layer, the
@@ -263,7 +267,8 @@ export class CompareView {
     this.syncEnabled = true;
     this._syncing = false;
     this._outdated = false;  // the cell picker now names another cell or load
-    this._annotations = null; // { key, promise } the cell's annotations, fetched once
+    this._annotations = new Map(); // `${cell}#${load}@${copy}` -> the annotations, fetched once
+    this._copies = new Map();  // `${cell}#${load}|${tag}` -> { tag, summary }: a registration's copy, loaded once
     this.maximized = null;   // the pane that fills the grid, if one does
     this.viewCube = null;    // the view cube in the grid's top-right corner (setViewCube)
     this._pop = null;        // the popover open now: { pane, which, el, anchor }
@@ -277,9 +282,9 @@ export class CompareView {
       slices: new SliceState(),
       thresholds: new ThresholdMemory(),
       touched: false,        // the user changed a setting here: a new load does not reset it
-      sig: null,             // what the layer in `layer` was built from
-      promise: null,         // the build under way or done, for that signature
-      layer: null,
+      // One layer per copy of the cell (a pane draws the copy its first layer is built from):
+      // tag ('' for the tab's own) -> { sig, promise, layer, nodes }.
+      copies: new Map(),
       strip: null,
     };
     // Downloaded meshes, shared by every layer (a technique in three panes is one download).
@@ -329,6 +334,9 @@ export class CompareView {
       a: 0,                     // diff sources: pane numbers
       b: 1,
       scale: null,              // diff color scale, null = server suggestion
+      // Which copy of the cell the layer is built from (registrations.js): null is the cell
+      // as the page loaded it, else { live, corrections }, that registration's own copy.
+      registration: null,
     };
   }
 
@@ -504,6 +512,10 @@ export class CompareView {
       builtOptions: null,     // their measurement subset (MESH_OPTION_KEYS)
       builtKey: null,         // stableKey(builtOptions)
       builtGen: null,         // the cell load (record.loadGen) it was built for
+      builtRegistration: null, // the registration it was built under (null: the cell as loaded)
+      builtCopy: null,        // that copy's tag on the server (null: the tab's own copy)
+      builtSummary: null,     // that copy's load summary: what its transforms and correction did
+      missed: '',             // what of its registration that copy did not get, in words ('' for none)
       deviation: null,        // last deviation result, measured on `mesh`
       // A Difference layer: the result, which panes it measured, and the key
       // (their built keys) it was measured from.
@@ -534,7 +546,16 @@ export class CompareView {
 
   /** The layer's technique in full ("Original (MATLAB)"), or "Difference". */
   _layerTitle(layer) {
-    return layer.config.tech === 'diff' ? 'Difference' : techniqueName(layer.config.options);
+    if (layer.config.tech === 'diff') return 'Difference';
+    const reg = layer.config.registration;
+    return techniqueName(layer.config.options) + (reg ? `, ${this._regLabel(reg)}` : '');
+  }
+
+  /** A registration in words ("Current transforms + Field + fit"), for the compared cell's volume. */
+  _regLabel(reg, { short = false, compact = false } = {}) {
+    const hasTransforms = this._hasTransforms(this.record ?? this.cell());
+    return short || compact ? registrationShort(reg, { hasTransforms, compact })
+      : registrationLabel(reg, { hasTransforms });
   }
 
   /** Is this layer still part of the page (its pane not removed, itself not removed)? */
@@ -547,6 +568,7 @@ export class CompareView {
     const config = {
       ...from.config,
       options: { ...from.config.options },
+      registration: normalizeRegistration(from.config.registration),
       ...newLayerStyle(pane.layers.length, nextColor(pane.layers.map((l) => l.config.color))),
       error: false,
     };
@@ -556,6 +578,127 @@ export class CompareView {
     this._layersChanged(pane);
     this.onStatus(`${this._where(layer)} added: ${this._layerTitle(layer)}. Press Compare to build it.`);
     return layer;
+  }
+
+  /**
+   * The options of a Registration select: "As loaded" (the tab's copy, named by what it
+   * is) and every registration the compared cell's volume offers.  Filled again only when
+   * the volume or the tab's copy changed since.
+   */
+  _fillRegistrations(select) {
+    const record = this.record ?? this.cell();
+    const hasTransforms = this._hasTransforms(record);
+    const loaded = registrationOfTag(record?.summary?.copy_tag);
+    const sig = `${hasTransforms}|${record?.summary?.copy_tag ?? ''}`;
+    if (select.dataset.sig === sig) return;
+    const value = select.value;
+    select.replaceChildren(new Option(loaded
+      ? `As loaded (${registrationShort(loaded, { hasTransforms })})` : 'As loaded', ''));
+    for (const reg of registrationChoices({ hasTransforms })) {
+      select.append(new Option(registrationLabel(reg, { hasTransforms }), registrationTag(reg)));
+    }
+    select.dataset.sig = sig;
+    select.value = value;
+  }
+
+  /** Put a layer on another copy of the cell (a registration; null: the cell as loaded). */
+  setLayerRegistration(layer, registration) {
+    if (layer.config.tech === 'diff') return;
+    const reg = normalizeRegistration(registration);
+    if (registrationTag(reg) === registrationTag(layer.config.registration)) return;
+    layer.config.registration = reg;
+    this._renderChip(layer);
+    this._syncEditor(layer.pane);
+    if (this._optionsLayer() === layer) this._syncOptions();
+    this._touch(layer);
+    // The pane's annotations and arrows are its first layer's copy: they follow at the next build.
+  }
+
+  /**
+   * Set up the same rendering under several registrations (the Registrations… dialog): the
+   * layer being edited in the focused pane (its technique and every option) is copied once
+   * per registration, into one pane each (`target` 'panes': the grid gets as many panes,
+   * each with that one layer) or as the layers of the focused pane ('layers').  Nothing is
+   * built: Compare builds them.  Returns what was set up, or `{ problem }`.
+   */
+  sweepRegistrations(registrations, { target = 'panes' } = {}) {
+    const regs = registrations.map(normalizeRegistration).filter(Boolean);
+    const source = this._sweepSource();
+    if (!source) return { problem: 'There is no technique layer to copy: give a pane a technique first.' };
+    const most = target === 'layers' ? MAX_LAYERS : MAX_PANES;
+    if (!regs.length || regs.length > most) {
+      return { problem: `Choose 1 to ${most} registrations ${target === 'layers' ? 'for one pane' : 'for the grid'}.` };
+    }
+    const base = {
+      ...source.config, options: { ...source.config.options }, error: source.config.error, a: 0, b: 1, scale: null,
+    };
+    const what = techniqueName(source.config.options);
+    if (target === 'layers') {
+      const pane = source.pane;
+      this._resetPane(pane, regs.map((reg, k) => ({
+        ...base, options: { ...base.options }, registration: reg, ...newLayerStyle(k),
+      })));
+      this.onStatus(`Pane ${pane.index + 1}: ${what} under ${regs.length} registrations, one layer each. `
+        + 'Press Compare to build them.');
+      return { panes: 1, layers: regs.length };
+    }
+    this.setPaneCount(regs.length);
+    regs.forEach((reg, i) => {
+      this._resetPane(this.panes[i], [{ ...base, options: { ...base.options }, registration: reg, ...newLayerStyle(0) }]);
+    });
+    this._focusPane(this.panes[0]);
+    this.onStatus(`${what} under ${regs.length} registrations, one pane each. Press Compare to build them.`);
+    return { panes: regs.length, layers: 1 };
+  }
+
+  /** What the Registrations… dialog says and offers: the compared cell, whether its volume's transforms
+   * are read here, its default correction, the tab's own registration, and the layer a sweep copies. */
+  sweepContext() {
+    const record = this.cell() ?? this.record;
+    const info = record ? this.volumeInfo(record.source) : null;
+    const source = this._sweepSource();
+    const loaded = /^((?:off|neighbor|curvefit|all)\.[01])/.exec(record?.summary?.copy_tag ?? '');
+    return {
+      cell: record ? `c${record.id}` : 'the cell',
+      hasTransforms: this._hasTransforms(record),
+      defaultCorrection: info?.default_correction ?? 'all',
+      loadedTag: loaded ? loaded[1] : null,
+      source: source ? techniqueName(source.config.options) : null,
+      where: source ? this._where(source).toLowerCase() : '',
+      pane: source ? source.pane.index + 1 : 1,
+    };
+  }
+
+  /** The layer a sweep copies: the focused pane's layer being edited, else the first technique layer. */
+  _sweepSource() {
+    const focused = this.panes[this.focus];
+    if (focused && !this._isDiff(focused)) return this._editingLayer(focused);
+    return this.panes.find((p) => !this._isDiff(p))?.layers[0] ?? null;
+  }
+
+  /** Give a pane these layers in place of its own (their work stopped, their content gone). */
+  _resetPane(pane, configs) {
+    for (const layer of pane.layers) {
+      this._dropTask(layer);
+      if (pane.bannerLayer === layer) { pane.card.clearError(); pane.bannerLayer = null; }
+      pane.renderer.removeAll(layer.key);
+      pane.renderer.setLayerOrder(layer.key, null);
+      layer.legend.remove();
+    }
+    const wasDiff = this._isDiff(pane);
+    pane.layers = [];
+    for (const config of configs) {
+      const layer = this._newLayer(pane, config);
+      this._deriveTech(layer);
+    }
+    pane.editing = 0;
+    pane.annotationsDrawn = null;
+    pane.renderer.removeDiscs(ANNOTATION_KEY);
+    if (wasDiff) this._buildHead(pane);
+    this._legendLayout(pane);
+    this._layersChanged(pane);
+    this._repaintErrors();
+    this._applyShifts(pane);
   }
 
   /** Take a layer off its pane (the last one stays: a pane always draws something). */
@@ -727,7 +870,8 @@ export class CompareView {
 
   /** Which of the editor's controls has keyboard focus (a name), or put focus back on the one named. */
   _editorFocus(pane, restore = null) {
-    const names = ['techSelect', 'moveLeft', 'moveRight', 'duplicateButton', 'removeButton', 'opacityInput'];
+    const names = ['techSelect', 'registrationSelect', 'moveLeft', 'moveRight', 'duplicateButton', 'removeButton',
+      'opacityInput'];
     if (restore === null) {
       if (typeof document === 'undefined') return null;
       return names.find((name) => pane[name] && document.activeElement === pane[name]) ?? null;
@@ -863,6 +1007,7 @@ export class CompareView {
 
     pane.errorBox = null;
     pane.colorInput = null;
+    pane.registrationSelect = null;
     pane.retryButton = null;
     pane.moveLeft = null;
     pane.moveRight = null;
@@ -881,6 +1026,21 @@ export class CompareView {
       color.addEventListener('input', () => this.setLayerColor(layer, color.value));
       pane.colorInput = color;
       row('Color', color);
+
+      const registration = document.createElement('select');
+      registration.className = 'layer-registration';
+      this._fillRegistrations(registration);
+      help(registration, 'Which copy of the cell this layer is built from: Viking’s current section '
+        + 'transforms on or off, and Viking’s section correction off or in one of its modes (Curve fit, '
+        + 'Residual field, Field + fit). As loaded is the cell as the 3D render has it, your own moves '
+        + 'included; any other is that registration’s own copy, without moves, loaded on the server the '
+        + 'first time a layer asks for it. The layer’s error map is measured against its own copy’s '
+        + 'annotations, and a pane’s annotations and shift arrows are its first layer’s copy. '
+        + 'Registrations… under the panes sets up several side by side.');
+      registration.addEventListener('change', () => this.setLayerRegistration(layer,
+        registration.value ? registrationOfTag(registration.value) : null));
+      pane.registrationSelect = registration;
+      row('Registration', registration);
     }
 
     const alpha = document.createElement('input');
@@ -973,6 +1133,11 @@ export class CompareView {
     }
     if (pane.techSelect && pane.techSelect.value !== config.tech) pane.techSelect.value = config.tech;
     if (pane.colorInput && pane.colorInput.value !== config.color) pane.colorInput.value = config.color;
+    if (pane.registrationSelect) {
+      this._fillRegistrations(pane.registrationSelect);
+      const tag = registrationTag(config.registration) ?? '';
+      if (pane.registrationSelect.value !== tag) pane.registrationSelect.value = tag;
+    }
     if (pane.opacityInput && document.activeElement !== pane.opacityInput) pane.opacityInput.value = config.opacity;
     if (pane.showBox) pane.showBox.checked = config.visible;
     if (pane.surfaceBox) pane.surfaceBox.checked = config.surface;
@@ -1072,7 +1237,11 @@ export class CompareView {
     if (!chip) return;
     const many = pane.layers.length > 1;
     const diff = config.tech === 'diff';
-    const name = diff ? 'Difference' : shortName(techniqueName(config.options));
+    // A layer on its own registration says it first: where several panes hold one technique under
+    // several registrations, that is what tells them apart when the chip is cut short.
+    const reg = diff ? null : config.registration;
+    const name = diff ? 'Difference'
+      : (reg ? `${this._regLabel(reg, { compact: true })} · ` : '') + shortName(techniqueName(config.options));
     const full = this._layerTitle(layer);
     const k = this._layerIndex(layer) + 1;
     const state = layer.state;
@@ -1093,7 +1262,8 @@ export class CompareView {
     help(chip.name, `${many ? `Layer ${k}: ` : ''}${full}, opacity ${config.opacity}`
       + `${config.visible ? '' : ', hidden'}${word ? `, ${word}` : ''}. Click to edit its color, opacity and technique.`
       + (failed && layer.error ? ` It failed: ${layer.error.error?.serverDetail || layer.error.error?.detail
-        || layer.error.error?.message || layer.error.error}` : ''));
+        || layer.error.error?.message || layer.error.error}` : '')
+      + (layer.mesh && layer.missed ? ` Built ${layer.missed.replace(/^\w/, (c) => c.toLowerCase())}` : ''));
     chip.state.textContent = word;
     chip.state.hidden = !word;
     chip.el.className = 'layer-chip'
@@ -1663,7 +1833,13 @@ export class CompareView {
 
   /** The key of the options this layer's settings would build now. */
   _configKey(layer) {
-    return stableKey(pickOptions(this._layerOptions(layer)));
+    return this._buildKeyOf(pickOptions(this._layerOptions(layer)), layer.config.registration);
+  }
+
+  /** The key of a build: its options, and the copy (registration) it is built from. */
+  _buildKeyOf(picked, registration) {
+    const tag = registrationTag(registration);
+    return `${stableKey(picked)}${tag ? `@${tag}` : ''}`;
   }
 
   // -- what each layer is, as facts ------------------------------------------
@@ -1975,7 +2151,10 @@ export class CompareView {
       // every pane reads "out of date", whatever it was building.
       this.onStatus('Cell changed — press Compare to rebuild every pane.');
     } else if (this._runKind === 'build' && rec) {
-      this.onStatus(this._comparingLine(rec));
+      // A registration a copy did not get stays said: the layer shows the cell without it.
+      const missed = this._allLayers().filter((l) => l.mesh && l.missed);
+      this.onStatus([this._comparingLine(rec), ...missed.map((l) => `${this._where(l)}: ${l.missed}`)].join(' '),
+        missed.length ? 'error' : undefined);
     } else {
       this.onStatus(this._notes.at(-1) || `${ready} of ${n} panes ready.`);
     }
@@ -2156,14 +2335,23 @@ export class CompareView {
     this._repaintErrors();
   }
 
-  /** Remember a freshly built mesh with the options that produced it. */
-  _setMesh(layer, mesh, request, record) {
+  /** Remember a freshly built mesh with the options that produced it, and the copy it is of
+   * (`built`: its `registration`, the server's `copy` tag and that copy's `summary`). */
+  _setMesh(layer, mesh, request, record, { registration = null, copy = null, summary = null } = {}) {
     layer.mesh = mesh;
     layer.builtRequest = request;
     layer.builtOptions = pickOptions(request);
-    layer.builtKey = stableKey(layer.builtOptions);
+    layer.builtRegistration = normalizeRegistration(registration);
+    layer.builtCopy = copy;
+    layer.builtSummary = summary;
+    layer.builtKey = this._buildKeyOf(layer.builtOptions, layer.builtRegistration);
     layer.builtGen = record.loadGen;
     layer.deviation = null;   // measured on the mesh that was just replaced
+  }
+
+  /** The copy a layer's surface was built from, as `_setMesh` takes it (to fetch it again). */
+  _builtCopyOf(layer) {
+    return { registration: layer.builtRegistration, copy: layer.builtCopy, summary: layer.builtSummary };
   }
 
   /** Everything this layer shows, and what it knew about it. */
@@ -2175,6 +2363,10 @@ export class CompareView {
     layer.builtOptions = null;
     layer.builtKey = null;
     layer.builtGen = null;
+    layer.builtRegistration = null;
+    layer.builtCopy = null;
+    layer.builtSummary = null;
+    layer.missed = '';
     layer.deviation = null;
     layer.diff = null;
     layer.diffSources = null;
@@ -2385,26 +2577,89 @@ export class CompareView {
 
   // -- annotations (the overlay) -----------------------------------------------
 
-  /** The cell's annotations and closed-curve outlines, fetched once per load
-   * and shared by every pane that asks while the fetch is in the air. */
-  _loadAnnotations(record) {
-    const key = `${record.key}#${record.loadGen}`;
-    if (this._annotations?.key !== key) {
+  /** The cell's annotations and closed-curve outlines in one copy of it (`copy`, a tag; null:
+   * the tab's), fetched once per load and copy and shared by every pane that asks while the
+   * fetch is in the air. */
+  _loadAnnotations(record, copy = null) {
+    const key = this._annotationsToken(record, copy);
+    let promise = this._annotations.get(key);
+    if (!promise) {
+      // Another load of the cell, or another cell: what was fetched for it is not asked for again.
+      for (const old of this._annotations.keys()) if (!this._sameLoad(old, record)) this._annotations.delete(old);
+      const asked = { copy: copy ?? undefined };
       // Closed curves are drawn as their traced outlines; [] for a disc-only cell.
-      const promise = Promise.all([
-        api.nodes(record.source, record.id),
-        api.closedCurves(record.source, record.id).catch(() => []),
+      promise = Promise.all([
+        api.nodes(record.source, record.id, true, asked),
+        api.closedCurves(record.source, record.id, asked).catch(() => []),
       ]).then(([nodes, outlines]) => ({ nodes, outlines }));
-      this._annotations = { key, promise };
+      this._annotations.set(key, promise);
       // A failed fetch is not remembered: the next tick asks again.
-      promise.catch(() => { if (this._annotations?.key === key) this._annotations = null; });
+      promise.catch(() => { if (this._annotations.get(key) === promise) this._annotations.delete(key); });
     }
-    return this._annotations.promise;
+    return promise;
   }
 
-  /** Which load of which cell the annotations on screen are of (or would be). */
-  _annotationsToken(record) {
-    return record ? `${record.key}#${record.loadGen}` : null;
+  /** Which load of which cell, and which copy of it, the annotations on screen are of (or would be). */
+  _annotationsToken(record, copy = null) {
+    return record ? `${record.key}#${record.loadGen}${copy ? `@${copy}` : ''}` : null;
+  }
+
+  /** Is a token (`_annotationsToken`) of this load of this cell, in whichever copy? */
+  _sameLoad(token, record) {
+    if (!record || typeof token !== 'string') return false;
+    const load = `${record.key}#${record.loadGen}`;
+    return token === load || token.startsWith(`${load}@`);
+  }
+
+  // -- registration: which copy of the cell a layer is built from ----------------
+
+  /**
+   * The copy a registration names, loaded on the server when it is not held there:
+   * `{ tag, summary }` (the server's copy_tag and that load's summary), or the tab's
+   * own (`tag` null) for the cell as loaded.  One load per cell load and registration,
+   * shared by every layer and pane that asks; the server keeps it beside the tab's copy.
+   */
+  _copyFor(record, registration) {
+    const reg = normalizeRegistration(registration);
+    if (!reg) return Promise.resolve({ tag: null, summary: record.summary });
+    const key = `${record.key}#${record.loadGen}|${registrationTag(reg)}`;
+    let promise = this._copies.get(key);
+    if (!promise) {
+      promise = api.loadCopy(copyLoadBody(record, reg))
+        .then((detail) => ({ tag: detail.summary.copy_tag, summary: detail.summary }));
+      this._copies.set(key, promise);
+      // A failed load is not remembered: the next build asks again.
+      promise.catch(() => { if (this._copies.get(key) === promise) this._copies.delete(key); });
+    }
+    return promise;
+  }
+
+  /**
+   * What a copy asked for and did not get, in words ('' when it got all of it): the
+   * corrections service down, or a volume whose transforms are not read here.  The
+   * server then drew the cell without it, so the layer is the same as one without.
+   */
+  _regMissed(registration, summary) {
+    const reg = normalizeRegistration(registration);
+    if (!reg || !summary) return '';
+    const missed = [];
+    const sc = summary.section_correction;
+    if (reg.corrections !== 'off' && sc && !sc.applied) {
+      missed.push(`${correctionName(reg.corrections)} was not applied${sc.note ? ` (${sc.note})` : ''}`);
+    }
+    const lr = summary.live_registration;
+    if (reg.live && this._hasTransforms(this.record) && lr && !lr.applied) {
+      missed.push(`the current transforms were not applied${lr.note ? ` (${lr.note})` : ''}`);
+    }
+    return missed.length ? `${missed.join('; ')}, so this layer is drawn without ${missed.length > 1 ? 'them' : 'it'}.` : '';
+  }
+
+  /** The registration a pane's annotations and shift arrows are of: its first layer's, as built
+   * (or as set, before it is built). */
+  _paneRegistration(pane) {
+    const layer = pane.layers[0];
+    if (!layer || layer.config.tech === 'diff') return null;
+    return layer.mesh ? layer.builtRegistration : normalizeRegistration(layer.config.registration);
   }
 
   /** What a pane's layers and overlays look like, without refetching anything. */
@@ -2426,11 +2681,15 @@ export class CompareView {
     // Still wanted when the fetch comes back?  The pane may have been
     // dropped (pane count), turned into a Difference, un-ticked or moved
     // to another cell meanwhile.
+    const registration = this._paneRegistration(pane);
     const wanted = () => this.panes.includes(pane) && !this._isDiff(pane)
-      && pane.annotations && this.record === record;
+      && pane.annotations && this.record === record
+      && registrationTag(this._paneRegistration(pane)) === registrationTag(registration);
     let annotations;
+    let copy = null;
     try {
-      annotations = await this._loadAnnotations(record);
+      ({ tag: copy } = await this._copyFor(record, registration));
+      annotations = await this._loadAnnotations(record, copy);
     } catch (error) {
       if (!wanted()) return;
       // Said on the pane, and the overlay taken off so it matches the picture.
@@ -2455,7 +2714,7 @@ export class CompareView {
       return;
     }
     if (!wanted()) return;
-    const token = this._annotationsToken(record);
+    const token = this._annotationsToken(record, copy);
     if (pane.annotationsDrawn !== token) {
       pane.renderer.setDiscs(ANNOTATION_KEY, annotations.nodes, {
         color: DISC_COLOR, opacity: 0.85, stroke: 0.06, outlines: annotations.outlines,
@@ -2607,31 +2866,44 @@ export class CompareView {
     if (!sh.touched) sh.display = normalizeShiftDisplay({ ...record.display, showShift: true });
     if (sh.recordKey !== record.key) sh.slices = new SliceState();
     sh.recordKey = record.key;
-    sh.sig = null;
-    sh.promise = null;
-    sh.layer = null;
+    sh.copies.clear();
     for (const pane of this._shiftPanes()) this._applyShifts(pane);
     this._shiftStrip();
   }
 
-  /** The layer for the compared cell under the shared settings: built once per (cell, load, settings). */
-  _shiftLayerFor(record) {
+  /** The layer for the compared cell in one copy of it (a registration; null: the tab's) under the
+   * shared settings: built once per (cell, load, copy, settings). */
+  _shiftLayerFor(record, registration = null) {
     const sh = this._shift;
-    const sig = `${record.key}#${record.loadGen}|${JSON.stringify(sh.display)}`;
-    if (sh.sig !== sig) {
-      sh.sig = sig;
-      sh.promise = this._loadAnnotations(record).then(({ nodes, outlines }) => {
+    const tag = registrationTag(registration) ?? '';
+    const sig = `${record.key}#${record.loadGen}@${tag}|${JSON.stringify(sh.display)}`;
+    let entry = sh.copies.get(tag);
+    if (entry?.sig !== sig) {
+      entry = { sig, promise: null, layer: null, nodes: null };
+      sh.copies.set(tag, entry);
+      const mine = entry;
+      entry.promise = this._copyFor(record, registration).then(({ tag: copy, summary }) => this._loadAnnotations(
+        record, copy).then(({ nodes, outlines }) => {
         const layer = buildLayer({
-          nodes, outlines, summary: record.summary, display: sh.display,
+          nodes, outlines, summary, display: sh.display,
           inverted: false, cellColor: record.color, hasTransforms: this._hasTransforms(record),
         });
-        if (sh.sig === sig) { sh.layer = layer; sh.nodes = nodes; }
+        if (sh.copies.get(tag) === mine) { mine.layer = layer; mine.nodes = nodes; }
         return layer;
-      });
+      }));
       // A failed fetch is not remembered: the next ask goes again.
-      sh.promise.catch(() => { if (sh.sig === sig) { sh.sig = null; sh.promise = null; } });
+      entry.promise.catch(() => { if (sh.copies.get(tag) === mine) sh.copies.delete(tag); });
     }
-    return sh.promise;
+    return entry.promise;
+  }
+
+  /** The layer the strip's range, thresholds and slice keys go by: the first ticked pane's
+   * (every copy has the same sections), with its annotations; nulls before one is drawn. */
+  _shiftMain() {
+    const pane = this._shiftPanes().find((p) => p.shiftLayer);
+    if (!pane) return { layer: null, nodes: null };
+    const entry = [...this._shift.copies.values()].find((e) => e.layer === pane.shiftLayer);
+    return { layer: pane.shiftLayer, nodes: entry?.nodes ?? null };
   }
 
   /** Whether the compared cell's volume has its current section transforms read here. */
@@ -2668,9 +2940,11 @@ export class CompareView {
       this._shiftStrip();
       return;
     }
+    const registration = this._paneRegistration(pane);
+    const tag = registrationTag(registration) ?? '';
     let layer;
     try {
-      layer = await this._shiftLayerFor(record);
+      layer = await this._shiftLayerFor(record, registration);
     } catch (error) {
       if (!this.panes.includes(pane) || !pane.shift || this.record !== record) return;
       // Said on the status line, and the box un-ticked so it matches the picture.
@@ -2683,7 +2957,8 @@ export class CompareView {
     }
     // Other settings, another cell or another pane count came meanwhile: that call draws.
     if (!this.panes.includes(pane) || !pane.shift || this.record !== record
-        || this._shift.layer !== layer) return;
+        || this._shift.copies.get(tag)?.layer !== layer
+        || (registrationTag(this._paneRegistration(pane)) ?? '') !== tag) return;
     const center = sliceCenters([{ source: record.source, layer }], this._shift.slices)
       .get(record.source);
     // A layer object is one cell, load and set of settings: the pane that already
@@ -2704,10 +2979,12 @@ export class CompareView {
   /** Move every ticked pane's window and plane to the shared slice. */
   _shiftSync() {
     const { record } = this;
-    const layer = this._shift.layer;
-    if (record && layer && !layer.empty) {
+    if (record) {
       const center = this._shiftCenter();
-      for (const pane of this._shiftPanes()) syncSlice(pane.renderer, SHIFT_KEY, layer, center);
+      for (const pane of this._shiftPanes()) {
+        const layer = pane.shiftLayer;
+        if (layer && !layer.empty) syncSlice(pane.renderer, SHIFT_KEY, layer, center);
+      }
     }
     this._shiftStrip();
   }
@@ -2727,7 +3004,7 @@ export class CompareView {
   _shiftModel() {
     const sh = this._shift;
     const range = () => {
-      const layer = sh.layer;
+      const { layer } = this._shiftMain();
       return layer && !layer.empty
         ? { min: layer.sectionRange.min, max: layer.sectionRange.max, fallback: layer.defaultCenter() }
         : null;
@@ -2735,9 +3012,11 @@ export class CompareView {
     return {
       display: () => sh.display,
       // A pair the thresholds in force would hide gets thresholds that show it.
-      thresholdsFor: (pair) => (sh.nodes
-        ? thresholdsForPair(sh.thresholds, 'strip', sh.nodes, pair, sh.display) : {}),
-      layer: () => sh.layer,
+      thresholdsFor: (pair) => {
+        const { nodes } = this._shiftMain();
+        return nodes ? thresholdsForPair(sh.thresholds, 'strip', nodes, pair, sh.display) : {};
+      },
+      layer: () => this._shiftMain().layer,
       center: () => this._shiftCenter(),
       pairs: () => pairsFor(this._hasTransforms(this.record)),
       set: (changes) => {
@@ -2764,7 +3043,7 @@ export class CompareView {
   /** A slice key on any pane steps the shared slice, so every ticked pane follows. */
   _sliceKey(event, pane) {
     const { record } = this;
-    const layer = this._shift.layer;
+    const layer = pane.shiftLayer ?? this._shiftMain().layer;
     if (!record || !layer || layer.empty || !this._shiftPanes().length) return false;
     const moved = applySliceKey(event, [{ source: record.source, layer }], this._shift.slices,
       { selected: false, flipZ: pane.renderer.flipZ });
@@ -2834,13 +3113,17 @@ export class CompareView {
 
   /** A build failed: the layer shows the error and no surface, never the
    * previous build's mesh dressed as this one. */
-  _buildFailed(layer, error) {
+  _buildFailed(layer, error, { what = null } = {}) {
     layer.pane.renderer.removeAll(layer.key);
     layer.mesh = null;
     layer.builtRequest = null;
     layer.builtOptions = null;
     layer.builtKey = null;
     layer.builtGen = null;
+    layer.builtRegistration = null;
+    layer.builtCopy = null;
+    layer.builtSummary = null;
+    layer.missed = '';
     layer.deviation = null;
     layer.diff = null;
     layer.colored = false;
@@ -2851,11 +3134,11 @@ export class CompareView {
     // the rings of this load are still true, and stay (the overlay's dot still switches them).
     const { pane } = layer;
     if (!pane.layers.some((l) => l.mesh) && pane.annotationsDrawn !== null
-        && pane.annotationsDrawn !== this._annotationsToken(this.record)) {
+        && !this._sameLoad(pane.annotationsDrawn, this.record)) {
       pane.renderer.removeDiscs(ANNOTATION_KEY);
       pane.annotationsDrawn = null;
     }
-    this._failLayer(layer, 'build', error, { what: `${techniqueName(layer.config.options)} failed to build` });
+    this._failLayer(layer, 'build', error, { what: what ?? `${techniqueName(layer.config.options)} failed to build` });
   }
 
   // -- technique layers -------------------------------------------------------
@@ -2874,10 +3157,12 @@ export class CompareView {
     });
   }
 
-  /** The mesh for these options: filed, or the download under way, or a new job (see MeshCache). */
-  _fetchMesh(record, options, task, { fresh = false } = {}) {
-    const key = meshKey(record, pickOptions(options));
-    return this.meshes.fetch(key, ({ signal, onStatus }) => api.mesh(record.source, record.id, options, {
+  /** The mesh for these options, of the copy `copy` (a tag; null: the tab's): filed, or the
+   * download under way, or a new job (see MeshCache). */
+  _fetchMesh(record, options, task, { fresh = false, copy = null } = {}) {
+    const key = meshKey(record, pickOptions(options), copy);
+    const asked = copy ? { ...options, copy } : options;
+    return this.meshes.fetch(key, ({ signal, onStatus }) => api.mesh(record.source, record.id, asked, {
       signal, alive: this._alive(record), onStatus,
     }), {
       signal: task.phaseController?.signal ?? task.controller.signal,
@@ -2905,6 +3190,23 @@ export class CompareView {
       if (this._optionsLayer() === layer) this._syncOptions();
     }
     const label = techniqueName(options);
+    // Another registration: its copy of the cell is loaded on the server first (once per load of
+    // the cell and registration; the server keeps it beside the tab's own).
+    const registration = normalizeRegistration(layer.config.registration);
+    let copy = { tag: null, summary: record.summary };
+    if (registration) {
+      const under = this._regLabel(registration);
+      this.onStatus(`${this._where(layer)}: loading c${record.id} under ${under}…`);
+      this._phase(task, 'building', `Loading c${record.id} under ${under}`);
+      try {
+        copy = await this._copyFor(record, registration);
+      } catch (error) {
+        if (!this._owns(layer) || task.controller.signal.aborted) return false;
+        this._buildFailed(layer, error, { what: `c${record.id} could not be loaded under ${under}` });
+        return false;
+      }
+      if (!this._owns(layer) || task.controller.signal.aborted) return false;
+    }
     this.onStatus(`${this._where(layer)}: building ${label}${fitted}…`);
     this._phase(task, 'building',
       rebuild ? `Settings changed, rebuilding this ${pane.layers.length > 1 ? 'layer' : 'pane'}`
@@ -2912,7 +3214,7 @@ export class CompareView {
     this._legendHide(layer);
     let mesh;
     try {
-      mesh = await this._fetchMesh(record, options, task);
+      mesh = await this._fetchMesh(record, options, task, { copy: copy.tag });
     } catch (error) {
       if (error?.aborted) {
         // Stopped: the layer keeps what it had (it is marked stopped, and
@@ -2938,7 +3240,10 @@ export class CompareView {
             + 'Cylinder and Tube cannot draw it: pick Closed curve or Hybrid for this pane.')));
       return false;
     }
-    this._setMesh(layer, mesh, options, record);
+    this._setMesh(layer, mesh, options, record, { registration, copy: copy.tag, summary: copy.summary });
+    layer.missed = registration ? this._regMissed(registration, copy.summary) : '';
+    if (layer.missed) this.onStatus(`${this._where(layer)}: ${layer.missed}`, 'error');
+    this._renderChip(layer);
     pane.renderer.removePoints(layer.key);
     this._drawSurface(layer);
     layer.painted = null;
@@ -2963,6 +3268,7 @@ export class CompareView {
     this._phase(task, 'measuring', 'Measuring against the annotations', 'measuring');
     const call = () => api.deviationJob(record.source, record.id, layer.builtOptions, {
       signal: phase.signal, alive: this._alive(record), onStatus: (job) => this._onJob(pane, job),
+      copy: layer.builtCopy ?? undefined,
     });
     try {
       let result = await call();
@@ -2970,9 +3276,10 @@ export class CompareView {
         // The server measured another copy of this surface than the one the
         // layer holds. Fetch the surface again, once, and measure that.
         pane.card.setTitle(this._taskTitle(task, 'The server’s surface changed, fetching it again'));
-        const mesh = await this._fetchMesh(record, layer.builtRequest, task, { fresh: true });
+        const built = this._builtCopyOf(layer);
+        const mesh = await this._fetchMesh(record, layer.builtRequest, task, { fresh: true, copy: built.copy });
         if (!this._owns(layer)) return false;
-        this._setMesh(layer, mesh, layer.builtRequest, record);
+        this._setMesh(layer, mesh, layer.builtRequest, record, built);
         this._drawSurface(layer);
         layer.painted = null;
         await this._applyDisplay(pane);
@@ -3037,8 +3344,14 @@ export class CompareView {
     this._phase(task, 'measuring', `Measuring ${names}`, 'measuring');
     const { signal } = task.controller;
     const body = () => ({ a: a.builtOptions, b: b.builtOptions });
+    // Two layers on different copies (registrations): each surface is built from and held to its
+    // own copy (the server's copy_b); a layer on the cell as loaded names the tab's copy.
+    const tab = record.summary?.copy_tag ?? null;
+    const copyA = a.builtCopy ?? tab;
+    const copyB = b.builtCopy ?? tab;
+    const copies = copyA && copyB && copyA !== copyB ? { copy: copyA, copyB } : { copy: a.builtCopy ?? undefined };
     const call = () => api.diffJob(record.source, record.id, body(), {
-      signal, alive: this._alive(record), onStatus: (job) => this._onJob(pane, job),
+      signal, alive: this._alive(record), onStatus: (job) => this._onJob(pane, job), ...copies,
     });
     try {
       let mesh = a.mesh;
@@ -3047,7 +3360,7 @@ export class CompareView {
         // The server's pane-A surface is not the one pane A holds: fetch it
         // again for this pane (pane A is left as it is), once.
         pane.card.setTitle('The server’s surface changed, fetching it again');
-        mesh = await this._fetchMesh(record, a.builtRequest, task, { fresh: true });
+        mesh = await this._fetchMesh(record, a.builtRequest, task, { fresh: true, copy: a.builtCopy });
         pane.card.setTitle(`Measuring ${names}`);
         result = await call();
         if (!sameSurface(mesh, result)) {
@@ -3109,6 +3422,8 @@ export class CompareView {
     this._outdated = false;
     this._runKind = 'build';
     if (changed) {
+      // The copies (registrations) loaded for another cell or load are not this one's.
+      this._copies.clear();
       this._shiftRecordChanged(record);
       // A mesh filed for another cell or load can never be asked for again.
       this.meshes.clear();
@@ -3176,6 +3491,8 @@ export class CompareView {
     if (!record) return null;
     const renderings = [];
     const panes = [];
+    const tab = record.summary?.copy_tag ?? null;
+    const hasTransforms = this._hasTransforms(record);
     for (const pane of this.panes) {
       const number = pane.index + 1;
       if (this._isDiff(pane)) {
@@ -3193,6 +3510,10 @@ export class CompareView {
           options: built ? layer.builtOptions : null,
           faces: built ? layer.mesh.n_faces : 0,
           vertices: built ? layer.mesh.n_vertices : 0,
+          // The copy it was built from: its tag on the server (the tab's, for the cell as loaded),
+          // and that registration in words.
+          copy: built ? (layer.builtCopy ?? tab) : null,
+          registration: built ? copyLabel(layer.builtCopy ?? tab, { hasTransforms }) : '',
           built,
           stale: built && this._meshStale(layer),
           why: built ? '' : (layer.task ? 'still being built' : 'not built yet: press Compare'),

@@ -23,7 +23,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
@@ -3485,9 +3485,13 @@ class SbfsemService:
         return self.measure_weight_mb(neuron, *(dict(r.options) for r in spec.renderings)) \
             + self.REPORT_MB
 
-    def compare_report(self, neuron: Neuron, spec):
+    def compare_report(self, neuron: Neuron, spec, copies: Sequence[Neuron] | None = None):
         """Render compare's report (:func:`sbfsem.export.compare_pdf.write_compare_report`)
         of this copy of the cell: a :class:`~sbfsem.export.compare_pdf.ReportFile`.
+        ``copies`` are the copies of the cell the renderings were built from, one per
+        rendering (another registration's, for a layer on one); each is measured
+        against its own annotations, and a pair across two copies holds each surface
+        to its own (:meth:`_cached_difference`'s ``neuron_b``).
 
         Its surfaces, error maps and differences come from this service's caches
         (:class:`_ReportSource`), so a rendering a pane already built and a pair a
@@ -3498,7 +3502,7 @@ class SbfsemService:
         from ..export.compare_pdf import write_compare_report
 
         try:
-            return write_compare_report(spec, _ReportSource(self, neuron, spec))
+            return write_compare_report(spec, _ReportSource(self, neuron, spec, copies))
         finally:
             trim_memory()
 
@@ -4401,14 +4405,19 @@ class _ReportSource:
     #: after the restart (api.js pollJob), not written with pages of failures.
     fatal = (BuildInterrupted,)
 
-    def __init__(self, svc: SbfsemService, neuron: Neuron, spec) -> None:
+    def __init__(self, svc: SbfsemService, neuron: Neuron, spec,
+                 copies: Sequence[Neuron] | None = None) -> None:
         self.svc, self.neuron, self.spec = svc, neuron, spec
+        #: The copy of the cell each rendering was built from (the request's when not named).
+        self.copies = list(copies) if copies else [neuron] * len(spec.renderings)
+        if len(self.copies) != len(spec.renderings):
+            raise ValueError("a report names one copy of the cell per rendering")
 
     def _options(self, index: int) -> dict:
         return dict(self.spec.renderings[index].options)
 
     def mesh(self, index: int) -> Mesh:
-        return self.svc.mesh_for(self.neuron, self._options(index))
+        return self.svc.mesh_for(self.copies[index], self._options(index))
 
     def deviation(self, index: int):
         from ..export.compare_pdf import RenderingDeviation
@@ -4417,10 +4426,10 @@ class _ReportSource:
         mesh = self.mesh(index)
         if mesh.is_empty:
             raise ValueError("the rendering produced no mesh; there is nothing to measure")
-        found = self.svc._cached_deviation_map(self.neuron, options, mesh)
+        found = self.svc._cached_deviation_map(self.copies[index], options, mesh)
         if found is None:
             return None
-        summary = self.svc._cached_deviation(self.neuron, options, mesh)
+        summary = self.svc._cached_deviation(self.copies[index], options, mesh)
         return RenderingDeviation(found, summary.model_dump() if summary is not None else {})
 
     def difference(self, a: int, b: int):
@@ -4428,8 +4437,10 @@ class _ReportSource:
         mesh_a, mesh_b = self.mesh(a), self.mesh(b)
         if mesh_a.is_empty or mesh_b.is_empty:
             raise ValueError("one of the renderings produced no mesh; there is nothing to compare")
-        return self.svc._cached_difference(self.neuron, oa, ob, mesh_a, mesh_b, self.SAMPLES,
-                                           sign=self.spec.sign, both=True)
+        neuron_a, neuron_b = self.copies[a], self.copies[b]
+        return self.svc._cached_difference(neuron_a, oa, ob, mesh_a, mesh_b, self.SAMPLES,
+                                           sign=self.spec.sign, both=True,
+                                           neuron_b=None if neuron_b is neuron_a else neuron_b)
 
     def annotations(self):
         return annotation_ground_truth(self.neuron)
@@ -4437,6 +4448,50 @@ class _ReportSource:
     def annotation_names(self):
         targets = annotation_targets(self.neuron)
         return (targets.ids, targets.sections) if len(targets.ids) else None
+
+    def annotations_of(self, index: int):
+        """The annotations of the copy rendering ``index`` was built from (its registration's)."""
+        return annotation_ground_truth(self.copies[index])
+
+    def annotation_names_of(self, index: int):
+        targets = annotation_targets(self.copies[index])
+        return (targets.ids, targets.sections) if len(targets.ids) else None
+
+    def registration_facts(self) -> list[dict]:
+        """One entry per copy of the cell among the renderings, in the order they first
+        appear: which renderings it holds, what its transforms and correction did
+        (:func:`sbfsem.analysis.shifts.shift_summary`: how far they moved the cell's own
+        annotations, the steps along its links at each stage, the sections that moved
+        as one), and how many annotations the curve fit pulled toward a much wider one
+        (:mod:`sbfsem.analysis.correction_checks`, at its default ratio)."""
+        from ..analysis.correction_checks import DEFAULT_RATIO
+        from ..analysis.shifts import shift_summary
+
+        out: list[dict] = []
+        by_copy: dict[int, dict] = {}
+        for index, (rendering, neuron) in enumerate(zip(self.spec.renderings, self.copies, strict=True)):
+            found = by_copy.get(id(neuron))
+            if found is not None:
+                found["renderings"].append(index)
+                continue
+            summary = shift_summary(neuron, "both").as_dict()
+            scan = getattr(neuron, "correction_pulls", None)
+            entry = {
+                "copy": getattr(neuron, "copy_tag", None),
+                "registration": rendering.registration,
+                "renderings": [index],
+                "correction": dict(getattr(neuron, "correction_status", None) or {}),
+                "transforms": dict(getattr(neuron, "registration_status", None) or {}),
+                "applied": summary["applied"],
+                "pairs": summary["pairs"],
+                "links": summary["links"],
+                "coherent_sections": len(summary["coherent_sections"]),
+                "pulls": len(scan.at(DEFAULT_RATIO)) if scan is not None else None,
+                "pull_ratio": DEFAULT_RATIO,
+            }
+            by_copy[id(neuron)] = entry
+            out.append(entry)
+        return out
 
 
 def _registration_dto(status: dict | None) -> LiveRegistrationDTO | None:

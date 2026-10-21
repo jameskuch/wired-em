@@ -155,6 +155,10 @@ class ReportRendering:
     options: Mapping[str, Any]
     deviation: bool = True
     stale: bool = False
+    #: The copy of the cell it was built from (a registration's ``copy_tag``; None:
+    #: the report's own), and that registration in words.
+    copy: str | None = None
+    registration: str = ""
 
 
 @dataclass(frozen=True)
@@ -177,7 +181,8 @@ class ReportSpec:
     difference decides which side a point is on (``"enclosure"`` or
     ``"normal"``, as :func:`~sbfsem.geometry.meshdiff.mesh_difference`);
     ``z_scale_nm`` the volume's section thickness, which turns a Z into a
-    section number."""
+    section number.  ``copy`` is the copy of the cell the report was asked of;
+    each rendering names its own when it was built from another registration."""
 
     cell: int
     source: str
@@ -208,6 +213,18 @@ class ReportSpec:
                 raise ValueError(f"pair ({a}, {b}) does not name two of the {n} renderings")
             seen.add((min(a, b), max(a, b)))
         object.__setattr__(self, "pairs", tuple(sorted(seen)))
+
+    @property
+    def copies(self) -> tuple[str | None, ...]:
+        """The copies of the cell (registrations) the renderings were built from, in
+        the order they first appear."""
+        return tuple(dict.fromkeys(r.copy if r.copy is not None else self.copy for r in self.renderings))
+
+    def registration_of(self, index: int) -> str:
+        """Rendering ``index``'s registration in words, or its copy's tag when the
+        page named none."""
+        rendering = self.renderings[index]
+        return rendering.registration or str(rendering.copy or self.copy or "")
 
     def section_of(self, z_um: float) -> float | None:
         """The section a Z (µm) lies in, or ``None`` without the volume's Z scale."""
@@ -302,6 +319,8 @@ class Plan:
         n_pairs = len(spec.pairs)
         summary = [Item("summary-renderings", None, max(1, math.ceil(len(spec.renderings) / RENDERING_ROWS)),
                         "Summary: the renderings")]
+        if len(spec.copies) > 1:
+            summary.append(Item("summary-registrations", None, 1, "Summary: the registrations"))
         if n_pairs:
             summary.append(Item("summary-matrices", None, 1, "Summary: pairwise error matrices"))
             summary.append(Item("summary-pairs", None, math.ceil(n_pairs / PAIR_ROWS),
@@ -486,8 +505,10 @@ class _Writer:
         self.colors = report_colors(spec.renderings)
         self.preview = preview
         self.links: dict[int, list[tuple[tuple[float, float, float, float], int]]] = {}
+        copies = len(spec.copies)
         self.footer = (f"Render compare report · c{spec.cell} · {spec.volume}"
-                       + (f" · copy {spec.copy}" if spec.copy else "")
+                       + (f" · {copies} registrations" if copies > 1
+                          else f" · copy {spec.copies[0]}" if spec.copies and spec.copies[0] else "")
                        + (f" · {spec.created}" if spec.created else ""))
         centers, radii, polygons = source.annotations()
         self.centers = np.asarray(centers, dtype=float).reshape(-1, 3)
@@ -495,6 +516,10 @@ class _Writer:
         self.polygons = list(polygons)
         names = source.annotation_names()
         self.names = names
+        #: Each copy's annotations and names, for a rendering on another registration
+        #: (sources that hold several copies say them through ``annotations_of``).
+        self._own_annotations: dict[Any, tuple] = {}
+        self._own_names: dict[Any, Any] = {}
         #: What the source raises that ends the whole report, not a page of it.
         self.fatal: tuple[type[BaseException], ...] = tuple(getattr(source, "fatal", ()))
         # One step for each rendering measured, each rendering's pages, each pair, and the front.
@@ -556,6 +581,30 @@ class _Writer:
     def _where(self, r: int) -> str:
         rendering = self.spec.renderings[r]
         return f"pane {rendering.pane}, layer {rendering.layer}"
+
+    def _copy_key(self, r: int) -> Any:
+        rendering = self.spec.renderings[r]
+        return rendering.copy if rendering.copy is not None else self.spec.copy
+
+    def _annotations_for(self, r: int) -> tuple[np.ndarray, np.ndarray, list]:
+        """The annotations of the copy rendering ``r`` was built from: centers, radii, outlines."""
+        key = self._copy_key(r)
+        if key == self.spec.copy or not hasattr(self.source, "annotations_of"):
+            return self.centers, self.radii, self.polygons
+        if key not in self._own_annotations:
+            centers, radii, polygons = self.source.annotations_of(r)
+            self._own_annotations[key] = (np.asarray(centers, dtype=float).reshape(-1, 3),
+                                          np.asarray(radii, dtype=float).ravel(), list(polygons))
+        return self._own_annotations[key]
+
+    def _names_for(self, r: int):
+        """The Location IDs and sections of rendering ``r``'s copy's annotations, in its order."""
+        key = self._copy_key(r)
+        if key == self.spec.copy or not hasattr(self.source, "annotation_names_of"):
+            return self.names
+        if key not in self._own_names:
+            self._own_names[key] = self.source.annotation_names_of(r)
+        return self._own_names[key]
 
     # -- pass 1: every surface, its facts and its error against the annotations ----------
     def measure_renderings(self) -> None:
@@ -694,7 +743,8 @@ class _Writer:
         mesh = None if failure else self.source.mesh(r)
         with _DRAW:
             page = self._page(item.first)
-            y = page.header(f"{self._title(r)}", f"{self._where(r).capitalize()} · {spec.name}",
+            y = page.header(f"{self._title(r)}", f"{self._where(r).capitalize()} · {spec.name}"
+                            + (f" · {spec.registration_of(r)}" if len(spec.copies) > 1 else ""),
                             right="settings and shape")
             page.swatch(page.right - 0.18, 0.2, self.colors[r], size=0.16)
             if str(rendering.color).lower() != self.colors[r]:
@@ -800,7 +850,9 @@ class _Writer:
         with _DRAW:
             page = self._page(item.first)
             y = page.header(f"{self._title(r)}: against the annotations",
-                            f"{self._where(r).capitalize()} · {spec.name}", right="error map")
+                            f"{self._where(r).capitalize()} · {spec.name}"
+                            + (f" · {spec.registration_of(r)}" if len(spec.copies) > 1 else ""),
+                            right="error map")
             page.swatch(page.right - 0.18, 0.2, self.colors[r], size=0.16)
             if failure or mesh is None or found is None:
                 page.para(page.left, y, f"Not measured: {failure}.", size=9, color="#a3471a")
@@ -890,8 +942,9 @@ class _Writer:
                 y = page.section(y, f"The worst places (numbered on the first picture; Location IDs "
                                  f"and sections of {spec.volume})", size=9)
                 ids = sections = None
-                if self.names is not None:
-                    ids, sections = self.names
+                names = self._names_for(r)
+                if names is not None:
+                    ids, sections = names
                 rows = []
                 for k, spot in enumerate(spots):
                     owner = spot.owner
@@ -931,7 +984,12 @@ class _Writer:
                 self.numbers.failed[("pair", (a, b))] = failure
         self._progress(f"R{a + 1} vs R{b + 1}: drawing")
         title = f"R{a + 1} vs R{b + 1}"
-        sub = f"{ra.label} ({self._where(a)}) vs {rb.label} ({self._where(b)}) · {spec.name}"
+        across = self._copy_key(a) != self._copy_key(b)
+
+        def reg(k: int) -> str:
+            return f", {_short_registration(spec.registration_of(k))}" if across else ""
+
+        sub = f"{ra.label} ({self._where(a)}{reg(a)}) vs {rb.label} ({self._where(b)}{reg(b)}) · {spec.name}"
         if failure or result is None or diff is None or mesh_a is None or mesh_b is None:
             for k in range(3):
                 with _DRAW:
@@ -1176,16 +1234,23 @@ class _Writer:
                         xlabel="X (µm)", ylabel="Y (µm)")
         tol = 0.5 * (spec.z_scale_nm or 100.0) / 1000.0
         pts: list[np.ndarray] = []
-        near = np.abs(self.centers[:, 2] - z) <= tol
-        for c, r in zip(self.centers[near], self.radii[near], strict=True):
-            ax.add_patch(Circle((c[0], c[1]), r, facecolor="#d9dde3", edgecolor="#6b7380", lw=0.5,
-                                zorder=1))
-            pts.append(np.array([[c[0] - r, c[1] - r], [c[0] + r, c[1] + r]]))
-        for ring, zz in self.polygons:
-            if abs(float(zz) - z) <= tol and len(ring) >= 3:
-                ax.add_patch(Polygon(np.asarray(ring)[:, :2], closed=True, facecolor="#d9dde3",
-                                     edgecolor="#6b7380", lw=0.5, zorder=1))
-                pts.append(np.asarray(ring)[:, :2])
+        # The annotations of A's copy, filled; of B's, as dashed outlines in B's color
+        # when B was built from another registration (they sit where it put them).
+        sets: list[tuple[tuple, dict[str, Any]]] = [
+            (self._annotations_for(a), {"facecolor": "#d9dde3", "edgecolor": "#6b7380", "lw": 0.5})]
+        across = self._copy_key(a) != self._copy_key(b)
+        if across:
+            sets.append((self._annotations_for(b), {"facecolor": "none", "edgecolor": ink(self.colors[b]),
+                                                    "lw": 0.6, "linestyle": (0, (2, 1.5))}))
+        for (centers, radii, polygons), style in sets:
+            near = np.abs(centers[:, 2] - z) <= tol
+            for c, r in zip(centers[near], radii[near], strict=True):
+                ax.add_patch(Circle((c[0], c[1]), r, zorder=1, **style))
+                pts.append(np.array([[c[0] - r, c[1] - r], [c[0] + r, c[1] + r]]))
+            for ring, zz in polygons:
+                if abs(float(zz) - z) <= tol and len(ring) >= 3:
+                    ax.add_patch(Polygon(np.asarray(ring)[:, :2], closed=True, zorder=1, **style))
+                    pts.append(np.asarray(ring)[:, :2])
         for mesh, color, name in ((mesh_a, ink(self.colors[a]), f"R{a + 1}"),
                                   (mesh_b, ink(self.colors[b]), f"R{b + 1}")):
             seg = section_segments(mesh.vertices, mesh.faces, z + 1e-7)
@@ -1202,8 +1267,9 @@ class _Writer:
         ax.set_aspect("equal", adjustable="box")
         ax.legend(fontsize=5.5, frameon=False, loc="upper right")
         page.para(x + 0.3, y + h - 0.2, "Gray: the annotations in this section (discs, traced "
-                  "outlines). Lines: where each surface crosses the section plane.", size=5.8,
-                  color=MUTED, width=w - 0.3)
+                  "outlines)" + (f" as R{a + 1}'s registration places them; dashed, as R{b + 1}'s"
+                                 if across else "") + ". Lines: where each surface crosses the section plane.",
+                  size=5.8, color=MUTED, width=w - 0.3)
 
     # -- pass 3: the front matter ------------------------------------------------------------
     def write_front(self, pdf: PdfPages) -> None:
@@ -1215,6 +1281,8 @@ class _Writer:
                     self._contents(pdf, item)
                 elif item.kind == "summary-renderings":
                     self._summary_renderings(pdf, item)
+                elif item.kind == "summary-registrations":
+                    self._summary_registrations(pdf, item)
                 elif item.kind == "summary-matrices":
                     self._summary_matrices(pdf, item)
                 elif item.kind == "summary-pairs":
@@ -1231,7 +1299,9 @@ class _Writer:
         page.text(page.left, 1.2, f"c{spec.cell} · {spec.volume}", size=15, color="#2b3440")
         y = 1.6
         lines = [
-            f"Volume: {spec.volume} ({spec.source})" + (f" · copy {spec.copy}" if spec.copy else ""),
+            f"Volume: {spec.volume} ({spec.source})"
+            + (f" · {len(spec.copies)} registrations of the cell (below)" if len(spec.copies) > 1
+               else f" · copy {spec.copy}" if spec.copy else ""),
             f"Made: {spec.created or 'not given'}" + (f" · SBFSEM-tools {spec.build}" if spec.build else ""),
             f"{len(spec.renderings)} rendering{'s' if len(spec.renderings) != 1 else ''} in "
             f"{len(plan.panes())} pane{'s' if len(plan.panes()) != 1 else ''} · "
@@ -1245,6 +1315,11 @@ class _Writer:
         for line in lines:
             page.text(page.left, y, line, size=9, color=INK)
             y += 0.2
+        if len(spec.copies) > 1:
+            names = dict.fromkeys(spec.registration_of(r) for r in range(len(spec.renderings)))
+            y = page.para(page.left, y, "Registrations: " + "; ".join(names) + ". Each rendering is "
+                          "built from, and held to, the annotations of its own registration of the cell; "
+                          "a pair across two registrations holds each surface to its own.", size=8.5) + 0.02
         y += 0.1
         y = page.para(page.left, y, (
             "Every rendering is a layer of a Render compare pane, measured as it was built. "
@@ -1526,6 +1601,108 @@ class _Writer:
                 rows, links=links, swatches=swatches, size=6.7, max_y=page.bottom)
         self._save(pdf, page)
 
+    def _summary_registrations(self, pdf: PdfPages, item: Item) -> None:
+        """The registrations the renderings were built from, side by side: what each moved
+        of the cell's own annotations, and how far linked annotations on neighboring
+        sections step sideways at its positions (``source.registration_facts``)."""
+        spec = self.spec
+        page = self._page(item.first)
+        y = page.header("Summary: the registrations", spec.name)
+        y = page.para(page.left, y, (
+            f"The renderings were built from {len(spec.copies)} registrations of the cell. A registration "
+            "places Viking's annotations at their stored positions or through the volume's current section "
+            "transforms, then moves them by Viking's section correction (none, Residual field, Curve fit or "
+            "Field + fit). Each rendering is held to its own registration's annotations. Below: what each "
+            "registration moved of this cell's own annotations, and how far each link between two of them on "
+            "different sections steps sideways at its positions."), size=7.8) + 0.08
+        facts_of = getattr(self.source, "registration_facts", None)
+        try:
+            facts = facts_of() if facts_of is not None else None
+        except Exception as exc:  # noqa: BLE001 - a summary that fails is a line that says so
+            self._fatal(exc)
+            facts = None
+            y = page.para(page.left, y, f"Not measured: {exc}.", size=9, color="#a3471a")
+        if not facts:
+            if facts_of is None:
+                page.para(page.left, y, "This report's source gives no registration facts.", size=9,
+                          color=MUTED)
+            self._save(pdf, page)
+            return
+
+        def stats(pair: Mapping[str, Any] | None) -> list[str]:
+            if not pair or not pair.get("n_moved"):
+                return ["0", "—", "—", "—"]
+            return [fmt(pair.get("n_moved")), fmt(pair.get("median_um")), fmt(pair.get("p95_um")),
+                    fmt(pair.get("max_um"))]
+
+        def name(entry: Mapping[str, Any]) -> str:
+            first = entry["renderings"][0]
+            text = spec.registration_of(first)
+            status = entry.get("correction") or {}
+            if status.get("requested") and not status.get("applied"):
+                text += " (correction not applied)"
+            return text
+
+        def renderings(entry: Mapping[str, Any]) -> str:
+            return ", ".join(f"R{k + 1}" for k in entry["renderings"])
+
+        y = page.section(y, "What each registration moved (the cell's own annotations, µm)", size=9)
+        rows = []
+        for entry in facts:
+            pairs = entry.get("pairs") or {}
+            rows.append([name(entry), renderings(entry), *stats(pairs.get("transforms")),
+                         *stats(pairs.get("correction"))])
+        y = page.table(page.left, y, [
+            Column("Registration", 2.05), Column("Renderings", 0.8),
+            Column("Transforms n", 0.8, "right"), Column("median", 0.5, "right"),
+            Column("p95", 0.45, "right"), Column("max", 0.45, "right"),
+            Column("Correction n", 0.8, "right"), Column("median", 0.5, "right"),
+            Column("p95", 0.45, "right"), Column("max", 0.45, "right")], rows, size=6.6) + 0.04
+        y = page.para(page.left, y, "n: how many of the cell's own annotations each moved (by more than "
+                      "0.5 nm); then the median, 95th percentile and largest of those moves.", size=6.6,
+                      color=MUTED) + 0.1
+
+        y = page.section(y, "Along the links: how far each link steps sideways between its two sections (µm)",
+                         size=9)
+        rows = []
+        steps: list[tuple[str, float, float]] = []
+        for entry in facts:
+            links = entry.get("links") or {}
+            at = (links.get("stages") or {}).get("corrected") or {}
+            pulls = entry.get("pulls")
+            rows.append([name(entry), fmt(links.get("n_links")), fmt(at.get("median_um")), fmt(at.get("p90_um")),
+                         fmt(at.get("p99_um")), fmt(at.get("max_um")), fmt(at.get("n_over_1p5_um")),
+                         fmt(entry.get("coherent_sections")), "—" if pulls is None else fmt(pulls)])
+            if at:
+                steps.append((renderings(entry), float(at.get("median_um", 0.0)), float(at.get("p90_um", 0.0))))
+        y = page.table(page.left, y, [
+            Column("Registration", 2.15), Column("Links", 0.55, "right"), Column("Median", 0.6, "right"),
+            Column("p90", 0.55, "right"), Column("p99", 0.55, "right"), Column("Max", 0.55, "right"),
+            Column("Over 1.5", 0.6, "right"), Column("Sections as one", 0.95, "right"),
+            Column("Fit pulls", 0.7, "right")], rows, size=6.6) + 0.12
+        if steps and y < page.bottom - 2.4:
+            ax = page.chart(page.left + 0.9, y + 0.15, page.usable - 1.1, min(2.0, 0.3 * len(steps) + 0.7),
+                            title="Link steps at each registration's positions (µm): median and 90th percentile")
+            pos = np.arange(len(steps))
+            ax.barh(pos - 0.18, [m for _, m, _ in steps], height=0.34, color="#4c78a8", label="median")
+            ax.barh(pos + 0.18, [p for _, _, p in steps], height=0.34, color="#f2a541", label="p90")
+            ax.set_yticks(pos)
+            ax.set_yticklabels([label for label, _, _ in steps], fontsize=6)
+            ax.invert_yaxis()
+            ax.legend(fontsize=5.5, frameon=False, loc="lower right")
+            y += min(2.0, 0.3 * len(steps) + 0.7) + 0.6
+        page.para(page.left, y, (
+            "Lower steps mean linked annotations on neighboring sections line up better. Read them with "
+            "care: the curve fit moves each annotation onto the path through its neighbors, so it lowers "
+            "these steps by construction, and a lower number under Curve fit or Field + fit is partly what "
+            "the fit does, not proof on its own that the registration is truer. 'Sections as one' counts "
+            "sections whose annotations of this cell all moved together (at least 4, one way, 0.2 µm or "
+            "more on average), the mark of a whole section re-aligned. 'Fit pulls' are annotations the fit "
+            f"pulled toward a linked annotation at least {fmt(facts[0].get('pull_ratio'))}× as wide, such as a "
+            "thin process dragged toward a soma (the Settings tab's Correction log); — where no fit ran."),
+            size=7.2, color=MUTED)
+        self._save(pdf, page)
+
     def _summary_shape(self, pdf: PdfPages, item: Item) -> None:
         spec = self.spec
         page = self._page(item.first)
@@ -1632,6 +1809,15 @@ def _faces_near(mesh: Mesh, centre: np.ndarray, half: float) -> np.ndarray:
     return mesh.faces[inside[mesh.faces].all(axis=1)]
 
 
+def _short_registration(text: str) -> str:
+    """A registration in a few words, as a layer's chip says it: "Current transforms +
+    Field + fit" is "current + field + fit", "Stored positions, no correction" "stored"."""
+    words = (str(text).replace("Current transforms", "current").replace("Stored positions", "stored")
+             .replace(", no correction", "").replace("Residual field", "field").replace("Curve fit", "fit")
+             .replace("Field + fit", "field + fit").replace(", with manual moves", " + moves"))
+    return words
+
+
 def _settings_line(options: Mapping[str, Any]) -> str:
     """Every option a rendering's technique uses that is not its default, in one line."""
     changed = [f"{row.label} {row.text}" for row in describe_options(options)
@@ -1647,12 +1833,21 @@ def _differing_text(spec: ReportSpec, r: int) -> str:
     preset = match_preset(options)
     same = [k for k, other in enumerate(spec.renderings)
             if k != r and match_preset(other.options) == preset]
+
+    def copy_of(k: int) -> str | None:
+        return spec.renderings[k].copy if spec.renderings[k].copy is not None else spec.copy
+
     if not same:
         changed = [f"{row.label} {row.text}" for row in describe_options(options)
                    if row.changed and not row.inert]
+        if len(spec.copies) > 1:
+            changed.insert(0, spec.registration_of(r))
         return ", ".join(changed[:4]) if changed else "defaults"
     mine = {row.key: row for row in describe_options(options)}
     differ: list[str] = []
+    # Built from another registration than one of its technique: that comes first.
+    if any(copy_of(k) != copy_of(r) for k in same):
+        differ.append(spec.registration_of(r))
     for k in same:
         theirs = {row.key: row for row in describe_options(spec.renderings[k].options)}
         for key, row in mine.items():

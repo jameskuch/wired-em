@@ -251,7 +251,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sbfsem-compare-test-'));
 for (const name of ['compare.js', 'comparelayers.js', 'api.js', 'jobcard.js', 'loadprogress.js', 'state.js',
   'shifts.js', 'shiftlayer.js', 'shiftpanel.js', 'shiftlegend.js', 'fatlines.js', 'renderoptions.js',
   'render-schema.js', 'compareoptions.js', 'renderform.js', 'renderestimate.js', 'regstatus.js',
-  'renderconflicts.js', 'conflictpanel.js', 'viewcube.js', 'settings.js']) {
+  'renderconflicts.js', 'conflictpanel.js', 'viewcube.js', 'settings.js', 'registrations.js']) {
   let text = fs.readFileSync(path.join(jsDir, name), 'utf8');
   text = text.replace("'./render3d.js'", "'./render3d_stub.js'");
   fs.writeFileSync(path.join(tmp, name), text);
@@ -264,6 +264,7 @@ const co = await mod('compareoptions.js');
 const { JobCard } = await mod('jobcard.js');
 const { POLL_TIMING } = await mod('api.js');
 const { state, DEFAULT_RENDER } = await mod('state.js');
+const { registrationTag: registrationTagOf } = await mod('registrations.js');
 Object.assign(POLL_TIMING, { first: 1, every: 3, giveUp: 60000, requestTimeout: 0 });
 /** Which load of each cell the (real) state module holds; 0 when unloaded. */
 const setLoaded = (key, loadGen) => state.neurons.set(key, { key, loadGen });
@@ -295,6 +296,10 @@ function resetServer(options = {}) {
     emptyMesh: options.emptyMesh ?? null,      // (query) => true: the build comes back with no faces
     open: 0,               // jobs started and not yet answered done, failed or cancelled
     maxOpen: 0,            // the most there ever were at once
+    // A copy of the cell under another registration (POST /api/neurons): what was asked, and
+    // whether the correction it asks for is applied.
+    copyLoads: [],
+    failCorrection: options.failCorrection ?? false,
   };
 }
 const reply = (body, status = 200) => ({
@@ -304,7 +309,8 @@ globalThis.fetch = async (url, init = {}) => {
   const method = init.method || 'GET';
   const [pathname, query] = String(url).split('?');
   const body = init.body ? JSON.parse(init.body) : null;
-  server.log.push([method, pathname, body || Object.fromEntries(new URLSearchParams(query || ''))]);
+  const search = Object.fromEntries(new URLSearchParams(query || ''));
+  server.log.push([method, pathname, body || search, search]);
   // Like the real server: a cell that is not loaded has no jobs to start.
   if ((method === 'GET' && /\/mesh-job$/.test(pathname)
       || method === 'POST' && /-job$/.test(pathname)) && !state.neurons.has('i:1')) {
@@ -365,6 +371,17 @@ globalThis.fetch = async (url, init = {}) => {
     return server.failNodes ? reply({ detail: 'nodes broke' }, 500) : reply(server.nodes);
   }
   if (method === 'GET' && /closed-curves/.test(pathname)) return reply([]);
+  if (method === 'POST' && pathname === '/api/neurons') {
+    server.copyLoads.push(body);
+    const mode = body.section_corrections;
+    const missed = server.failCorrection && mode !== 'off';
+    return reply({ summary: {
+      id: body.id, source: body.source, copy_tag: `${mode}.${body.live_registration ? 1 : 0}`,
+      section_correction: { requested: mode !== 'off', applied: mode !== 'off' && !missed, mode,
+        note: missed ? 'the corrections service did not answer' : null, n_moved: 0 },
+      live_registration: { requested: body.live_registration, applied: body.live_registration, n_moved: 0 },
+    } });
+  }
   throw new Error(`unscripted request: ${method} ${url}`);
 };
 
@@ -2176,8 +2193,8 @@ test('shift: a Difference pane can draw it, and a failed annotation fetch un-tic
   view._clearContent(view.panes[3].layers[0]);
   assert.equal(view.panes[3].renderer.shifts.size, 1);
   resetServer({ failNodes: true });
-  view._annotations = null;
-  view._shift.sig = null;
+  view._annotations.clear();
+  view._shift.copies.clear();
   tickShift(view, 0);
   await until(() => !view.panes[0].shift, 'the box to be cleared');
   assert.match(statuses.at(-1)[0], /Pane 1: the annotations could not be loaded/);
@@ -4080,6 +4097,148 @@ test('the cube\'s house resets the shown pane with Sync, every pane without; the
   assert.equal(view.viewCube.view.flipZ, true);
   view.focus = 0;
   assert.equal(view.viewCube.view.flipZ, false);
+});
+
+
+// -- registrations: a layer built from another copy of the cell ----------------------------
+
+// The compared cell as the tab loaded it: the current transforms with Field + fit.
+const regRecord = { ...record, summary: { id: 1, source: 'NeitzInferiorMonkey', copy_tag: 'all.1' } };
+const meshQueries = () => meshJobs().map(([, , q]) => q);
+/** Put a layer on a registration through the select its editor shows. */
+function pickRegistration(view, i, k, tag) {
+  view.panes[i].editing = k;
+  view._fillEditor(view.panes[i]);
+  const select = view.panes[i].registrationSelect;
+  select.value = tag;
+  select.fire('change');
+}
+
+test('registration: a layer on another registration loads that copy once and builds from it, named by its tag', async () => {
+  resetServer();
+  const { view } = makeView(2);
+  setTech(view, 1, 'voxel2');
+  pickRegistration(view, 1, 0, 'curvefit.0');
+  assert.deepEqual(L(view, 1).config.registration, { live: false, corrections: 'curvefit' });
+  assert.equal(L(view, 1).chip.name.textContent, 'stored+fit · Voxel remesh', 'the chip names the registration first');
+  await view.build(regRecord);
+  await idle(view);
+  assert.deepEqual(server.copyLoads.map((b) => [b.live_registration, b.section_corrections, b.manual_moves]),
+    [[false, 'curvefit', undefined]], 'one load of the copy, without the person\'s moves');
+  const queries = meshQueries();
+  assert.equal(queries.length, 2, 'the same options on two copies are two builds');
+  assert.deepEqual(queries.map((q) => q.copy ?? null), [null, 'curvefit.0']);
+  assert.equal(L(view, 1).builtCopy, 'curvefit.0');
+  assert.equal(L(view, 0).builtCopy, null, 'the cell as loaded is the tab\'s own copy');
+  assert.equal(view.panes[1].state, 'ready');
+  // Built again with nothing changed: nothing is loaded or built.
+  await view.build(regRecord);
+  await idle(view);
+  assert.equal(server.copyLoads.length, 1);
+  assert.equal(meshJobs().length, 2);
+});
+
+test('registration: changing it makes the layer out of date; As loaded goes back to the tab\'s copy', async () => {
+  resetServer();
+  const { view } = makeView(1);
+  await view.build(regRecord);
+  await idle(view);
+  assert.equal(view.panes[0].state, 'ready');
+  pickRegistration(view, 0, 0, 'off.0');
+  assert.equal(view.panes[0].state, 'stale', 'another registration is another surface');
+  pickRegistration(view, 0, 0, '');
+  assert.equal(L(view, 0).config.registration, null);
+  assert.equal(view.panes[0].state, 'ready', 'back to what it was built from');
+  const options = view.panes[0].registrationSelect.options.map((o) => [o.value, o.textContent]);
+  assert.deepEqual(options[0], ['', 'As loaded (current + field + fit)']);
+  assert.equal(options.length, 9, 'as loaded, and every registration of a volume whose transforms are read');
+  assert.ok(options.some(([v, t]) => v === 'neighbor.1' && t === 'Current transforms + Residual field'));
+});
+
+test('registration: the error map is measured against the layer\'s own copy, and a pane\'s rings are its first layer\'s', async () => {
+  resetServer();
+  const { view } = makeView(1);
+  pickRegistration(view, 0, 0, 'off.1');
+  view.setAnnotations(view.panes[0], true);
+  tick(view, 0);
+  await view.build(regRecord);
+  await idle(view);
+  const measured = posts('mesh-deviation-job');
+  assert.equal(measured.length, 1);
+  assert.equal(measured[0][3].copy, 'off.1', 'measured on the copy it was built from');
+  const nodes = server.log.filter(([m, p]) => m === 'GET' && /\/nodes$/.test(p)).map(([, , , q]) => q.copy);
+  assert.ok(nodes.length && nodes.every((c) => c === 'off.1'), `the rings are the copy's: ${nodes}`);
+  assert.equal(view.panes[0].annotationsDrawn, 'i:1#1@off.1');
+});
+
+test('registration: a Difference across two copies holds each surface to its own (copy and copy_b)', async () => {
+  resetServer();
+  const { view } = makeView(3);
+  setTech(view, 0, 'voxel2');
+  setTech(view, 1, 'voxel2');
+  pickRegistration(view, 1, 0, 'off.0');
+  setTech(view, 2, 'diff');
+  await view.build(regRecord);
+  await idle(view);
+  const diffs = posts('mesh-diff-job');
+  assert.equal(diffs.length, 1);
+  assert.equal(diffs[0][3].copy, 'all.1', 'A on the tab\'s copy, named');
+  assert.equal(diffs[0][2].copy_b, 'off.0', 'B on its own');
+  assert.equal(view.panes[2].state, 'ready');
+});
+
+test('registration: a correction the copy did not get is said, not hidden', async () => {
+  resetServer({ failCorrection: true });
+  const { view, statuses } = makeView(1);
+  pickRegistration(view, 0, 0, 'neighbor.1');
+  await view.build(regRecord);
+  await idle(view);
+  const [last, kind] = statuses.at(-1);
+  assert.match(last, /Pane 1: Residual field was not applied \(the corrections service did not answer\), so this layer is drawn without it\.$/,
+    'the closing line keeps it');
+  assert.equal(kind, 'error');
+  assert.match(L(view, 0).chip.name.dataset.help, /Built residual field was not applied/);
+});
+
+test('registration: Registrations… copies the layer being edited once per registration, into panes or layers', async () => {
+  resetServer();
+  const { view } = makeView(4);
+  setTech(view, 0, 'tube');
+  view.focus = 0;
+  const regs = [{ live: false, corrections: 'off' }, { live: true, corrections: 'off' },
+    { live: true, corrections: 'curvefit' }, { live: true, corrections: 'all' }, { live: false, corrections: 'all' }];
+  const done = view.sweepRegistrations(regs, { target: 'panes' });
+  assert.deepEqual(done, { panes: 5, layers: 1 });
+  assert.equal(view.panes.length, 5);
+  assert.deepEqual(view.panes.map((p) => p.layers.length), [1, 1, 1, 1, 1]);
+  assert.deepEqual(view.panes.map((p) => p.layers[0].config.tech), ['tube', 'tube', 'tube', 'tube', 'tube']);
+  assert.deepEqual(view.panes.map((p) => registrationTagOf(p.layers[0].config.registration)),
+    ['off.0', 'off.1', 'curvefit.1', 'all.1', 'all.0']);
+  assert.ok(view.panes.every((p) => p.layers[0].config.color === view.panes[0].layers[0].config.color),
+    'one layer each, in the first color');
+  // As layers of one pane: four at most, in the palette's colors.
+  const layered = view.sweepRegistrations(regs.slice(0, 3), { target: 'layers' });
+  assert.deepEqual(layered, { panes: 1, layers: 3 });
+  assert.deepEqual(view.panes[0].layers.map((l) => registrationTagOf(l.config.registration)), ['off.0', 'off.1', 'curvefit.1']);
+  assert.equal(new Set(view.panes[0].layers.map((l) => l.config.color)).size, 3);
+  assert.deepEqual(view.panes[0].layers.map((l) => l.config.opacity), [1, 0.45, 0.45]);
+  assert.ok(view.sweepRegistrations(regs, { target: 'layers' }).problem, 'five do not fit in a pane');
+  await view.build(regRecord);
+  await idle(view);
+  assert.equal(server.copyLoads.length, 5, 'one load per registration, shared by the panes and layers that ask');
+});
+
+test('registration: the report names each rendering\'s copy and its registration in words', async () => {
+  resetServer();
+  const { view } = makeView(2);
+  setTech(view, 1, 'voxel2');
+  pickRegistration(view, 1, 0, 'off.0');
+  await view.build(regRecord);
+  await idle(view);
+  view.reportCamera = () => null;   // the stub renderer has no camera to read
+  const { renderings } = view.reportSources();
+  assert.deepEqual(renderings.map((r) => [r.copy, r.registration]),
+    [['all.1', 'Current transforms + Field + fit'], ['off.0', 'Stored positions, no correction']]);
 });
 
 // -- run -------------------------------------------------------------------

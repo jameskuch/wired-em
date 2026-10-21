@@ -41,6 +41,7 @@ import { ConflictPanel } from './conflictpanel.js';
 import { Renderer3D } from './render3d.js';
 import { CompareView } from './compare.js';
 import { ReportDialog } from './reportdialog.js';
+import { RegistrationDialog } from './registrationdialog.js';
 import { DisplayPanel } from './display.js';
 import { ViewCube } from './viewcube.js';
 import {
@@ -1322,6 +1323,13 @@ function bindEvents() {
     volumeName,
   });
   $('compare-report').addEventListener('click', () => reportDialog.open());
+  // The same rendering under several registrations (registrationdialog.js): set up, then Compare.
+  const registrationDialog = new RegistrationDialog($('compare-registrations-dialog'), {
+    compare,
+    onSetUp: () => { $('compare-panes').value = String(compare.panes.length); },
+    onCompare: () => { if (!compare.running) $('compare-build').click(); },
+  });
+  $('compare-registrations').addEventListener('click', () => registrationDialog.open());
 
   $('show-axes').addEventListener('change', (e) => {
     renderer.setAxesVisible(e.target.checked);

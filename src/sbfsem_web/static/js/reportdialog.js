@@ -15,7 +15,7 @@ import { formatElapsed } from './jobcard.js';
 import { stageText } from './loadprogress.js';
 import {
   REPORT_VIEWS, DEFAULT_VIEWS, PAIR_PICKS, MAX_RENDERINGS, pairKey, pickPairs, defaultPairs,
-  settingsApart, estimatePages, estimateSeconds, durationText, createdText, reportBody,
+  settingsApart, estimatePages, estimateSeconds, durationText, createdText, reportBody, copiesOf,
 } from './comparereport.js';
 
 const STORE_KEY = 'sbfsem:compare-report';
@@ -228,6 +228,8 @@ export class ReportDialog {
     const tbody = el('tbody');
     const all = this.sources.renderings;
     const builtAll = all.filter((r) => r.built);
+    // Built from several registrations of the cell: each row says which.
+    const registrations = copiesOf(builtAll) > 1;
     for (const r of all) {
       const row = el('tr', r.built ? '' : 'rep-off');
       const pick = box(this.chosen.has(r.ref), (on) => {
@@ -253,6 +255,7 @@ export class ReportDialog {
           : el('td', k === 5 ? 'num' : k === 6 ? 'center' : '');
         if (cell instanceof HTMLElement && cell.tagName !== 'TD') td.append(cell);
         else if (!(cell instanceof HTMLElement)) td.textContent = String(cell);
+        if (k === 3 && registrations && r.registration) td.append(el('span', 'rep-reg', r.registration));
         if (k === 4 && r.stale) {
           td.append(el('span', 'rep-stale', ' · changed since built: measured as built'));
         }
@@ -434,7 +437,7 @@ export class ReportDialog {
     const deviations = held.filter((r) => this.deviations.has(r.ref)).map((r) => r.ref);
     const pages = estimatePages({
       n: held.length, pairs: pairs.length, deviations: deviations.length,
-      panes: this.sources.panes.length, addendum: this.prefs.addendum,
+      panes: this.sources.panes.length, copies: copiesOf(held), addendum: this.prefs.addendum,
     });
     const seconds = estimateSeconds({
       renderings: held, deviations, pairs, views: this.prefs.views.length, sign: this.prefs.sign, pages,

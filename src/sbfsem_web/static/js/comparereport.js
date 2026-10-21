@@ -48,12 +48,28 @@ export const PAIR_PICKS = Object.freeze([
   { id: 'firsts', label: 'Panes',
     help: 'The first layer of every pane against the first of every other: the panes as they compare at a glance.' },
   { id: 'within', label: 'Within panes', help: 'The layers of each pane against each other.' },
+  { id: 'registration', label: 'Across registrations',
+    help: 'The pairs whose two renderings have the same technique and settings, built from different '
+      + 'registrations of the cell (Registrations… or a layer’s Registration): what each registration does '
+      + 'to the surface.' },
   { id: 'screen', label: 'Differences on screen',
     help: 'The pairs the Difference panes show (each pane’s first layers).' },
 ]);
 
 /** The technique a set of options is, as the pane pickers name it ("custom" for none). */
 export const techniqueOf = (options) => matchPreset(options)?.id ?? 'custom';
+
+/** Two renderings built with the same options (the snapshot rule: their measured subset). */
+function sameOptions(a, b) {
+  const x = normalizeRender(a);
+  const y = normalizeRender(b);
+  return RENDER_FIELDS.every((f) => f.scope !== 'geometry' || x[f.key] === y[f.key]);
+}
+
+/** How many copies of the cell (registrations) the chosen renderings are built from. */
+export function copiesOf(renderings) {
+  return new Set(renderings.map((r) => r.copy ?? null)).size;
+}
 
 /** Every pair of `refs`, in order. */
 export function allPairs(refs) {
@@ -89,6 +105,9 @@ export function pickPairs(renderings, chosen, pick, differences = []) {
       return allPairs([...firsts.values()]);
     }
     case 'within': return every.filter((k) => both(k, (a, b) => a.pane === b.pane));
+    case 'registration':
+      return every.filter((k) => both(k, (a, b) => (a.copy ?? null) !== (b.copy ?? null)
+        && sameOptions(a.options, b.options)));
     case 'screen':
       return differences
         .filter(([a, b]) => a !== b && chosen.has(a) && chosen.has(b))
@@ -141,10 +160,14 @@ export function settingsApart(rendering, renderings, { limit = 3 } = {}) {
   const tech = techniqueOf(mine);
   const live = RENDER_FIELDS.filter((f) => f.scope === 'geometry' && !state[f.key].hidden
     && !state[f.key].inert && !['method', 'pathway'].includes(f.key));
-  const others = renderings.filter((r) => r.ref !== rendering.ref && techniqueOf(r.options) === tech)
-    .map((r) => normalizeRender(r.options));
+  const peers = renderings.filter((r) => r.ref !== rendering.ref && techniqueOf(r.options) === tech);
+  const others = peers.map((r) => normalizeRender(r.options));
   const parts = [];
   if (others.length) {
+    // Built from another registration of the cell than one of its peers: that comes first.
+    if (peers.some((r) => (r.copy ?? null) !== (rendering.copy ?? null)) && rendering.registration) {
+      parts.push(rendering.registration);
+    }
     for (const f of live) {
       if (others.some((o) => o[f.key] !== mine[f.key])) parts.push(`${f.label} ${valueText(f, mine[f.key])}`);
     }
@@ -162,12 +185,14 @@ export function settingsApart(rendering, renderings, { limit = 3 } = {}) {
 
 /**
  * How many pages the report will have: the server's plan (compare_pdf.Plan) for
- * `n` renderings, `pairs` pairs, `deviations` renderings held to the annotations
- * and `panes` panes, with or without the addendum.
+ * `n` renderings, `pairs` pairs, `deviations` renderings held to the annotations,
+ * `panes` panes and `copies` registrations of the cell among the renderings (a page
+ * comparing them when there are two or more), with or without the addendum.
  */
-export function estimatePages({ n, pairs, deviations, panes, addendum = true }) {
-  const summaryItems = 1 + (pairs ? 2 : 0) + (deviations ? 1 : 0) + 1;
-  const summaryPages = Math.max(1, Math.ceil(n / 24)) + (pairs ? 1 + Math.ceil(pairs / 40) : 0)
+export function estimatePages({ n, pairs, deviations, panes, copies = 1, addendum = true }) {
+  const registrations = copies > 1 ? 1 : 0;
+  const summaryItems = 1 + registrations + (pairs ? 2 : 0) + (deviations ? 1 : 0) + 1;
+  const summaryPages = Math.max(1, Math.ceil(n / 24)) + registrations + (pairs ? 1 + Math.ceil(pairs / 40) : 0)
     + (deviations ? 1 : 0) + 1;
   const bodyItems = panes + n + deviations + pairs;
   const bodyPages = panes + n + deviations + 3 * pairs;
@@ -247,10 +272,16 @@ export function reportBody(sources, {
   const camera = sources.camera ?? null;
   const viewList = REPORT_VIEWS.map((v) => v.key).filter((k) => views.includes(k) && (k !== 'view' || camera));
   return {
-    renderings: held.map((r) => ({
-      options: r.options, label: r.label, color: r.color, pane: r.pane, layer: r.layer,
-      deviation: deviations.has(r.ref), stale: !!r.stale,
-    })),
+    renderings: held.map((r) => {
+      const out = {
+        options: r.options, label: r.label, color: r.color, pane: r.pane, layer: r.layer,
+        deviation: deviations.has(r.ref), stale: !!r.stale,
+      };
+      // The copy of the cell it was built from (a registration's tag), and in words.
+      if (r.copy) out.copy_tag = r.copy;
+      if (r.registration) out.registration = r.registration;
+      return out;
+    }),
     pairs: pairList,
     panes: sources.panes.map((p) => {
       const difference = p.kind === 'difference' && p.a && p.b && index.has(p.a) && index.has(p.b)

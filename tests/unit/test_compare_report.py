@@ -273,6 +273,65 @@ def test_a_report_asked_to_stop_stops_between_its_steps():
         write_compare_report(_spec(), source)
 
 
+class _Copies(_Spheres):
+    """Two registrations of the made-up cell: the second's annotations sit 0.5 µm off in X."""
+
+    def __init__(self, meshes, copies):
+        super().__init__(meshes)
+        self.copies = copies
+        self.asked: list[tuple[str, int]] = []
+
+    def annotations_of(self, i):
+        self.asked.append(("annotations", i))
+        shift = np.array([0.5, 0.0, 0.0]) if self.copies[i] == "all.1" else np.zeros(3)
+        return self.centers + shift, self.radii, []
+
+    def annotation_names_of(self, i):
+        self.asked.append(("names", i))
+        return self.annotation_names()
+
+    def registration_facts(self):
+        seen: dict[str, dict] = {}
+        for i, tag in enumerate(self.copies):
+            entry = seen.setdefault(tag, {"copy": tag, "renderings": [], "pull_ratio": 4.0,
+                                          "correction": {"requested": tag != "off.0", "applied": tag != "off.0"},
+                                          "pairs": {"correction": {"n_moved": 3, "median_um": 0.1, "p95_um": 0.4,
+                                                                   "max_um": 0.5}},
+                                          "links": {"n_links": 2, "stages": {"corrected": {
+                                              "median_um": 0.2, "p90_um": 0.6, "p99_um": 0.9, "max_um": 1.0,
+                                              "n_over_1p5_um": 0}}},
+                                          "coherent_sections": 1, "pulls": 0 if tag != "off.0" else None})
+            entry["renderings"].append(i)
+        return list(seen.values())
+
+
+def test_a_report_across_registrations_has_their_page_and_holds_each_to_its_own():
+    copies = ["off.0", "all.1", "all.1"]
+    words = {"off.0": "Stored positions, no correction", "all.1": "Current transforms + Field + fit"}
+    renderings = tuple(ReportRendering("Voxel remesh", "#ffd400", k + 1, 1, {"method": "cylinder", "pathway": "voxel2"},
+                                       copy=tag, registration=words[tag]) for k, tag in enumerate(copies))
+    spec = ReportSpec(cell=943, source="i", volume="Inferior Monkey", renderings=renderings,
+                      pairs=((0, 1),), views=(NAMED_VIEWS["xy1"],), z_scale_nm=70.0, copy="off.0", addendum=False)
+    assert spec.copies == ("off.0", "all.1")
+    plan = Plan(spec)
+    assert plan.page("summary-registrations") == plan.page("summary-renderings") + 1
+    source = _Copies([_sphere(5.0, 3), _sphere(5.2, 3, (0.5, 0, 0)), _sphere(5.2, 3, (0.5, 0, 0))], copies)
+    report = write_compare_report(spec, source)
+    reader = PdfReader(io.BytesIO(report.pdf))
+    assert len(reader.pages) == plan.total == report.pages
+    page = reader.pages[plan.page("summary-registrations") - 1].extract_text()
+    assert "Summary: the registrations" in page and "Current transforms + Field + fit" in page
+    assert "Stored positions, no correction" in page and "R2, R3" in page
+    # The rendering on the other registration is held to that copy's annotations, once per copy;
+    # the report's own copy uses the annotations it was given.
+    assert ("names", 1) in source.asked and ("names", 0) not in source.asked
+    assert [k for kind, k in source.asked if kind == "annotations"] == [1]
+    cover = reader.pages[0].extract_text()
+    assert "2 registrations of the cell" in cover
+    pair = reader.pages[plan.page("pair", (0, 1)) - 1].extract_text()
+    assert "stored" in pair and "current + field + fit" in pair
+
+
 def test_a_spec_refuses_what_it_cannot_draw():
     with pytest.raises(ValueError, match="pair"):
         _spec(pairs=((0, 0),))
@@ -358,6 +417,50 @@ def test_a_report_without_a_viewpoint_it_can_draw_is_refused(web):
                        json=_body(renderings=[])).status_code == 422
 
 
+def test_each_rendering_is_built_and_measured_on_its_own_copy(web, request, monkeypatch):
+    """Two copies of 943 held side by side (as Render compare's layers on two registrations
+    are): the report builds and measures each rendering on the copy it names, and a pair
+    across them holds each surface to its own (the difference job's copy_b)."""
+    client, app = web
+    svc = app.state.service
+    fixture = Path(request.path).parents[1] / "fixtures" / "i943.json"
+    moved = read_legacy_json(fixture)
+    moved.nodes["Xum"] += 2.0
+    moved.registration_status = {"requested": True, "applied": True}
+    moved.live_registration = {"token": "moved-2um"}
+    svc.add_neuron(moved)
+    measured, differences = [], []
+    real_map, real_diff = svc._cached_deviation_map, svc._cached_difference
+
+    def deviation_map(neuron, options, mesh):
+        measured.append(neuron.copy_tag)
+        return real_map(neuron, options, mesh)
+
+    def difference(neuron, *args, neuron_b=None, **kw):
+        differences.append((neuron.copy_tag, None if neuron_b is None else neuron_b.copy_tag))
+        return real_diff(neuron, *args, neuron_b=neuron_b, **kw)
+
+    monkeypatch.setattr(svc, "_cached_deviation_map", deviation_map)
+    monkeypatch.setattr(svc, "_cached_difference", difference)
+    body = _body()
+    body["renderings"][1].update(options=QUICK, deviation=True, copy_tag="off.1",
+                                 registration="Current transforms, no correction")
+    started = client.post("/api/neurons/i/943/compare-report-job?copy=off.0", json=body)
+    assert started.status_code == 200, started.text
+    head = started.json()
+    job = _poll(client, head["job_id"])
+    assert job["status"] == "done", job
+    assert job["result"]["pages"] == head["pages"]
+    assert set(measured) == {"off.0", "off.1"}, measured
+    assert differences == [("off.0", "off.1")]
+    pdf = client.get(f"/api/compare-reports/{head['job_id']}").content
+    text = "".join(p.extract_text() for p in PdfReader(io.BytesIO(pdf)).pages)
+    assert "Summary: the registrations" in text and "Current transforms, no correction" in text
+    # A copy the server does not hold is refused, as a difference's copy_b is.
+    body["renderings"][1]["copy_tag"] = "curvefit.1"
+    assert client.post("/api/neurons/i/943/compare-report-job?copy=off.0", json=body).status_code == 404
+
+
 def test_a_pane_picture_is_taken_only_when_it_is_a_picture(web):
     import base64
 
@@ -378,10 +481,10 @@ def test_stop_ends_a_running_report_and_nothing_else(web, monkeypatch):
     release = threading.Event()
     real = svc.compare_report
 
-    def slow(neuron, spec):
+    def slow(neuron, spec, copies=None):
         # Running, at a step that can stop, until the test lets go.
         release.wait(10)
-        return real(neuron, spec)
+        return real(neuron, spec, copies)
 
     monkeypatch.setattr(svc, "compare_report", slow)
     job_id = client.post("/api/neurons/i/943/compare-report-job", json=_body()).json()["job_id"]

@@ -122,6 +122,12 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   keeps to its column, wrapping the cell and its µm and the Location ID and its volume onto lines of their own, the
   marker table scrolls in its own box, and the move panel fits under it; at 1440 px the readout is unchanged, the
   hint beside it, each field on one line and the table whole.
+* ``registrations`` -- Render compare across registrations (2026-10-20): Registrations… offers the 8 registrations of
+  Inferior Monkey c1178 with 6 ticked and the tab's own marked, refuses six as the layers of one pane, fits a 480 px
+  window in both themes, and sets up three panes (stored, current transforms, the tab's own) of pane 1's Original;
+  Compare builds each from its own copy, named on its chip and in its build's request; an error map is measured
+  against its own copy; the report dialog says each rendering's registration, and "Across registrations" ticks their
+  three pairs.
 """
 
 # ruff: noqa: UP031
@@ -2729,6 +2735,96 @@ def narrow(c: Chrome, r: Report, ctx):
     js(c, "document.querySelector('#move-panel .mv-close').click(); true")
 
 
+# -- registrations ---------------------------------------------------------------------
+
+REG_DIALOG = "document.getElementById('compare-registrations-dialog')"
+
+
+def registrations(c: Chrome, r: Report, ctx):
+    """Render compare across registrations (2026-10-20): Registrations… sets up the same rendering of
+    c1178 under three registrations, one pane each; Compare builds each from its own copy of the cell."""
+    r.start('registrations: the same rendering of a cell under several registrations, side by side')
+    boot(c, ctx.url)
+    _dismiss_offer(c)
+    set_control(c, 'pathway', 'original')
+    load(c, 1178, source='NeitzInferiorMonkey', mesh=False)
+    _compare_tab(c, 4)
+    tab = js(c, "[...window.sbfsem.state.neurons.values()].at(-1).summary.copy_tag")
+    # The layer a sweep copies: pane 1's, as the Original (quick to build on c1178).
+    js(c, f"(() => {{ const v = {COMPARE}; v.focus = 0; v._techniquePicked(v.panes[0].layers[0], 'original'); }})()")
+    _click_js(c, "document.getElementById('compare-registrations')")
+    c.settle(3)
+    grid = js(c, f"""(() => {{ const d = {REG_DIALOG}; const boxes = [...d.querySelectorAll('.reg-grid input')];
+        return {{ open: d.open, n: boxes.length, ticked: boxes.filter((b) => b.checked).map((b) => b.dataset.tag),
+                  loaded: d.querySelector('.reg-loaded')?.closest('td')?.querySelector('input')?.dataset.tag ?? null,
+                  status: d.querySelector('.reg-status').textContent,
+                  intro: d.querySelector('.reg-intro').textContent }}; }})()""")
+    r.check('Registrations… opens a grid of the 8 registrations, 6 ticked to start with, the tab\'s own marked',
+            grid['open'] and grid['n'] == 8 and len(grid['ticked']) == 6 and grid['loaded'] == tab
+            and grid['status'] == '6 panes, one layer each.' and 'Original (MATLAB)' in grid['intro'], grid)
+    # Too many for the layers of one pane: said, and the buttons wait.
+    js(c, f"""[...{REG_DIALOG}.querySelectorAll('input[name=reg-target]')].find((i) => i.value === 'layers').click()""")
+    c.settle(1)
+    full = js(c, f"""({{ status: {REG_DIALOG}.querySelector('.reg-status').textContent,
+        disabled: {REG_DIALOG}.querySelector('.dlg-actions .primary').disabled }})""")
+    r.check('six do not fit in one pane: it says so and will not set them up',
+            'holds 4 layers: untick 2' in full['status'] and full['disabled'], full)
+    js(c, f"""[...{REG_DIALOG}.querySelectorAll('input[name=reg-target]')].find((i) => i.value === 'panes').click()""")
+    want = ['off.0', 'off.1', tab]
+    js(c, """(() => { const want = new Set(%s);
+        for (const b of %s.querySelectorAll('.reg-grid input')) if (b.checked !== want.has(b.dataset.tag)) b.click(); })()"""
+       % (json.dumps(want), REG_DIALOG))
+    c.settle(1)
+    # The dialog fits a narrow window in both themes.
+    fits = []
+    for width, scheme in ((480, 'light'), (480, 'dark'), (1440, 'light')):
+        c.emulate('mac', width, 900, scheme=scheme)
+        c.settle(2)
+        fits.append(js(c, f"""(() => {{ const d = {REG_DIALOG}.getBoundingClientRect();
+            const body = {REG_DIALOG}.querySelector('.dlg-body');
+            return [{width}, '{scheme}', Math.round(d.left), Math.round(d.right), window.innerWidth,
+                    Math.max({REG_DIALOG}.scrollWidth - {REG_DIALOG}.clientWidth,
+                             body.scrollWidth - body.clientWidth)]; }})()"""))
+    c.emulate('mac', 1440, 900)
+    r.check('the dialog sits inside a 480 px window in both themes, and scrolls nothing sideways',
+            all(f[2] >= 0 and f[3] <= f[4] and f[5] <= 0 for f in fits), fits)
+    js(c, f"[...{REG_DIALOG}.querySelectorAll('.dlg-actions button')].find((b) => b.textContent === 'Set up and compare').click()")
+    c.settle(2)
+    r.check('Set up and compare closes it and sets the pane count', not js(c, f'{REG_DIALOG}.open')
+            and js(c, "document.getElementById('compare-panes').value") == '3')
+    built = c.wait_for(f'!{COMPARE}.running && {COMPARE}.panes.every((p) => p.state === "ready")', 300)
+    panes = js(c, f"""{COMPARE}.panes.map((p) => {{ const l = p.layers[0];
+        return {{ copy: l.builtCopy, tech: l.config.tech, chip: l.chip.name.textContent, missed: l.missed }}; }})""")
+    r.check('Compare builds each pane from its own copy of the cell, named on its chip',
+            built and [p['copy'] for p in panes] == want and all(p['tech'] == 'original' for p in panes)
+            and panes[0]['chip'].startswith('stored · ') and panes[1]['chip'].startswith('current · '), panes)
+    jobs = js(c, """performance.getEntriesByType('resource').map((e) => e.name)
+        .filter((n) => /\\/mesh-job\\?/.test(n)).map((n) => new URL(n).searchParams.get('copy'))""")
+    r.check('each build asked for its copy by name', set(want) <= set(jobs or []), jobs)
+    status = js(c, "document.getElementById('compare-status').textContent")
+    r.check('the status line names a registration a copy did not get, if one did not',
+            all(not p['missed'] for p in panes) or 'was not applied' in (status or ''), [status, panes])
+    # The error map of the stored-positions pane is measured against that copy's annotations.
+    js(c, f"(() => {{ const v = {COMPARE}; const p = v.panes[0]; v.focus = 0; v._fillEditor(p); p.errorBox.click(); }})()")
+    measured = c.wait_for(f'!!{COMPARE}.panes[0].layers[0].deviation', 300)
+    asked = js(c, """performance.getEntriesByType('resource').map((e) => e.name)
+        .filter((n) => /mesh-deviation-job/.test(n)).map((n) => new URL(n).searchParams.get('copy'))""")
+    r.check('an error map is measured against its own copy', measured and asked == ['off.0'], asked)
+    # The report lists each rendering's registration and picks the pairs that differ in it alone.
+    _click_js(c, "document.getElementById('compare-report')")
+    c.settle(3)
+    rows = js(c, f"[...{REPORT}.querySelectorAll('.rep-table tbody tr .rep-reg')].map((t) => t.textContent)")
+    r.check('the report dialog says each rendering\'s registration', rows == [
+        'Stored positions, no correction', 'Current transforms, no correction', 'Current transforms + Field + fit'],
+        rows)
+    _report_button(c, 'None', section=1)
+    _report_button(c, 'Across registrations', section=1)
+    count = js(c, f"{REPORT}.querySelectorAll('.rep-count')[1].textContent")
+    r.check('"Across registrations" ticks the three pairs of one rendering on two registrations',
+            count == '3 of 3 pairs', count)
+    js(c, f"{REPORT}.close()")
+
+
 # -- viewcube ---------------------------------------------------------------------------
 
 def viewcube(c: Chrome, r: Report, ctx):
@@ -3142,6 +3238,7 @@ SECTIONS = {
     'visualizations': visualizations,
     'locate': locate,
     'narrow': narrow,
+    'registrations': registrations,
     'viewcube': viewcube,
     'comparecube': comparecube,
     'comparereport': comparereport,

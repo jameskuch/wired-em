@@ -497,8 +497,9 @@ def _a9(page: Page, y: float, spec: Any) -> None:
          "changed after it was built is marked, and measured as built."),
         ("What the annotations say.", "The annotations are the ground truth only as far as they "
          "go: between sections a surface is an interpolation, and no rendering can score below "
-         "the sampling floor. A cell's annotations are read in the registration its copy names "
-         "(the cover says which); another registration moves them."),
+         "the sampling floor. A cell's annotations are read in the registration of the copy each "
+         "rendering was built from (the cover says which); another registration moves them, so two "
+         "renderings of different registrations are each held to their own."),
         ("Places.", "A place is the center of the surface within 2 µm that carries the most of "
          "area × distance there, no two within 2 µm of each other; its Z is also given as a "
          "section of the volume. The nearest annotation's Location ID is that volume's."),

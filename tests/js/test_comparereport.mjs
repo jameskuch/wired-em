@@ -92,6 +92,32 @@ test('the page count is the server’s plan', () => {
   assert.equal(cr.estimatePages({ n: 2, pairs: 1, deviations: 1, panes: 3, addendum: false }), 16);
 });
 
+test('renderings of several registrations: the request names each copy, a pick finds the pairs that differ in it alone', () => {
+  const regs = [
+    rendering('A', 1, 1, V2, { copy: 'off.0', registration: 'Stored positions, no correction' }),
+    rendering('B', 2, 1, V2, { copy: 'all.1', registration: 'Current transforms + Field + fit' }),
+    rendering('C', 3, 1, { ...V2, voxel2_faces: 100000 }, { copy: 'curvefit.1', registration: 'Current transforms + Curve fit' }),
+    rendering('D', 4, 1, V2, { copy: 'all.1', registration: 'Current transforms + Field + fit' }),
+  ];
+  const all = new Set(['A', 'B', 'C', 'D']);
+  assert.deepEqual(cr.pickPairs(regs, all, 'registration'), ['A|B', 'A|D'],
+    'same options on another copy; C has other options, B and D one copy');
+  assert.equal(cr.copiesOf(regs), 3);
+  assert.deepEqual(cr.settingsApart(regs[0], regs), ['Stored positions, no correction', 'Face cap 400,000']);
+  assert.deepEqual(cr.settingsApart(regs[0], [regs[0], regs[1]]), ['Stored positions, no correction'],
+    'the registration alone sets it apart from B');
+  assert.deepEqual(cr.settingsApart(regs[2], regs), ['Current transforms + Curve fit', 'Face cap 100,000']);
+  assert.deepEqual(cr.settingsApart(regs[1], [regs[1], regs[3]]), ['same settings as another layer']);
+  const body = cr.reportBody({ renderings: regs, panes: [], camera: null },
+    { chosen: all, deviations: new Set(), pairs: new Set() });
+  assert.deepEqual(body.renderings.map((r) => [r.copy_tag, r.registration]), regs.map((r) => [r.copy, r.registration]),
+    'as the server names it: a load summary\'s copy_tag');
+  // The plan's page comparing the registrations (two or more of them): one more summary page.
+  const base = { n: 4, pairs: 0, deviations: 0, panes: 4, addendum: false };
+  assert.equal(cr.estimatePages({ ...base, copies: 3 }) - cr.estimatePages({ ...base, copies: 1 }), 1);
+  assert.equal(cr.estimatePages({ ...base, copies: 1 }), cr.estimatePages(base));
+});
+
 test('the time grows with the pairs and the exact sign costs more', () => {
   const pairs = cr.pickPairs(R, chosen, 'all');
   const base = { renderings: R.slice(0, 4), deviations: ['L1'], views: 3, pages: 40 };

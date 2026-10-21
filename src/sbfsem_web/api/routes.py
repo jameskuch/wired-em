@@ -1414,6 +1414,11 @@ class ReportRenderingBody(BaseModel):
     deviation: bool = True
     #: Its panel was changed after it was built (the report says so).
     stale: bool = False
+    #: The copy of the cell it was built from (a load summary's ``copy_tag``), when it
+    #: is not the request's (``?copy=``): a layer on another registration.
+    copy_tag: str | None = Field(default=None, min_length=1, max_length=64)
+    #: That registration in words, as the page says it ("Current transforms + Field + fit").
+    registration: str = Field(default="", max_length=120)
 
 
 class ReportPaneBody(BaseModel):
@@ -1478,17 +1483,35 @@ def _picture_from_data_url(value: str | None) -> bytes | None:
     return None
 
 
-def _report_spec(neuron, src: str, body: CompareReportBody):
+def _report_copies(svc, neuron, src: str, body: CompareReportBody) -> list:
+    """The copy of the cell each rendering was built from: the request's (``?copy=``)
+    unless the rendering names another, which must be held (404 otherwise, as a
+    difference's ``copy_b``)."""
+    held: dict[str, Any] = {getattr(neuron, "copy_tag", None) or "": neuron}
+    out = []
+    for r in body.renderings:
+        tag = r.copy_tag or getattr(neuron, "copy_tag", None) or ""
+        if tag not in held:
+            with requested_copy(tag):
+                held[tag] = _neuron_or_404(svc, int(neuron.id), src)
+        out.append(held[tag])
+    return out
+
+
+def _report_spec(neuron, src: str, body: CompareReportBody, copies: list | None = None):
     """The report a request asks for, as the library takes it (400 on a request
-    that names no viewpoint it can draw, or a pair that is not two renderings)."""
+    that names no viewpoint it can draw, or a pair that is not two renderings).
+    ``copies`` are the renderings' copies of the cell (:func:`_report_copies`)."""
     from sbfsem import __version__
     from sbfsem.export.compare_pdf import ReportPane, ReportRendering, ReportSpec
     from sbfsem.geometry.raster import NAMED_VIEWS, View
 
+    copies = copies or [neuron] * len(body.renderings)
     renderings = tuple(
         ReportRendering(label=r.label, color=r.color.lower(), pane=r.pane, layer=r.layer,
-                        options=r.options.model_dump(), deviation=r.deviation, stale=r.stale)
-        for r in body.renderings)
+                        options=r.options.model_dump(), deviation=r.deviation, stale=r.stale,
+                        copy=getattr(c, "copy_tag", None), registration=r.registration)
+        for r, c in zip(body.renderings, copies, strict=True))
     views: list[View] = []
     for key in dict.fromkeys(body.views):
         if key != "view":
@@ -1541,15 +1564,18 @@ def start_compare_report_job(request: Request, source: str, neuron_id: int,
     svc = service(request)
     src = _source(source)
     neuron = _neuron_or_404(svc, neuron_id, src)
+    copies = _report_copies(svc, neuron, src, body)
     try:
-        spec = _report_spec(neuron, src, body)
+        spec = _report_spec(neuron, src, body, copies)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     weight = svc.report_weight_mb(neuron, spec)
     digest = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
-    key = ("report", src, int(neuron_id), neuron.load_serial, digest)
+    # Every copy it measures is in the key: reloading any of them is another report.
+    serials = tuple(sorted({(getattr(c, "copy_tag", None) or "", c.load_serial) for c in copies}))
+    key = ("report", src, int(neuron_id), neuron.load_serial, serials, digest)
     job = request.app.state.mesh_jobs.submit(
-        key, lambda: svc.compare_report(neuron, spec), weight_mb=weight, kind="report",
+        key, lambda: svc.compare_report(neuron, spec, copies), weight_mb=weight, kind="report",
         label=f"c{neuron_id} {src} report: {len(spec.renderings)} renderings, {len(spec.pairs)} pairs",
     )
     return {"job_id": job.id, "status": job.status, "kind": job.kind, "weight_mb": weight,
