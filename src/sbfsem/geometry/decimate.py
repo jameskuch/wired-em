@@ -18,6 +18,17 @@ so the vertices along a cut keep their exact coordinates in both chunks) and
 welds the chunks back along the cut by those coordinates.  The decimator then
 holds one chunk, not the sheet.
 
+The decimator works in a process of its own (:class:`~.quadric.Decimator`),
+because ``fast_simplification`` never shrinks its copy: in the build process
+the 285 MB it grew to for a chunk stayed after the build, and the next build
+there peaked that much higher.  The chunks are taken out of the sheet first (24
+bytes a raw triangle, against its 36) and the sheet is let go before the first
+is decimated.  c1178 at 0.042 um under a Face cap of 3.4 million, on the server:
+1,092 -> 950 MB, 1,288 -> 954 MB in a process that had made the same build
+before, and the process holds 181 MB after it, not 452 (2026-10-20).  The peak
+is now the smoothing's.  A chunk the decimator fails on is kept as it was:
+with the sheet gone it can no longer be decimated whole instead.
+
 What it must not change is how good the surface is.  A chunk's share of the
 Face cap is weighted by the sum over its edges of the initial collapse error to
 the power ``WEIGHT_ALPHA`` (the decimator's own planes, unweighted unit
@@ -65,7 +76,9 @@ import logging
 import numpy as np
 
 from ..progress import report
+from ..util.memory import trim_memory
 from .mesh import Mesh
+from .quadric import Decimator
 
 __all__ = ["BAND_FINAL_SHARE", "CHUNK_FACES", "WEIGHT_ALPHA", "decimate_in_chunks"]
 
@@ -222,10 +235,12 @@ def decimate_in_chunks(mesh: Mesh, face_count: int, *, span_um: float,
         return mesh
     if n_faces <= chunk_faces or span_um <= 0:
         return mesh.decimate(face_count / n_faces)
-    import fast_simplification
     import trimesh
 
     vertices, faces = mesh.vertices, mesh.faces
+    # What the smoothing freed goes back to the system before the cuts take their
+    # temporaries (175 MB of c1178's sheet at 0.042 um on the server).
+    trim_memory(collect=False)
     report("decimating: placing the cuts")
     chunk, n_chunks, crossing, _axis, _planes = _plan(vertices, faces, float(span_um), int(chunk_faces))
     # A vertex is on a cut when its triangles are in more than one chunk.
@@ -256,32 +271,42 @@ def decimate_in_chunks(mesh: Mesh, face_count: int, *, span_um: float,
     # are a large share of the cap they come on top of it, for a last pass.
     rest = float(face_count) if final else max(float(face_count) - bands, 0.0)
     targets = band + _fit(weight, raw - band, rest)
+    # Every chunk taken out, 24 bytes a raw triangle against the sheet's 36, and
+    # the sheet let go before the first is decimated, when the caller handed it
+    # over (passed it as the only reference, as cylinder_render does).  Taken out
+    # while the chunks are weighed, they would sit beside the weights' temporaries.
+    inputs: list[tuple[np.ndarray, np.ndarray] | None] = []
+    for i in range(n_chunks):
+        used, local = _chunk(faces, chunk == i, scratch)
+        inputs.append((vertices[used], local.astype(np.int32)))
+        del used, local
+    meta = dict(mesh.meta)
+    del chunk, on_cut, scratch, mesh, vertices, faces
+    trim_memory(collect=False)
 
     parts_v: list[np.ndarray] = []
     parts_f: list[np.ndarray] = []
     offset = 0
-    for i in range(n_chunks):
-        report("decimating", i, n_chunks)
-        used, local = _chunk(faces, chunk == i, scratch)
-        sub_v = vertices[used]
-        target = int(round(targets[i]))
-        if 4 <= target < len(local):
-            try:
-                sub_v, local = fast_simplification.simplify(
-                    sub_v, local, target_count=target, preserve_border=True)
-            except Exception as exc:  # noqa: BLE001 - same fallback as Mesh.decimate
-                log.warning("chunked decimation failed (%s); decimating the whole sheet", exc)
-                return mesh.decimate(face_count / n_faces)
-        parts_v.append(np.asarray(sub_v, dtype=float))
-        parts_f.append(np.asarray(local, dtype=np.int64) + offset)
-        offset += len(sub_v)
-        del used, local, sub_v
-    del chunk, on_cut, scratch
-    # The join is the build's peak: the sheet goes first, when the caller handed it
-    # over (passed it as the only reference, as cylinder_render does), and the
-    # chunks once stacked.
-    meta = dict(mesh.meta)
-    del mesh, vertices, faces
+    # The decimator works in a process of its own, gone before the join.
+    with Decimator() as decimator:
+        for i in range(n_chunks):
+            report("decimating", i, n_chunks)
+            item, inputs[i] = inputs[i], None
+            assert item is not None
+            sub_v, local = item
+            del item
+            target = int(round(targets[i]))
+            if 4 <= target < len(local):
+                try:
+                    sub_v, local = decimator.simplify(sub_v, local, target, preserve_border=True)
+                except Exception as exc:  # noqa: BLE001 - as Mesh.decimate: kept as it is
+                    # The sheet is gone, so there is no decimating it whole instead.
+                    log.warning("decimating chunk %d of %d failed (%s); it is kept as it was",
+                                i + 1, n_chunks, exc)
+            parts_v.append(np.asarray(sub_v, dtype=float))
+            parts_f.append(np.asarray(local, dtype=np.int64) + offset)
+            offset += len(sub_v)
+            del local, sub_v
     report("decimating", n_chunks, n_chunks)
     # The vertices along a cut came out of both chunks with the same coordinates;
     # trimesh's processing merges them, as it does the global pass's output.
@@ -295,7 +320,8 @@ def decimate_in_chunks(mesh: Mesh, face_count: int, *, span_um: float,
     del joined
     if final and len(out_f) > face_count:
         report("decimating: the cuts")
-        out_v, out_f = fast_simplification.simplify(out_v, out_f, target_count=int(face_count))
+        with Decimator() as decimator:
+            out_v, out_f = decimator.simplify(out_v, out_f, int(face_count))
         processed = trimesh.Trimesh(vertices=out_v, faces=out_f)
         out_v, out_f = np.asarray(processed.vertices), np.asarray(processed.faces)
     log.info("decimated %s triangles to %s in %d chunks (%d straddling the cuts, %d kept along them%s)",

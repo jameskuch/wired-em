@@ -408,3 +408,10 @@ written by pydantic's encoder. A number under 1e-4 whose exponent has one
 digit is then spelled another way (`0.00001` where 2.17.7 wrote `1e-05`,
 `1e-6` for `1e-06`); any JSON parser reads the same value. Every other byte is
 as before.
+
+Since 2.19.7 a finished error map or difference (`mesh-deviation-job`,
+`mesh-diff-job`) is held as the JSON text its poll sends, written once from the
+measurement's arrays when the job ends, the same bytes as before. On production
+the error map of a 3.54 M-vertex surface (Inferior c1178) holds 48 MB of text
+in the web process where its lists held 277 MB, and its final poll takes 0.02 s
+where it took 0.49 s.

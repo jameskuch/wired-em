@@ -538,10 +538,16 @@ class Mesh:
             return self
         import trimesh
 
-        tm = trimesh.Trimesh(vertices=self.vertices, faces=self.faces, process=False)
+        from .quadric import Decimator
+
         target = max(4, int(round(len(self.faces) * fraction)))
         try:
-            reduced = tm.simplify_quadric_decimation(face_count=target)
+            # trimesh's simplify_quadric_decimation, with the decimator in a
+            # process of its own (quadric.Decimator): the same call, the same
+            # processing of what it returns.
+            with Decimator() as decimator:
+                vertices, faces = decimator.simplify(self.vertices, self.faces, target)
+            reduced = trimesh.Trimesh(vertices=vertices, faces=faces)
         except Exception as exc:  # noqa: BLE001 - backend may be absent or fail
             # Returning the mesh unreduced is the only sensible fallback, but it
             # must not be silent: the previous version swallowed a missing

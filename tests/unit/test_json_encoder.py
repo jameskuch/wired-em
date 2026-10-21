@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.datastructures import DefaultPlaceholder
 from fastapi.responses import HTMLResponse
 from fastapi.testclient import TestClient
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 import sbfsem_web.json_response as jr
 from sbfsem.io.legacy_json import read_legacy_json
@@ -144,3 +144,47 @@ def test_a_value_pydantic_cannot_write_takes_the_old_way():
     assert _json_bytes(value) == b'{"where":"/srv/a","m":{"x":1.0,"ys":[null]}}'
     with pytest.raises(ValueError):  # what neither way can write stays an error
         _json_bytes({"n": np.int64(3)})
+
+
+# -- json_float_list: a list of rounded floats written without a float object per number ----------
+
+
+_LISTS = TypeAdapter(list[float])
+
+
+@pytest.mark.parametrize("decimals", [1, 2, 3, 4])
+def test_a_rounded_list_is_written_as_pydantic_writes_it(decimals):
+    """Distances, signed distances, coordinates out to 1e10, the integers and every value of a
+    fine sweep, rounded by NumPy and by Python: the bytes are pydantic's, -0.0 included."""
+    rng = np.random.default_rng(decimals)
+    sweep = np.arange(-30_000, 30_000) / 10 ** decimals
+    for values in (rng.exponential(0.2, 200_000), rng.normal(0, 3, 200_000), rng.normal(0, 1e6, 20_000),
+                   rng.uniform(-1e10, 1e10, 20_000), np.arange(-50.0, 50.0), sweep,
+                   np.array([0.0, -0.0, 10.0 ** -decimals, -(10.0 ** -decimals), 99.5, 1e9]),
+                   # Either side of 10,000, where a whole part stops coming from the tables.
+                   np.array([9999.9999, 9999.0, -9999.5, 0.0, -0.0, 7.0]), np.array([10000.0, 9999.9999, -0.0])):
+        rounded = np.round(values, decimals)
+        assert jr.json_float_list(rounded, decimals) == _LISTS.dump_json(rounded.tolist())
+        by_python = np.array([round(v, decimals) for v in values[:20_000].tolist()])
+        assert jr.json_float_list(by_python, decimals) == _LISTS.dump_json(by_python.tolist())
+
+
+def test_a_long_list_is_the_same_across_its_chunks(monkeypatch):
+    values = np.round(np.random.default_rng(5).normal(0, 2, 10_001), 4)
+    whole = jr.json_float_list(values, 4)
+    monkeypatch.setattr(jr, "FLOAT_LIST_CHUNK", 7)
+    assert jr.json_float_list(values, 4) == whole == _LISTS.dump_json(values.tolist())
+    assert jr.json_float_list(np.array([]), 4) == b"[]"
+    assert jr.json_float_list(np.array([[0.5, -0.25]]), 4) == b"[0.5,-0.25]", "flat, as the lists are"
+
+
+def test_a_list_it_cannot_vouch_for_is_none():
+    """Off the step (unrounded, or float32 rounded and widened), non-finite (pydantic's
+    null), or too large to be sure of its digits: the caller writes those the old way."""
+    for odd in ([0.12345], [np.nan], [np.inf], [1e11], [0.5, -1e12],
+                np.round(np.float32([0.1234, 0.5]), 4).astype(np.float64)):
+        assert jr.json_float_list(np.asarray(odd, dtype=np.float64), 4) is None, odd
+    assert jr.json_float_list([1e11 - 1], 4) == _LISTS.dump_json([1e11 - 1])
+    for decimals in (0, 5):
+        with pytest.raises(ValueError):
+            jr.json_float_list([0.5], decimals)

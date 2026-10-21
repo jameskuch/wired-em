@@ -29,11 +29,11 @@ from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Generic, NamedTuple, TypeVar
 
 import numpy as np
 import pandas as pd
-from pydantic import TypeAdapter
+from pydantic import BaseModel, TypeAdapter
 
 from .. import progress
 from ..analysis import dendrite as dendrite_analysis
@@ -264,6 +264,36 @@ class MeshBuffers(NamedTuple):
             "faces": self.faces.tolist(),
             "vertex_data": None if self.vertex_data is None else self.vertex_data.tolist(),
         })
+
+
+_Result = TypeVar("_Result", bound=BaseModel)
+
+
+class ResultBuffers(NamedTuple, Generic[_Result]):
+    """A measurement's result as its model carries it, the long lists still
+    NumPy arrays: ``head`` is the model with those lists empty, ``arrays`` each
+    one's values by field name, rounded to ``decimals`` as the list holds them
+    and float64, so each is the Python float the list would hold.
+
+    The job's poll is written from the arrays (``sbfsem_web.api.routes``).  Held
+    as the model, Inferior c1178's error map of 3.54 M vertices kept 277 MB of
+    Python lists in the web process for as long as the finished job lingers, and
+    each poll added 116 MB; its JSON is 50 MB (production, 2026-10-20).
+    """
+
+    head: _Result
+    arrays: dict[str, np.ndarray]
+    decimals: int = 4
+
+    def dto(self) -> _Result:
+        """The model with its lists: the JSON's numbers exactly."""
+        return self.head.model_copy(update={name: values.tolist() for name, values in self.arrays.items()})
+
+
+def _round_um(values) -> np.ndarray:
+    """Distances as a measurement's result sends them: to 0.1 nm, as ``np.round``
+    always rounded them, then float64 (:class:`ResultBuffers`)."""
+    return np.round(values, 4).astype(np.float64, copy=False)
 
 
 @dataclass(frozen=True)
@@ -3220,6 +3250,12 @@ class SbfsemService:
         measures; both halves are cached, so pressing Compare again, or ticking
         error on a pane another request already measured, answers at once.
         """
+        return self.deviation_buffers(neuron, options).dto()
+
+    def deviation_buffers(self, neuron: Neuron, options: dict | None = None,
+                          ) -> ResultBuffers[DeviationResultDTO]:
+        """:meth:`deviation_result` with its lists of vertices and rim points
+        still arrays (:class:`ResultBuffers`): what the job holds."""
         try:
             mesh = self.mesh_for(neuron, options)
             # The build's last stage is over; a failure from here on is the
@@ -3231,19 +3267,22 @@ class SbfsemService:
             if found is None:
                 raise ValueError(f"c{neuron.id} has no annotations to hold the render to")
             deviation = self._cached_deviation(neuron, options, mesh)
-            return DeviationResultDTO(
+            detail = self._deviation_detail(found, annotation_targets(neuron))
+            arrays = {"vertex_um": _round_um(found.vertex_um),
+                      "rim_xyz": _round_um(found.rim_xyz).ravel(),
+                      "rim_um": _round_um(found.rim_um)}
+            if "axial_um" in detail:
+                arrays["axial_um"] = detail.pop("axial_um")
+            return ResultBuffers(DeviationResultDTO(
                 mesh_id=mesh.meta.get("mesh_id"),
                 n_vertices=mesh.n_vertices,
                 n_faces=len(mesh.faces),
-                vertex_um=np.round(found.vertex_um, 4).tolist(),
-                rim_xyz=np.round(found.rim_xyz, 4).ravel().tolist(),
-                rim_um=np.round(found.rim_um, 4).tolist(),
                 rim_stride=found.rim_stride,
                 n_rims=found.n_rims,
                 scale_um=found.scale_um,
                 deviation=deviation,
-                **self._deviation_detail(found, annotation_targets(neuron)),
-            )
+                **detail,
+            ), arrays)
         finally:
             # The kernels run on a job thread of the web process, each with its
             # own allocator arena: hand the freed ones back, as a build does.
@@ -3276,6 +3315,15 @@ class SbfsemService:
         post-correction one): each mesh is measured against the annotations of
         the copy it was built from, and the difference is keyed on both.
         """
+        return self.diff_buffers(neuron, options_a, options_b, samples, sign=sign, both=both,
+                                 neuron_b=neuron_b).dto()
+
+    def diff_buffers(self, neuron: Neuron, options_a: dict | None = None,
+                     options_b: dict | None = None, samples: int = 250_000, *,
+                     sign: str = "normal", both: bool = False,
+                     neuron_b: Neuron | None = None) -> ResultBuffers[DiffResultDTO]:
+        """:meth:`diff_result` with its lists of vertex distances still arrays
+        (:class:`ResultBuffers`): what the job holds."""
         other = neuron if neuron_b is None else neuron_b
         try:
             with progress.prefixed("mesh A: "):
@@ -3291,11 +3339,13 @@ class SbfsemService:
                 deviation_a = self._cached_deviation(neuron, options_a, mesh_a)
             with progress.prefixed("mesh B against the annotations: "):
                 deviation_b = self._cached_deviation(other, options_b, mesh_b)
-            return DiffResultDTO(
+            arrays = {"distance_um": _round_um(diff.distance_um)}
+            if diff.distance_b_um is not None:
+                arrays["distance_b_um"] = _round_um(diff.distance_b_um)
+            return ResultBuffers(DiffResultDTO(
                 mesh_id=mesh_a.meta.get("mesh_id"),
                 n_vertices=mesh_a.n_vertices,
                 n_faces=len(mesh_a.faces),
-                distance_um=np.round(diff.distance_um, 4).tolist(),
                 mean_abs_um=diff.mean_abs_um,
                 rms_um=diff.rms_um,
                 p95_abs_um=diff.p95_abs_um,
@@ -3308,8 +3358,6 @@ class SbfsemService:
                 deviation_b=deviation_b,
                 sign_by=diff.sign_by,
                 stats_area=self._area_stats_dto(diff.stats_area),
-                distance_b_um=(np.round(diff.distance_b_um, 4).tolist()
-                               if diff.distance_b_um is not None else []),
                 stats_area_b=self._area_stats_dto(diff.stats_area_b),
                 mesh_id_b=mesh_b.meta.get("mesh_id"),
                 n_vertices_b=mesh_b.n_vertices,
@@ -3317,7 +3365,7 @@ class SbfsemService:
                 sign_overruled_b=diff.sign_overruled_b,
                 copy_a=getattr(neuron, "copy_tag", None),
                 copy_b=getattr(other, "copy_tag", None),
-            )
+            ), arrays)
         finally:
             trim_memory()
 
@@ -3374,9 +3422,10 @@ class SbfsemService:
 
         # Never beyond the vertex's own distance, so the documented sideways part,
         # sqrt(vertex_um**2 - axial_um**2), has no negative radicand after rounding.
+        # One per vertex, so it stays an array (:meth:`deviation_buffers`).
         detail: dict[str, Any] = {
-            "axial_um": um(np.minimum(np.asarray(found.axial_um, dtype=float),
-                                      np.asarray(found.vertex_um, dtype=float)))}
+            "axial_um": _round_um(np.minimum(np.asarray(found.axial_um, dtype=float),
+                                             np.asarray(found.vertex_um, dtype=float)))}
         if found.rim_enclosed is not None:
             detail["rim_enclosed"] = found.rim_enclosed.astype(np.int8).tolist()
         if found.surface is not None:

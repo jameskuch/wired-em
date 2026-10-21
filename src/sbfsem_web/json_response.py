@@ -20,11 +20,12 @@ import math
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 from fastapi import APIRouter
 from fastapi.datastructures import Default, DefaultPlaceholder
 from fastapi.responses import JSONResponse
 
-__all__ = ["EncodedJSON", "SafeJSONResponse", "SafeJSONRouter", "sanitize"]
+__all__ = ["EncodedJSON", "SafeJSONResponse", "SafeJSONRouter", "json_float_list", "sanitize"]
 
 
 class EncodedJSON(bytes):
@@ -94,3 +95,136 @@ def _dumps(content: Any) -> bytes:
         allow_nan=False,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+#: Numbers written at a time by :func:`json_float_parts`: its working arrays stay
+#: a few MB however long the list is.
+FLOAT_LIST_CHUNK = 1 << 18
+
+
+def json_float_list(values: Any, decimals: int) -> bytes | None:
+    """``values`` as the JSON list pydantic writes of them as Python floats, made
+    without a Python float per number, or ``None`` where it cannot vouch for every byte.
+
+    Each value must already be rounded to ``decimals`` (1 to 4), as ``np.round``
+    and Python's ``round`` leave it: the double nearest some ``k / 10**decimals``.
+    Its shortest round-trip text, which pydantic and ``repr`` both write, is then
+    that decimal itself, trailing zeros dropped and one fractional digit kept: a
+    shorter decimal of 15 digits or fewer is another double.  Both write such a
+    number positionally (pydantic from 1e-5, ``repr`` from 1e-4, up to 1e16).
+
+    Checked, not assumed: a value off that step, a non-finite one (pydantic
+    writes ``null``) or one of 1e11 or more answers ``None``, and the caller writes
+    the list the old way.  A 3.54 M-vertex error map's two lists of vertex
+    distances held 277 MB as Python lists in the web process and are 50 MB as
+    this text (Inferior c1178, production, 2026-10-20).
+    """
+    parts = json_float_parts(values, decimals)
+    return None if parts is None else b"".join(parts)
+
+
+def json_float_parts(values: Any, decimals: int) -> list[bytes] | None:
+    """:func:`json_float_list`'s text in pieces, brackets included, for a caller
+    that joins it into a longer text: one copy of the numbers, not two."""
+    if not 1 <= decimals <= 4:
+        raise ValueError(f"decimals must be 1 to 4, not {decimals}")
+    x = np.asarray(values, dtype=np.float64).ravel()
+    parts = [b"["]
+    for at in range(0, len(x), FLOAT_LIST_CHUNK):
+        piece = _float_text(x[at:at + FLOAT_LIST_CHUNK], decimals)
+        if piece is None:
+            return None
+        if at:
+            parts.append(b",")
+        parts.append(piece)
+    parts.append(b"]")
+    return parts
+
+
+def _word_tables(decimals: int) -> tuple[np.ndarray, ...]:
+    """The text of a number's two halves as 8-byte words, each with a mask of the
+    bytes it shows: the sign's place and the whole part (under 10,000, right-aligned,
+    leading zeros hidden, the units digit shown) for each whole part; the point, the
+    fraction (trailing zeros hidden, the first digit shown) and the comma for each
+    fraction.  A row of a gather is one word, which NumPy does at memory speed (a
+    row of bytes is many times slower)."""
+    found = _WORD_TABLES.get(decimals)
+    if found is None:
+        def digits(count: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            n = np.arange(10 ** count)
+            place = 10 ** np.arange(count - 1, -1, -1)  # the first column is the highest digit
+            return n, place, (n[:, None] // place % 10 + ord("0")).astype(np.uint8)
+
+        n, place, text = digits(4)
+        head = np.zeros((len(n), 8), dtype=np.uint8)
+        head_shown = np.zeros(head.shape, dtype=np.uint8)
+        head[:, 3] = ord("-")  # shown by the number's own sign
+        head[:, 4:] = text
+        head_shown[:, 4:] = (n[:, None] >= place) | (place == 1)
+        n, place, text = digits(decimals)
+        tail = np.zeros((len(n), 8), dtype=np.uint8)
+        tail_shown = np.zeros(tail.shape, dtype=np.uint8)
+        tail[:, 0], tail_shown[:, 0] = ord("."), 1
+        tail[:, 1:1 + decimals] = text
+        tail_shown[:, 1:1 + decimals] = (n[:, None] % (10 * place) != 0) | (place == place[0])
+        tail[:, 1 + decimals], tail_shown[:, 1 + decimals] = ord(","), 1
+        found = _WORD_TABLES[decimals] = tuple(
+            table.view(np.uint64).ravel() for table in (head, head_shown, tail, tail_shown))
+    return found
+
+
+_WORD_TABLES: dict[int, tuple[np.ndarray, ...]] = {}
+
+
+def _float_text(x: np.ndarray, decimals: int) -> bytes | None:
+    """The numbers of ``x`` as JSON, comma-separated (:func:`json_float_list`).
+
+    Each number is written into a row of the same width, sign, whole part
+    right-aligned, point, ``decimals`` digits and a comma, and the characters a
+    number does not use are left out as the rows are read in order.  A whole
+    part under 10,000 (every distance) comes from :func:`_word_tables`, a larger
+    one a digit at a time.
+    """
+    scale = 10 ** decimals
+    with np.errstate(invalid="ignore", over="ignore"):
+        k = np.rint(x * scale)
+        on_step = np.isfinite(k) & (np.abs(k) < 1e15)
+    # The value must be the double nearest k / scale, which the division gives exactly.
+    if not on_step.all() or not np.array_equal(k / scale, x):
+        return None
+    whole, frac = np.divmod(np.abs(k).astype(np.int64), scale)
+    negative = np.signbit(x)  # -0.0 is written "-0.0", as pydantic writes it
+    top = int(whole.max())
+    if top < 10_000:
+        head, head_shown, tail, tail_shown = _word_tables(decimals)
+        words = np.empty((len(x), 2), dtype=np.uint64)
+        shown = np.empty((len(x), 2), dtype=np.uint64)
+        words[:, 0], shown[:, 0] = head[whole], head_shown[whole]
+        words[:, 1], shown[:, 1] = tail[frac], tail_shown[frac]
+        rows, keep = words.view(np.uint8), shown.view(np.uint8).view(bool)
+        keep[:, 3] = negative
+        keep[-1, 9 + decimals] = False  # no comma after the last
+        return rows[keep].tobytes()
+    width = len(str(top))  # the widest whole part
+    point = 1 + width
+    rows = np.empty((len(x), point + decimals + 2), dtype=np.uint8)
+    keep = np.ones(rows.shape, dtype=bool)
+    rows[:, 0] = ord("-")
+    keep[:, 0] = negative
+    rest = whole.copy()
+    for column in range(point - 1, 0, -1):  # the whole part, its last digit first
+        rows[:, column] = rest % 10 + ord("0")
+        if column < point - 1:
+            keep[:, column] = rest > 0  # no leading zeros, but the units digit stays
+        rest //= 10
+    rows[:, point] = ord(".")
+    rest = frac.copy()
+    for column in range(point + decimals, point, -1):  # the fraction, its last digit first
+        rows[:, column] = rest % 10 + ord("0")
+        rest //= 10
+    # The fraction's trailing zeros are dropped, but its first digit always stays.
+    for j in range(1, decimals):
+        keep[:, point + 1 + j] = frac % 10 ** (decimals - j) != 0
+    rows[:, -1] = ord(",")
+    keep[-1, -1] = False
+    return rows[keep].tobytes()

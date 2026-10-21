@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import tempfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -62,13 +63,15 @@ from sbfsem.service.estimate import FINEST_UM as ESTIMATE_FINEST_UM
 from sbfsem.service.facade import (
     MeshBuffers,
     NeuronNotLoadedError,
+    ResultBuffers,
     SbfsemService,
     curve_averaging,
     requested_copy,
 )
+from sbfsem.util.memory import trim_memory
 
 from .. import mesh_binary
-from ..json_response import EncodedJSON, SafeJSONResponse, SafeJSONRouter
+from ..json_response import EncodedJSON, SafeJSONResponse, SafeJSONRouter, json_float_parts
 from ..library import validate_library_doc
 from ..saves import MAX_CELL_ID, CellRenderStore, LibraryStore, QuotaError, SaveError, SaveStore
 
@@ -1053,21 +1056,28 @@ def _job_status_response(body: dict, binary: bool = False) -> Response:
     (the page's ``Accept``) an :class:`~sbfsem_web.mesh_binary.EncodedMesh` goes
     out as it is; to anyone else it is spliced in as the JSON text it stands
     for, the same bytes as before it was held that way.  A mesh held as
-    :class:`EncodedJSON` (one the binary cannot carry exactly), and every status
+    :class:`EncodedJSON` (one the binary cannot carry exactly), a measurement's
+    result (always held as its text, :func:`_encoded_result`), and every status
     without a finished mesh, is JSON whatever was asked.
     """
-    mesh = body.get("mesh")
+    mesh, result = body.get("mesh"), body.get("result")
     if isinstance(mesh, mesh_binary.EncodedMesh):
         if binary:
             status = {key: value for key, value in body.items() if key != "mesh"}
             return Response(content=mesh.reply(status), media_type=mesh_binary.MEDIA_TYPE,
                             headers={"Vary": "Accept"})
         mesh = EncodedJSON(_json_bytes(mesh.plain()))
-    if isinstance(mesh, EncodedJSON):
+    if isinstance(mesh, EncodedJSON) or isinstance(result, EncodedJSON):
         head = _json_bytes({key: value for key, value in body.items() if key not in ("mesh", "result")})
-        content = head[:-1] + b',"mesh":' + mesh + b',"result":' + _json_bytes(body.get("result")) + b"}"
+        # One join, one copy of the text: chained ``+`` copied the result once per operand.
+        content = b"".join((head[:-1], b',"mesh":', _text(mesh), b',"result":', _text(result), b"}"))
         return Response(content=content, media_type="application/json", headers={"Vary": "Accept"})
     return Response(content=_json_bytes(body), media_type="application/json", headers={"Vary": "Accept"})
+
+
+def _text(value: Any) -> bytes:
+    """``value`` as JSON: held text as it is, anything else written now."""
+    return value if isinstance(value, EncodedJSON) else _json_bytes(value)
 
 
 def _encoded_mesh(mesh) -> mesh_binary.EncodedMesh | EncodedJSON:
@@ -1091,6 +1101,48 @@ def _encoded_mesh(mesh) -> mesh_binary.EncodedMesh | EncodedJSON:
     plain = _plain(mesh)
     encoded = mesh_binary.encode(plain) if isinstance(plain, dict) else None
     return encoded if encoded is not None else EncodedJSON(_json_bytes(plain))
+
+
+def _encoded_result(result: Any) -> Any:
+    """A finished measurement (an error map, a difference), made into the JSON
+    text its poll will send, the same bytes the model makes.
+
+    Held in place of the model for the ten minutes a finished job lingers, as a
+    render is (:func:`_encoded_mesh`): Inferior c1178's error map of 3.54 M
+    vertices held 277 MB as the model's lists and is 50 MB as text, and its poll
+    went from +116 MB and 0.49 s to a copy of the text (production, 2026-10-20).
+    The result comes as its arrays (:class:`~sbfsem.service.facade.ResultBuffers`):
+    the model is written with those lists empty and each list is put in its
+    place, written by :func:`~sbfsem_web.json_response.json_float_parts`, or by
+    pydantic from its numbers where that cannot vouch for every byte.  Anything
+    else is held as it came.
+    """
+    if not isinstance(result, ResultBuffers):
+        return result
+    text = _json_bytes(result.head)
+    places = []
+    for name, values in result.arrays.items():
+        empty = b'"' + name.encode() + b'":[]'
+        at = text.find(empty)
+        if at < 0 or text.find(empty, at + 1) >= 0:  # not one place to put it: the model's way
+            return EncodedJSON(_json_bytes(result.dto()))
+        listed = json_float_parts(values, result.decimals)
+        places.append((at + len(empty) - 2, listed if listed is not None else [_json_bytes(values.tolist())]))
+    parts, at = [], 0
+    for where, listed in sorted(places, key=lambda place: place[0]):
+        parts += [text[at:where], *listed]
+        at = where + 2  # past the "[]" it replaces
+    parts.append(text[at:])
+    return EncodedJSON(b"".join(parts))  # the numbers' one copy
+
+
+def _measured(make: Callable[[], Any]) -> Any:
+    """A measurement job's work: ``make``'s result held as its text
+    (:func:`_encoded_result`), then the memory the writing used handed back to
+    the system, as the measurement hands back its own."""
+    text = _encoded_result(make())
+    trim_memory(collect=False)
+    return text
 
 
 def _job_status_body(job) -> dict:
@@ -1267,7 +1319,8 @@ def start_deviation_job(request: Request, source: str, neuron_id: int, body: Mes
     weight = svc.measure_weight_mb(neuron, options)
     key = ("deviation", src, int(neuron_id), neuron.load_serial, tuple(sorted(options.items())))
     job = request.app.state.mesh_jobs.submit(
-        key, lambda: svc.deviation_result(neuron, options), weight_mb=weight, kind="deviation",
+        key, lambda: _measured(lambda: svc.deviation_buffers(neuron, options)), weight_mb=weight,
+        kind="deviation",
         label=_job_label(neuron_id, src, options),
     )
     return {"job_id": job.id, "status": job.status, "kind": job.kind, "weight_mb": weight}
@@ -1301,9 +1354,9 @@ def start_diff_job(request: Request, source: str, neuron_id: int, body: MeshDiff
         label += (f" [{getattr(neuron, 'copy_tag', None)}"
                   f" vs {getattr(neuron_b, 'copy_tag', None)}]")
     job = request.app.state.mesh_jobs.submit(
-        key, lambda: svc.diff_result(neuron, options_a, options_b, body.samples,
-                                     sign=body.sign, both=body.both,
-                                     neuron_b=None if neuron_b is neuron else neuron_b),
+        key, lambda: _measured(lambda: svc.diff_buffers(neuron, options_a, options_b, body.samples,
+                                                        sign=body.sign, both=body.both,
+                                                        neuron_b=None if neuron_b is neuron else neuron_b)),
         weight_mb=weight, kind="diff", label=label,
     )
     return {"job_id": job.id, "status": job.status, "kind": job.kind, "weight_mb": weight}

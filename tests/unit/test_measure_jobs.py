@@ -9,6 +9,7 @@ pin the contract the browser codes against.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 
@@ -407,8 +408,9 @@ def test_a_meshlab_run_past_its_ceiling_is_a_clear_error(monkeypatch):
 def _bytes_of_the_old_way(job, svc=None):
     """What the status route sent until 2026-10-15: the dict through FastAPI's
     ``jsonable_encoder``, then the same ``JSONResponse``.  A finished mesh is held
-    as text since 2026-10-16, and as binary since 2026-10-20; the old way is the
-    model itself through the encoder."""
+    as text since 2026-10-16, and as binary since 2026-10-20, and a finished
+    measurement as text since 2.19.7; the old way is the model itself through the
+    encoder (these jobs are QUICK's, and a difference QUICK against OTHER)."""
     from fastapi.encoders import jsonable_encoder
     from fastapi.responses import JSONResponse
 
@@ -419,6 +421,10 @@ def _bytes_of_the_old_way(job, svc=None):
     body = _job_status_body(job)
     if isinstance(body["mesh"], (EncodedJSON, EncodedMesh)):
         body["mesh"] = svc.render_mesh(943, "i", **QUICK)
+    if isinstance(body["result"], EncodedJSON):
+        neuron = svc.neuron(943, "i")
+        body["result"] = (svc.deviation_result(neuron, QUICK) if job.kind == "deviation"
+                          else svc.diff_result(neuron, QUICK, OTHER))
     return JSONResponse(jsonable_encoder(body)).body
 
 
@@ -448,7 +454,12 @@ def test_a_finished_jobs_status_is_byte_for_byte_what_jsonable_encoder_made(web)
             from sbfsem_web.mesh_binary import EncodedMesh
 
             assert isinstance(job.result, EncodedMesh)
-        dumped = job.result.plain() if kind == "mesh" else job.result.model_dump(mode="json")
+        else:
+            # And a finished measurement as its text (a sixth of the model's lists).
+            from sbfsem_web.json_response import EncodedJSON
+
+            assert isinstance(job.result, EncodedJSON)
+        dumped = job.result.plain() if kind == "mesh" else json.loads(job.result)
         assert body[other] is None and body[key] == dumped
         assert set(body) == {"job_id", "status", "waiting", "progress", "seconds", "detail",
                              "kind", "failed_stage", "mesh", "result"}
@@ -516,6 +527,99 @@ def test_the_final_poll_of_a_big_measurement_costs_less_than_the_general_encoder
     slow, theirs = best(lambda: JSONResponse(jsonable_encoder(body)).body)
     assert mine == theirs, "the same bytes"
     assert fast < 0.8 * slow, f"the poll took {fast:.2f} s against the general encoder's {slow:.2f} s"
+
+
+def test_a_finished_measurement_never_makes_the_models_lists(web, monkeypatch):
+    """An error map and a difference both ways are held as their text, made from the
+    arrays: the model's lists of every vertex's distance (277 MB in the web process for
+    c1178's 3.54 M vertices, production 2026-10-20) are made neither by the job nor by
+    its poll, and the poll is the bytes the model makes."""
+    from sbfsem.service.facade import ResultBuffers
+    from sbfsem_web.json_response import EncodedJSON
+
+    client, svc = web
+    store = client.app.state.mesh_jobs
+
+    def no_lists(self):
+        raise AssertionError("the model's lists were made")
+
+    monkeypatch.setattr(ResultBuffers, "dto", no_lists)
+    deviation = client.post("/api/neurons/i/943/mesh-deviation-job", json=QUICK).json()
+    diff = client.post("/api/neurons/i/943/mesh-diff-job",
+                       json={"a": QUICK, "b": OTHER, "both": True}).json()
+    polls = {}
+    for started in (deviation, diff):
+        _poll(client, started["job_id"])
+        job = store.get(started["job_id"])
+        assert job.status == "done" and isinstance(job.result, EncodedJSON), job.detail
+        polls[job.kind] = client.get(f"/api/mesh-jobs/{job.id}", headers={"Accept": "application/x-sbfsem-mesh"})
+    monkeypatch.undo()
+    neuron = svc.neuron(943, "i")
+    models = {"deviation": svc.deviation_result(neuron, QUICK),
+              "diff": svc.diff_result(neuron, QUICK, OTHER, both=True)}
+    for kind, got in polls.items():
+        assert got.headers["content-type"] == "application/json", "a measurement is JSON for the page too"
+        body = got.json()
+        assert body["result"] == models[kind].model_dump(mode="json")
+        expected = {**body, "result": models[kind]}
+        from sbfsem_web.api.routes import _json_bytes
+
+        assert got.content == _json_bytes(expected), kind
+    assert len(polls["diff"].json()["result"]["distance_b_um"]) == models["diff"].n_vertices_b > 0
+
+
+@pytest.mark.parametrize("options", [
+    QUICK, OTHER,
+    {"method": "cylinder", "pathway": "voxel2", "smooth_iterations": 0, "voxel2_um": 0.1},
+    {"method": "curvemesh", "smooth_iterations": 0},
+], ids=["original", "adaptive_taubin", "voxel2", "curvemesh"])
+def test_a_measurements_text_is_the_models_bytes_on_real_results(web, options):
+    """c943's error map and its differences, every way the job is asked for: the text
+    made from the arrays is the bytes pydantic writes of the model, and every list of it
+    was written from its array (none fell back to the model's numbers)."""
+    from sbfsem_web.api.routes import _encoded_result, _json_bytes
+    from sbfsem_web.json_response import json_float_list
+
+    _, svc = web
+    neuron = svc.neuron(943, "i")
+    buffers = [svc.deviation_buffers(neuron, options)]
+    for sign, both in (("normal", False), ("normal", True), ("enclosure", True)):
+        buffers.append(svc.diff_buffers(neuron, options, QUICK if options is not QUICK else OTHER,
+                                        sign=sign, both=both))
+    for made in buffers:
+        assert made.arrays and all(json_float_list(v, made.decimals) is not None for v in made.arrays.values())
+        assert _encoded_result(made) == _json_bytes(made.dto())
+    deviation, one_way, both_ways, _ = buffers
+    assert set(deviation.arrays) == {"vertex_um", "rim_xyz", "rim_um", "axial_um"}
+    assert len(deviation.arrays["vertex_um"]) == deviation.head.n_vertices and not deviation.head.vertex_um
+    assert set(one_way.arrays) == {"distance_um"} and set(both_ways.arrays) == {"distance_um", "distance_b_um"}
+    assert (one_way.arrays["distance_um"] < 0).any(), "a signed field, so the minus signs are tested too"
+
+
+def test_a_list_the_text_cannot_vouch_for_is_written_by_pydantic():
+    """A non-finite distance (null in the JSON), one off the 0.1 nm step and one too
+    large to write exactly each take pydantic's way for that list alone, and the bytes
+    are still the model's."""
+    from sbfsem.service.dto import DeviationResultDTO, DiffResultDTO
+    from sbfsem.service.facade import ResultBuffers
+    from sbfsem_web.api.routes import _encoded_result, _json_bytes
+    from sbfsem_web.json_response import EncodedJSON
+
+    head = DeviationResultDTO(mesh_id="m", n_vertices=3, n_faces=1, scale_um=0.5, rim_stride=2, n_rims=4)
+    for odd in (np.array([0.1, np.nan, 0.2]), np.array([0.12345, 0.1, 0.2]), np.array([1e12, 0.1, -0.0])):
+        made = ResultBuffers(head, {"vertex_um": odd, "rim_um": np.array([0.5, -0.0]),
+                                    "axial_um": np.round(odd * 0.5, 4)})
+        text = _encoded_result(made)
+        assert isinstance(text, EncodedJSON) and text == _json_bytes(made.dto())
+    nan = json.loads(_encoded_result(ResultBuffers(head, {"vertex_um": np.array([np.nan])})))
+    assert nan["vertex_um"] == [None]
+    diff = DiffResultDTO(n_vertices=2, n_faces=1, mean_abs_um=0.1, rms_um=0.1, p95_abs_um=0.1, max_abs_um=0.2,
+                         mean_signed_um=0.0, scale_um=0.2, sample_spacing_um=0.05, n_samples=10)
+    one_way = ResultBuffers(diff, {"distance_um": np.array([-0.0001, 0.2])})
+    assert _encoded_result(one_way) == _json_bytes(one_way.dto())
+    assert json.loads(_encoded_result(one_way))["distance_b_um"] == []
+    # Anything that is not a result's arrays is held as it came.
+    assert _encoded_result({"mean_um": 1.0}) == {"mean_um": 1.0}
 
 
 def test_a_non_finite_number_in_a_result_is_null_not_a_500_on_every_poll(web):
