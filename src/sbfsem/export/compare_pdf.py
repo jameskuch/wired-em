@@ -1649,9 +1649,9 @@ class _Writer:
         y = page.section(y, "What each registration moved (the cell's own annotations, µm)", size=9)
         rows = []
         for entry in facts:
-            pairs = entry.get("pairs") or {}
-            rows.append([name(entry), renderings(entry), *stats(pairs.get("transforms")),
-                         *stats(pairs.get("correction"))])
+            moves = entry.get("moves") or {}
+            rows.append([name(entry), renderings(entry), *stats(moves.get("transforms")),
+                         *stats(moves.get("correction"))])
         y = page.table(page.left, y, [
             Column("Registration", 2.05), Column("Renderings", 0.8),
             Column("Transforms n", 0.8, "right"), Column("median", 0.5, "right"),
@@ -1667,10 +1667,9 @@ class _Writer:
         rows = []
         steps: list[tuple[str, float, float]] = []
         for entry in facts:
-            links = entry.get("links") or {}
-            at = (links.get("stages") or {}).get("corrected") or {}
+            at = entry.get("links") or {}
             pulls = entry.get("pulls")
-            rows.append([name(entry), fmt(links.get("n_links")), fmt(at.get("median_um")), fmt(at.get("p90_um")),
+            rows.append([name(entry), fmt(entry.get("n_links")), fmt(at.get("median_um")), fmt(at.get("p90_um")),
                          fmt(at.get("p99_um")), fmt(at.get("max_um")), fmt(at.get("n_over_1p5_um")),
                          fmt(entry.get("coherent_sections")), "—" if pulls is None else fmt(pulls)])
             if at:
@@ -1680,6 +1679,28 @@ class _Writer:
             Column("p90", 0.55, "right"), Column("p99", 0.55, "right"), Column("Max", 0.55, "right"),
             Column("Over 1.5", 0.6, "right"), Column("Sections as one", 0.95, "right"),
             Column("Fit pulls", 0.7, "right")], rows, size=6.6) + 0.12
+
+        radius = fmt(facts[0].get("radius_um", 5.0))
+        y = page.section(y, "What each image shows, kept or changed (µm)", size=9)
+        rows = []
+        for entry in facts:
+            cells = [name(entry)]
+            for key in ("distortion", "synapse_drift"):
+                change = entry.get(key) or {}
+                cells += [fmt(change.get("n")), fmt(change.get("median_um")), fmt(change.get("p95_um")),
+                          f"{fmt(100 * float(change.get('share_over', 0.0)))} %"]
+            rows.append(cells)
+        y = page.table(page.left, y, [
+            Column("Registration", 2.05), Column("Pairs", 0.6, "right"), Column("median", 0.55, "right"),
+            Column("p95", 0.5, "right"), Column("> 0.25", 0.6, "right"), Column("Synapses", 0.75, "right"),
+            Column("median", 0.55, "right"), Column("p95", 0.5, "right"), Column("> 0.25", 0.6, "right")],
+            rows, size=6.6) + 0.04
+        y = page.para(page.left, y, (
+            f"Pairs: two of the cell's own annotations on one section within {radius} µm of each other, drawn on one "
+            "image; how much the registration changed the offset between them. Synapses: each synapse against the "
+            f"cell's nearest annotation on its section within {radius} µm; how much their offset changed. A "
+            "registration that moves sections as a whole keeps both near zero; the curve fit moves each annotation "
+            "of the cell on its own and leaves its synapses where they were drawn."), size=6.6, color=MUTED) + 0.1
         if steps and y < page.bottom - 2.4:
             ax = page.chart(page.left + 0.9, y + 0.15, page.usable - 1.1, min(2.0, 0.3 * len(steps) + 0.7),
                             title="Link steps at each registration's positions (µm): median and 90th percentile")
@@ -1695,7 +1716,8 @@ class _Writer:
             "Lower steps mean linked annotations on neighboring sections line up better. Read them with "
             "care: the curve fit moves each annotation onto the path through its neighbors, so it lowers "
             "these steps by construction, and a lower number under Curve fit or Field + fit is partly what "
-            "the fit does, not proof on its own that the registration is truer. 'Sections as one' counts "
+            "the fit does, not proof on its own that the registration is truer; 'What each image shows' "
+            "is what that costs the pictures the annotations were drawn on. 'Sections as one' counts "
             "sections whose annotations of this cell all moved together (at least 4, one way, 0.2 µm or "
             "more on average), the mark of a whole section re-aligned. 'Fit pulls' are annotations the fit "
             f"pulled toward a linked annotation at least {fmt(facts[0].get('pull_ratio'))}× as wide, such as a "

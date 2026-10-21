@@ -804,6 +804,23 @@ and the curve fit's pulls at the default ratio (`correction_checks`). With two
 or more copies the plan holds a "Summary: the registrations" page after the
 renderings' (`Plan`; the page's `estimatePages` counts it too).
 
+What a registration does to what each section image shows is
+`sbfsem.analysis.registration_quality`: `section_distortion(neuron)` (pairs of the
+cell's own annotations on one section within `RADIUS_UM` = 5 µm of each other at
+their stored positions: the change `|m_i - m_j|` of their offset, for their moves
+`m` by the transforms and the correction) and `synapse_drift(neuron)` (each synapse
+against the cell's nearest annotation on its section within 5 µm: the change of
+their offset), each summarized by `offset_stats` (how many, median, p95, largest,
+how many over `OVER_UM` = 0.25 µm). Annotations drawn on one image are offset from
+each other as the image shows, so a registration that moves sections as a whole
+(the transforms, the residual field) keeps both near zero, and one that moves each
+annotation of the cell on its own (the curve fit, which leaves the synapses where
+they were drawn) does not: the cost side of the link steps, which the fit lowers by
+construction. `sbfsem.service.facade.registration_quality(neuron)` gathers them with
+the moves, the link steps at the copy's positions, the coherent sections and the
+curve fit's pulls (the report's registrations page and `GET .../registration-quality`);
+`tools/registration_quality.py` runs it over every registration of many cells.
+
 ```python
 from sbfsem.export.compare_pdf import ReportRendering, ReportSpec, write_compare_report
 from sbfsem.geometry.raster import NAMED_VIEWS

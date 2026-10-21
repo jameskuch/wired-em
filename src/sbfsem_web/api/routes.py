@@ -60,6 +60,7 @@ from sbfsem.service.dto import (
     NeuronDetailDTO,
     NeuronSummaryDTO,
     NodeDTO,
+    RegistrationQualityDTO,
     ResolvedSpecDTO,
     SearchResultDTO,
     ShiftSummaryDTO,
@@ -1787,6 +1788,20 @@ def shift_summary(request: Request, source: str, neuron_id: int,
     src = _source(source)
     _neuron_or_404(svc, neuron_id, src)
     return svc.shift_summary(neuron_id, src, pair)
+
+
+@router.get("/neurons/{source}/{neuron_id}/registration-quality", response_model=RegistrationQualityDTO)
+def registration_quality(request: Request, source: str, neuron_id: int):
+    """How the copy of the cell named by ``?copy=`` (a registration) lines it up, and what
+    it does to what each section image shows: the moves, the link steps at its positions,
+    the sections that moved as one, the change of the offsets between two of the cell's
+    annotations on one section and between each synapse and the cell, and the curve fit's
+    pulls (``tools/registration_quality.py`` asks it of every registration of many cells).
+    """
+    svc = service(request)
+    src = _source(source)
+    _neuron_or_404(svc, neuron_id, src)
+    return svc.registration_quality(neuron_id, src)
 
 
 @router.get("/neurons/{source}/{neuron_id}/correction-pulls", response_model=CorrectionPullsDTO)

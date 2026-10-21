@@ -153,6 +153,7 @@ from .dto import (
     NodeDTO,
     NodeTableDTO,
     NodeTableRowDTO,
+    RegistrationQualityDTO,
     ResolvedSpecDTO,
     SearchResultDTO,
     SectionCorrectionDTO,
@@ -4002,6 +4003,12 @@ class SbfsemService:
 
         return ShiftSummaryDTO(**shift_summary(self.neuron(neuron_id, source), pair).as_dict())
 
+    def registration_quality(self, neuron_id: int, source) -> RegistrationQualityDTO:
+        """How the copy of a cell this call is about (``requested_copy``) lines it up, and
+        what its registration does to what each section image shows
+        (:func:`registration_quality`)."""
+        return RegistrationQualityDTO(**registration_quality(self.neuron(neuron_id, source)))
+
     def swc_archive(self, neuron_ids, source, *, pattern: str = "c{id}",
                     branch_types: bool = False, refresh: bool = False,
                     relax: float | None = None, relax_bound: str = "outline",
@@ -4460,13 +4467,7 @@ class _ReportSource:
     def registration_facts(self) -> list[dict]:
         """One entry per copy of the cell among the renderings, in the order they first
         appear: which renderings it holds, what its transforms and correction did
-        (:func:`sbfsem.analysis.shifts.shift_summary`: how far they moved the cell's own
-        annotations, the steps along its links at each stage, the sections that moved
-        as one), and how many annotations the curve fit pulled toward a much wider one
-        (:mod:`sbfsem.analysis.correction_checks`, at its default ratio)."""
-        from ..analysis.correction_checks import DEFAULT_RATIO
-        from ..analysis.shifts import shift_summary
-
+        and the rest of :func:`registration_quality`."""
         out: list[dict] = []
         by_copy: dict[int, dict] = {}
         for index, (rendering, neuron) in enumerate(zip(self.spec.renderings, self.copies, strict=True)):
@@ -4474,24 +4475,42 @@ class _ReportSource:
             if found is not None:
                 found["renderings"].append(index)
                 continue
-            summary = shift_summary(neuron, "both").as_dict()
-            scan = getattr(neuron, "correction_pulls", None)
-            entry = {
-                "copy": getattr(neuron, "copy_tag", None),
-                "registration": rendering.registration,
-                "renderings": [index],
-                "correction": dict(getattr(neuron, "correction_status", None) or {}),
-                "transforms": dict(getattr(neuron, "registration_status", None) or {}),
-                "applied": summary["applied"],
-                "pairs": summary["pairs"],
-                "links": summary["links"],
-                "coherent_sections": len(summary["coherent_sections"]),
-                "pulls": len(scan.at(DEFAULT_RATIO)) if scan is not None else None,
-                "pull_ratio": DEFAULT_RATIO,
-            }
+            entry = {"copy": getattr(neuron, "copy_tag", None), "registration": rendering.registration,
+                     "renderings": [index], **registration_quality(neuron)}
             by_copy[id(neuron)] = entry
             out.append(entry)
         return out
+
+
+def registration_quality(neuron: Neuron) -> dict:
+    """One copy of a cell (a registration) in numbers: what its transforms and its
+    correction moved of the cell's own annotations and the sideways steps of its links
+    at its positions (:func:`sbfsem.analysis.shifts.shift_summary`), its sections that
+    moved as one, what it does to the offsets one section image shows
+    (:mod:`sbfsem.analysis.registration_quality`: between two of the cell's annotations,
+    and between a synapse and the cell), and how many annotations the curve fit pulled
+    toward a much wider one (:mod:`sbfsem.analysis.correction_checks`, default ratio)."""
+    from ..analysis.correction_checks import DEFAULT_RATIO
+    from ..analysis.registration_quality import RADIUS_UM, section_distortion, synapse_drift
+    from ..analysis.shifts import shift_summary
+
+    summary = shift_summary(neuron, "both").as_dict()
+    scan = getattr(neuron, "correction_pulls", None)
+    return {
+        "neuron_id": int(neuron.id), "source": str(neuron.source),
+        "copy_tag": getattr(neuron, "copy_tag", None),
+        "correction": dict(getattr(neuron, "correction_status", None) or {}),
+        "transforms": dict(getattr(neuron, "registration_status", None) or {}),
+        "moves": {k: summary["pairs"][k] for k in ("transforms", "correction")},
+        "n_links": summary["links"]["n_links"],
+        "links": summary["links"]["stages"]["corrected"],
+        "coherent_sections": len(summary["coherent_sections"]),
+        "radius_um": RADIUS_UM,
+        "distortion": section_distortion(neuron),
+        "synapse_drift": synapse_drift(neuron),
+        "pulls": len(scan.at(DEFAULT_RATIO)) if scan is not None else None,
+        "pull_ratio": DEFAULT_RATIO,
+    }
 
 
 def _registration_dto(status: dict | None) -> LiveRegistrationDTO | None:

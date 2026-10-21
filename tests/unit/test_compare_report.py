@@ -293,13 +293,14 @@ class _Copies(_Spheres):
     def registration_facts(self):
         seen: dict[str, dict] = {}
         for i, tag in enumerate(self.copies):
-            entry = seen.setdefault(tag, {"copy": tag, "renderings": [], "pull_ratio": 4.0,
+            change = {"n": 4, "median_um": 0.05, "p95_um": 0.3, "max_um": 0.4, "n_over": 1, "share_over": 0.25}
+            entry = seen.setdefault(tag, {"copy": tag, "renderings": [], "pull_ratio": 4.0, "radius_um": 5.0,
                                           "correction": {"requested": tag != "off.0", "applied": tag != "off.0"},
-                                          "pairs": {"correction": {"n_moved": 3, "median_um": 0.1, "p95_um": 0.4,
+                                          "moves": {"correction": {"n_moved": 3, "median_um": 0.1, "p95_um": 0.4,
                                                                    "max_um": 0.5}},
-                                          "links": {"n_links": 2, "stages": {"corrected": {
-                                              "median_um": 0.2, "p90_um": 0.6, "p99_um": 0.9, "max_um": 1.0,
-                                              "n_over_1p5_um": 0}}},
+                                          "n_links": 2, "links": {"median_um": 0.2, "p90_um": 0.6, "p99_um": 0.9,
+                                                                  "max_um": 1.0, "n_over_1p5_um": 0},
+                                          "distortion": change, "synapse_drift": change,
                                           "coherent_sections": 1, "pulls": 0 if tag != "off.0" else None})
             entry["renderings"].append(i)
         return list(seen.values())
@@ -322,6 +323,7 @@ def test_a_report_across_registrations_has_their_page_and_holds_each_to_its_own(
     page = reader.pages[plan.page("summary-registrations") - 1].extract_text()
     assert "Summary: the registrations" in page and "Current transforms + Field + fit" in page
     assert "Stored positions, no correction" in page and "R2, R3" in page
+    assert "What each image shows, kept or changed" in page and "25 %" in page
     # The rendering on the other registration is held to that copy's annotations, once per copy;
     # the report's own copy uses the annotations it was given.
     assert ("names", 1) in source.asked and ("names", 0) not in source.asked

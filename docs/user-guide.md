@@ -3097,8 +3097,11 @@ in the contents, the tables and the matrices is a link):
    visual bodies) and its error against the annotations; with two or more
    registrations, a page comparing them (what each moved of the cell's own
    annotations, how far each link steps sideways between its sections at its
-   positions, the sections that moved as one and the curve fit's pulls toward a
-   soma, with what those numbers can and cannot say); four **matrices** of
+   positions, the sections that moved as one, the curve fit's pulls toward a
+   soma, and what each does to what a section image shows: how much it changed
+   the offset between two of the cell's annotations drawn on one section within
+   5 µm, and between each synapse and the cell; with what those numbers can and
+   cannot say); four **matrices** of
    the error between every pair (the symmetric mean distance, the Hausdorff
    distance, and, row against column, the mean signed distance and the 95th
    percentile); every pair **ranked**, most different first; charts of the

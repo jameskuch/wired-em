@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -929,6 +930,46 @@ class ShiftSummaryDTO(BaseModel):
     pairs: dict[str, ShiftPairStatsDTO]
     links: ShiftLinksDTO
     coherent_sections: list[CoherentSectionDTO] = Field(default_factory=list)
+
+
+class OffsetChangeDTO(BaseModel):
+    """How much a registration changed offsets that one section image shows (µm):
+    :func:`sbfsem.analysis.registration_quality.offset_stats`."""
+
+    n: int
+    median_um: float
+    p95_um: float
+    max_um: float
+    #: How many changed by more than ``over_um`` (a quarter of a micron), and their share.
+    n_over: int
+    share_over: float
+
+
+class RegistrationQualityDTO(BaseModel):
+    """How one copy of a cell (a registration) lines it up, and what it does to what each
+    section image shows (:mod:`sbfsem.analysis.registration_quality`).  ``moves`` has the
+    transforms' and the correction's sizes (:class:`ShiftPairStatsDTO`); ``links`` the
+    sideways steps of the cell's links at this copy's positions; ``distortion`` the change
+    of the offset between two of the cell's annotations on one section within ``radius_um``;
+    ``synapse_drift`` the change of a synapse's offset from the cell's nearest annotation."""
+
+    neuron_id: int
+    source: str
+    copy_tag: str | None = None
+    #: What the load asked for and got: ``{requested, applied, mode, note}`` and
+    #: ``{requested, applied, note}`` as the load summary has them.
+    correction: dict[str, Any] = Field(default_factory=dict)
+    transforms: dict[str, Any] = Field(default_factory=dict)
+    moves: dict[str, ShiftPairStatsDTO]
+    n_links: int
+    links: ShiftLinkStepsDTO | None = None
+    coherent_sections: int
+    radius_um: float
+    distortion: OffsetChangeDTO
+    synapse_drift: OffsetChangeDTO
+    #: Annotations the curve fit pulled toward one ``pull_ratio`` times as wide (None: no fit ran).
+    pulls: int | None = None
+    pull_ratio: float
 
 
 class CorrectionPullDTO(BaseModel):
