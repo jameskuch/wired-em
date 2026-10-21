@@ -162,7 +162,7 @@ from .dto import (
     SynapseTypeCountDTO,
     VolumeInfoDTO,
 )
-from .estimate import CURVE_RASTER_META, CostEstimator, FieldPlanner, raster_record
+from .estimate import CURVE_RASTER_META, CostEstimator, FieldPlanner, OneField, raster_record
 from .meshcache import MeshDiskCache
 
 if TYPE_CHECKING:
@@ -752,6 +752,7 @@ class SbfsemService:
         self._estimator = CostEstimator(
             lambda neuron, discs: _curve_outlines(neuron, discs=discs),
             self._disc_half_peak_mb,
+            self._one_field_cost,
         )
         # And the Fine voxel a Voxel remesh, Convolution or Ultraliser build would
         # contour at, sized as the build sizes it, before it is built.
@@ -1507,6 +1508,11 @@ class SbfsemService:
     #: ``field_options`` (the mesh route's options) lets a Voxel remesh,
     #: Convolution or Ultraliser build be priced by the sheet it is planned to
     #: draw as well (``FieldPlanner.raw_triangles``), whichever is more.
+    #:
+    #: ``outline_voxels`` and ``hybrid_sheet`` (raw triangles, the outline half's
+    #: triangles) stand in for the raster's count and a one-field Hybrid's plan:
+    #: the render estimate prices pixels it has not rastered with this same price
+    #: (``CostEstimator``), and given the plan's numbers it is the gate's to the MB.
     def estimate_peak_mb(self, neuron_id: int, source, *, method: str = "cylinder",
                          pixel_size_um: float = 0.05, pathway: str = "original",
                          meshlab: str = "none", meshlab_depth: int = 9,
@@ -1515,7 +1521,9 @@ class SbfsemService:
                          voxel2_faces: int | None = None,
                          voxel2_um: float | None = None,
                          field_options: Mapping[str, Any] | None = None,
-                         neuron: Neuron | None = None) -> float:
+                         neuron: Neuron | None = None,
+                         outline_voxels: float | None = None,
+                         hybrid_sheet: tuple[int, int] | None = None) -> float:
         if neuron is None:
             neuron = self.neuron(neuron_id, source)
         cells = neuron.get_cell_nodes()
@@ -1526,20 +1534,23 @@ class SbfsemService:
         curves = method in ("closedcurve", "curve", "outline", "volume")
         if curves or method in ("hybrid", "mixed"):
             try:
-                # The bridges decide which skipped sections are filled, so the
-                # raster is counted with them; the curving of disc links and the
-                # ties do not change what it holds (ties are a few tiles).
-                o = curve_options or {}
-                annotations, how = _curve_outlines(
-                    neuron, discs=curves,
-                    bridge_um=float(o.get("curve_bridge_um", BRIDGE_UM)),
-                    link_bridge_um=float(o.get("curve_link_bridge_um", LINK_BRIDGE_UM)))
-                voxels = float(curve_grid_voxels(
-                    annotations,
-                    volume_scale=neuron.volume_scale,
-                    pixel_size_um=max(float(pixel_size_um), 1e-3),
-                    **how,
-                ))
+                if outline_voxels is not None:
+                    voxels = float(outline_voxels)
+                else:
+                    # The bridges decide which skipped sections are filled, so the
+                    # raster is counted with them; the curving of disc links and the
+                    # ties do not change what it holds (ties are a few tiles).
+                    o = curve_options or {}
+                    annotations, how = _curve_outlines(
+                        neuron, discs=curves,
+                        bridge_um=float(o.get("curve_bridge_um", BRIDGE_UM)),
+                        link_bridge_um=float(o.get("curve_link_bridge_um", LINK_BRIDGE_UM)))
+                    voxels = float(curve_grid_voxels(
+                        annotations,
+                        volume_scale=neuron.volume_scale,
+                        pixel_size_um=max(float(pixel_size_um), 1e-3),
+                        **how,
+                    ))
             except (KeyError, ValueError, TypeError):
                 voxels = 0.0
             # Over the raster's limit the build refuses before allocating
@@ -1621,7 +1632,8 @@ class SbfsemService:
                         and pw in HYBRID_ONE_FIELD and voxels > 0):
                     estimate = max(estimate, outline_mb + self._planned_sheet_mb(
                         neuron, field_options, pathway=pw, voxel2_faces=int(faces),
-                        voxel2_um=voxel2_um, hybrid_pixel_um=max(float(pixel_size_um), 1e-3)))
+                        voxel2_um=voxel2_um, hybrid_pixel_um=max(float(pixel_size_um), 1e-3),
+                        sheet=hybrid_sheet))
         # MeshLab runs as a child of the build worker, which keeps its own
         # heap while it waits: 337 to 563 MB more at 400,000 faces.
         if str(meshlab) != "none":
@@ -1629,31 +1641,50 @@ class SbfsemService:
                 str(meshlab) == "poisson" and int(meshlab_depth) > 9) else self.MESHLAB_MB
         return float(round(estimate))
 
-    def _planned_sheet_mb(self, neuron: Neuron, field_options: Mapping[str, Any], *,
-                          pathway: str, voxel2_faces: int, voxel2_um: float | None,
-                          hybrid_pixel_um: float | None = None) -> float:
-        """The peak of the sheet a field build of ``neuron`` is sized to draw
-        (:func:`field_sheet_mb` of ``FieldPlanner.raw_triangles``); 0 when there is
-        nothing to contour or the plan fails, which leaves the gate's other price.
-        ``hybrid_pixel_um``: a Hybrid in one field with its outlines rasterized at
-        that pixel, whose outline half's triangles join the Face cap."""
+    def _plan_options(self, field_options: Mapping[str, Any], *, pathway: str,
+                      voxel2_faces: int, voxel2_um: float | None,
+                      hybrid_pixel_um: float | None = None) -> dict:
+        """The options ``FieldPlanner`` plans a build with: the gate's and the render
+        estimate's, so the estimate's plan is the one the gate finds kept."""
         options = {**self._mesh_options(**field_options), "pathway": pathway,
                    "voxel2_faces": voxel2_faces}
         if voxel2_um is not None:
             options["voxel2_um"] = float(voxel2_um)
         if hybrid_pixel_um is not None:
             options.update(method="hybrid", pixel_size_um=float(hybrid_pixel_um))
-        try:
-            raw = self._field_planner.raw_triangles(neuron, options)
-        except Exception:  # noqa: BLE001 - a plan only raises the price; never block a build
-            log.warning("c%s: no sheet plan for the build gate", getattr(neuron, "id", "?"),
-                        exc_info=True)
-            return 0.0
+        return options
+
+    def _planned_sheet_mb(self, neuron: Neuron, field_options: Mapping[str, Any], *,
+                          pathway: str, voxel2_faces: int, voxel2_um: float | None,
+                          hybrid_pixel_um: float | None = None,
+                          sheet: tuple[int, int] | None = None) -> float:
+        """The peak of the sheet a field build of ``neuron`` is sized to draw
+        (:func:`field_sheet_mb` of ``FieldPlanner.raw_triangles``); 0 when there is
+        nothing to contour or the plan fails, which leaves the gate's other price.
+        ``hybrid_pixel_um``: a Hybrid in one field with its outlines rasterized at
+        that pixel, whose outline half's triangles join the Face cap; ``sheet``, its
+        raw triangles and the outline half's, when the caller has them (nothing is
+        planned)."""
+        if sheet is not None:
+            raw, outline = int(sheet[0]), int(sheet[1])
+        else:
+            options = self._plan_options(field_options, pathway=pathway,
+                                         voxel2_faces=voxel2_faces, voxel2_um=voxel2_um,
+                                         hybrid_pixel_um=hybrid_pixel_um)
+            try:
+                planned = self._field_planner.raw_triangles(neuron, options)
+            except Exception:  # noqa: BLE001 - a plan only raises the price; never block a build
+                log.warning("c%s: no sheet plan for the build gate", getattr(neuron, "id", "?"),
+                            exc_info=True)
+                return 0.0
+            raw = int(planned or 0)
+            outline = (self._field_planner.outline_triangles(neuron, options)
+                       if hybrid_pixel_um is not None and raw else 0)
         if not raw:
             return 0.0
         cap = voxel2_faces
         if hybrid_pixel_um is not None and voxel2_faces > 0:
-            cap += self._field_planner.outline_triangles(neuron, options)
+            cap += outline
         # A Hybrid's outline triangles join its cap, not its raw budget: whether the
         # sheet is decimated in chunks is the discs' Face cap's to say.
         return field_sheet_mb(raw, cap, float(field_options.get("reduce_fraction", 1.0) or 1.0),
@@ -1685,6 +1716,42 @@ class SbfsemService:
             meshlab_depth=int(options.get("meshlab_depth", 9)),
             voxel2_faces=options.get("voxel2_faces"), voxel2_um=options.get("voxel2_um"),
             neuron=discs)
+
+    def _one_field_cost(self, neuron: Neuron, options: dict) -> OneField | None:
+        """How a Hybrid build of ``neuron`` with ``options`` (the mesh route's) in one
+        field is planned and priced, for the render estimate: the build gate's plan at
+        a pixel (``FieldPlanner.hybrid_sheet``, kept for the gate) and the gate's
+        price given it (:meth:`estimate_peak_mb`).  ``None`` when the build is not one
+        field: a pathway outside :data:`HYBRID_ONE_FIELD`, or a cell without both
+        traced outlines and discs."""
+        pathway = str(options.get("pathway", "original"))
+        if pathway.lower() not in HYBRID_ONE_FIELD or not getattr(neuron, "has_closed_curves", False):
+            return None
+        discs = _disc_subset(neuron)
+        if discs is None or discs is neuron:
+            return None
+        faces = options.get("voxel2_faces")
+        faces = int(self._mesh_options()["voxel2_faces"] if faces is None else faces)
+        voxel2_um = options.get("voxel2_um")
+
+        def plan(pixel_um: float, wait_s: float):
+            return self._field_planner.hybrid_sheet(neuron, self._plan_options(
+                options, pathway=pathway.lower(), voxel2_faces=faces, voxel2_um=voxel2_um,
+                hybrid_pixel_um=max(float(pixel_um), 1e-3)), wait_s=wait_s)
+
+        def peak(pixel_um: float, voxels: float, raw: int, outline: int, averaging: bool) -> float:
+            # The route's own call (mesh_job), with the plan's numbers in place of a
+            # count and a plan.
+            return self.estimate_peak_mb(
+                neuron.id, neuron.source, method="hybrid", pixel_size_um=pixel_um,
+                pathway=pathway, meshlab=str(options.get("meshlab", "none")),
+                meshlab_depth=int(options.get("meshlab_depth", 9)), curve_averaging=averaging,
+                voxel2_faces=options.get("voxel2_faces"), voxel2_um=voxel2_um,
+                curve_options=options, field_options=options, neuron=neuron,
+                outline_voxels=voxels, hybrid_sheet=(int(raw), int(outline)))
+
+        return OneField(plan, peak, face_cap=faces,
+                        reduce_fraction=float(options.get("reduce_fraction", 1.0) or 1.0))
 
     def render_estimate(self, neuron_id: int, source, *, memory_limit_mb: float,
                         neuron: Neuron | None = None, **options) -> dict[str, Any]:

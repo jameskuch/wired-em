@@ -83,12 +83,14 @@ __all__ = [
     "VoxelPlan",
     "WORK_PER_RAW_FACE",
     "auto_voxel_um",
+    "body_areas",
     "count_components",
     "decimates_in_chunks",
     "field_bodies",
     "hull_pairs",
     "plan_voxel",
     "raw_budget",
+    "size_voxel",
     "split_components",
     "unified_mesh",
     "work_budget",
@@ -1549,12 +1551,30 @@ class VoxelPlan:
         return int(FACES_PER_SURFACE_VOXEL * self.area_um2 / self.voxel_um ** 2)
 
 
-def _size_voxel(bodies: list[_Body], thin: list[float], *, voxel_um: float, max_raw_faces: int,
-                max_auto_um: float | None, curve_raw_faces: int) -> VoxelPlan:
-    """The voxel the annotations and the raw-triangle budget ask for (no work budget yet)."""
+def body_areas(bodies: list[_Body]) -> tuple[float, float]:
+    """The bodies' surface area, um^2, and the share of it in bodies an outline
+    raster is part of (Hybrid's outline half): what :func:`size_voxel` sizes from."""
     area = float(sum(b.area_um2 for b in bodies))
     curve_area = float(sum(b.area_um2 for b in bodies
                            if any(isinstance(leaf, _CurveLeaf) for leaf in b.leaves)))
+    return area, curve_area
+
+
+def _size_voxel(bodies: list[_Body], thin: list[float], *, voxel_um: float, max_raw_faces: int,
+                max_auto_um: float | None, curve_raw_faces: int) -> VoxelPlan:
+    """The voxel the annotations and the raw-triangle budget ask for (no work budget yet)."""
+    area, curve_area = body_areas(bodies)
+    auto = 0.0 if voxel_um and voxel_um > 0 else auto_voxel_um(thin, 0.0)
+    return size_voxel(area, curve_area, auto, voxel_um=voxel_um, max_raw_faces=max_raw_faces,
+                      max_auto_um=max_auto_um, curve_raw_faces=curve_raw_faces)
+
+
+def size_voxel(area: float, curve_area: float, auto_um: float, *, voxel_um: float,
+               max_raw_faces: int, max_auto_um: float | None, curve_raw_faces: int) -> VoxelPlan:
+    """:func:`_size_voxel` from the bodies' areas (:func:`body_areas`) and the voxel
+    their thin annotations ask for (``auto_um``, :func:`auto_voxel_um`; read only
+    when ``voxel_um`` is automatic).  No grid is made: the render estimate sizes a
+    Hybrid's field at pixels it has no raster for with it (``service.estimate``)."""
     if curve_area > 0:
         rest = max(area - curve_area, 1e-9)
         widen = max(int(curve_raw_faces), int(max_raw_faces * curve_area / rest))
@@ -1566,7 +1586,7 @@ def _size_voxel(bodies: list[_Body], thin: list[float], *, voxel_um: float, max_
         floor = TYPED_MIN_VOXEL_UM
         asked = float(np.clip(typed, floor, MAX_VOXEL_UM))
     else:
-        asked = typed = auto_voxel_um(thin, 0.0)
+        asked = typed = float(auto_um)
         if max_auto_um and max_auto_um > 0:
             # A raster in the field (Hybrid's outlines) is not to be contoured
             # coarser than it was drawn.

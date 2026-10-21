@@ -44,6 +44,15 @@ How each number is made:
   surfaces: 1.70 M triangles 97 MB, 3.40 M 146, 7.07 M 263.  The sum is held
   to the memory the server gives builds (``SBFSEM_MESH_MEMORY_MB``, 9,000 MB in
   production).
+* **A Hybrid in one field** (Voxel remesh or Ultraliser on a cell with traced
+  outlines and discs, 2.7.0) is its discs' whole-cell sheet with the outline
+  raster drawn into it, not the two halves: the build gate's price
+  (``SbfsemService.estimate_peak_mb``) of the sheet the gate plans
+  (``FieldPlanner``), planned here at the pixel asked so the gate finds it made;
+  past the raster the web process may make (``OUTLINE_PLAN_MAX_*``), from the
+  plan at the finest pixel coarser that it may (:class:`HybridSheet`,
+  :class:`_FieldPrice`).  It keeps its Face cap and the outline half's own
+  triangles.
 * **Seconds**: production's, calibrated on the one build timed there (c2628 at
   0.025 um: 109 s from job start to the finished JSON, 2.5 times this Mac's
   quiet 29.6 s build and 14 s serialization); serving since 2.19.6 0.29 to 0.31 s
@@ -84,6 +93,7 @@ from ..geometry.closed_curve import (
     build_curve_volume,
     curve_voxel_counter,
     finest_fitting_pixel,
+    surface_fitting_pixel,
 )
 from ..geometry.volume import curve_volume_to_mesh
 
@@ -97,6 +107,8 @@ __all__ = [
     "CURVE_RASTER_META",
     "CostEstimator",
     "FieldPlanner",
+    "HybridSheet",
+    "OneField",
     "RasterCount",
     "raster_record",
 ]
@@ -260,6 +272,17 @@ def raster_record(volume: CurveVolume, triangles: int) -> dict[str, Any]:
                        int(volume.allocated_voxels), int(triangles)).to_meta()
 
 
+def _curve_build_mb(triangles: float, averaging: bool, joins: bool = False) -> float:
+    """A closed-curve build's peak for a surface of ``triangles`` (``BUILD_*``),
+    with the averaging and the joining of bodies when they are on."""
+    peak = BUILD_BASE_MB + BUILD_BYTES_PER_TRIANGLE * triangles / 1e6
+    if averaging:
+        peak += min(peak * AVERAGING_SHARE, AVERAGING_MAX_MB)
+    if joins:
+        peak += min(JOIN_BYTES_PER_TRIANGLE * triangles / 1e6, JOIN_MAX_MB)
+    return peak
+
+
 def _thousandths(pixel_um: float) -> int:
     return int(math.ceil(round(float(pixel_um) * 1e3, 6)))
 
@@ -342,7 +365,9 @@ class CostEstimator:
     ``outlines_of(neuron, discs)`` is the facade's ``_curve_outlines`` (the
     outlines a build of that kind rasterizes and the keywords it passes);
     ``disc_peak_mb(neuron, options)`` is the facade's memory estimate for a
-    Hybrid's disc half.
+    Hybrid's disc half; ``one_field(neuron, options)`` how the facade plans and
+    prices a Hybrid whose outlines and discs are one field (:class:`OneField`),
+    or ``None`` for a build that is not one.
     """
 
     #: Cells (copy and kind) and answers kept.
@@ -350,9 +375,11 @@ class CostEstimator:
     ANSWERS_KEPT = 512
 
     def __init__(self, outlines_of: Callable[[Neuron, bool], tuple[list, dict]],
-                 disc_peak_mb: Callable[[Neuron, dict], float]) -> None:
+                 disc_peak_mb: Callable[[Neuron, dict], float],
+                 one_field: Callable[[Neuron, dict], OneField | None] | None = None) -> None:
         self._outlines_of = outlines_of
         self._disc_peak_mb = disc_peak_mb
+        self._one_field = one_field
         self._cells: OrderedDict[tuple, _Cell] = OrderedDict()
         self._answers: OrderedDict[tuple, dict] = OrderedDict()
         # Builds of a cell seen before its first estimate, kept for it.
@@ -509,7 +536,11 @@ class CostEstimator:
         answer_key = (str(neuron.source), int(neuron.id), getattr(neuron, "load_serial", None),
                       method, round(pixel, 6), avg_discs > 0, avg_paths > 0, joins,
                       str(options.get("pathway", "original")), str(options.get("meshlab", "none")),
-                      int(options.get("meshlab_depth", 9)), float(memory_limit_mb))
+                      int(options.get("meshlab_depth", 9)), float(memory_limit_mb),
+                      # A Hybrid's disc half is priced by its Face cap and Fine voxel, and in
+                      # one field its sheet by every option that sizes it.
+                      *((repr(options.get(k)) for k in HYBRID_FIELD_KEYS)
+                        if method == "hybrid" else ()))
         with self._lock:
             cached = self._answers.get(answer_key)
             if cached is not None:
@@ -564,6 +595,44 @@ class CostEstimator:
         except RuntimeError:
             _REFERENCE_SLOT.release()
 
+    def _field_price(self, one: OneField, cell: _Cell, ref: RasterCount, pixel: float,
+                     voxels: int, outline_at: Callable[[float], float]
+                     ) -> tuple[_FieldPrice | None, bool]:
+        """A one-field Hybrid's price, from its plan at the pixel asked or, when that
+        raster is past what the planner makes in the web process
+        (``OUTLINE_PLAN_MAX_FACES``, ``OUTLINE_PLAN_MAX_VOXELS``), at the finest pixel
+        coarser than it whose raster is not; and whether the slot it is made in was
+        held by another raster (no plan, the old price, asked again).  The plan is the
+        build gate's, kept for it: the gate finds it made.  ``None`` when the build
+        would not be one field, or no plan could be made."""
+        at = float(pixel)
+        if ref.faces_at(at) > OUTLINE_PLAN_MAX_FACES:
+            ratio = ref.pixel_um / at
+            at = surface_fitting_pixel(at, int(ref.plane * ratio), int(ref.across * ratio * ratio),
+                                       OUTLINE_PLAN_MAX_FACES)
+        if self._voxels(cell, at) > OUTLINE_PLAN_MAX_VOXELS:
+            at = finest_fitting_pixel(lambda px: self._voxels(cell, px), at,
+                                      OUTLINE_PLAN_MAX_VOXELS)
+        at = min(at, 1.0)
+        for _ in range(4):
+            try:
+                sheet = one.plan(at, 0.0)
+            except _Unplanned as why:
+                if why.busy:
+                    return None, True
+                # Over the planner's bounds after all (the faces were scaled): coarser.
+                if at >= 1.0:
+                    break
+                at = min(1.0, math.ceil(at * 1.25 * 1e3) / 1e3)
+                continue
+            except Exception:  # noqa: BLE001 - the plan only improves the estimate
+                log.warning("no one-field plan for the estimate", exc_info=True)
+                break
+            if sheet is None:
+                break
+            return _FieldPrice(one, sheet, pixel, voxels, outline_at), False
+        return None, False
+
     def _estimate(self, neuron: Neuron, method: str, pixel: float, avg_discs: float,
                   avg_paths: float, options: dict, memory_limit_mb: float) -> dict:
         if not (math.isfinite(pixel) and FINEST_UM <= pixel <= 1.0):
@@ -593,30 +662,45 @@ class CostEstimator:
         per_face = cell.triangles_per_face(pixel)
         hybrid_discs = 0
         disc_mb = 0.0
+        one: OneField | None = None
         if method == "hybrid":
             nodes = neuron.get_cell_nodes()
             hybrid_discs = (int((nodes["TypeCode"] == 1).sum()) if "TypeCode" in nodes.columns
                             else len(nodes))
             if hybrid_discs:
                 disc_mb = float(self._disc_peak_mb(neuron, options))
+                if self._one_field is not None:
+                    one = self._one_field(neuron, options)
         averaging = avg_discs > 0 or avg_paths > 0
         joins = method == "closedcurve" and float(options.get("curve_tie_um", 0.0) or 0.0) > 0
+        voxels = self._voxels(cell, pixel)
+
+        def outline_at(px: float) -> float:
+            return per_face * ref.faces_at(px)
+
+        # A Hybrid whose outlines and discs are one field (2.7.0) is its discs' sheet
+        # with the outline raster drawn into it, and is priced as the build gate prices
+        # it; until 2026-10-20 the page added the old price of the discs alone to the
+        # outline half's, and said 989 MB for RPC1 c2628 at 0.25 um where the build
+        # peaks at 2,849 and the gate weighs it 3,293 (2026-10-20).
+        field: _FieldPrice | None = None
+        if one is not None:
+            field, busy = self._field_price(one, cell, ref, pixel, voxels, outline_at)
+            # The slot is another raster's: the old price for now, asked again.
+            approximate = approximate or busy
 
         def triangles_at(px: float) -> float:
-            return per_face * ref.faces_at(px) + hybrid_discs * DISC_TRIANGLES
+            if field is not None:
+                return field.kept(px)
+            return outline_at(px) + hybrid_discs * DISC_TRIANGLES
 
         def build_mb(tri: float, averaging: bool = averaging, joins: bool = joins) -> float:
-            curve = tri - hybrid_discs * DISC_TRIANGLES
-            peak = BUILD_BASE_MB + BUILD_BYTES_PER_TRIANGLE * curve / 1e6
-            if averaging:
-                peak += min(peak * AVERAGING_SHARE, AVERAGING_MAX_MB)
-            if joins:
-                peak += min(JOIN_BYTES_PER_TRIANGLE * curve / 1e6, JOIN_MAX_MB)
-            return peak + disc_mb
+            return _curve_build_mb(tri - hybrid_discs * DISC_TRIANGLES, averaging, joins) + disc_mb
 
         def costs(px: float, averaging: bool = averaging, joins: bool = joins) -> dict[str, float]:
             tri = triangles_at(px)
-            peak = build_mb(tri, averaging, joins)
+            peak = (field.peak_mb(px, averaging) if field is not None
+                    else build_mb(tri, averaging, joins))
             serve = SERVE_BASE_MB + SERVE_BYTES_PER_TRIANGLE * tri / 1e6
             return {"faces": ref.faces_at(px), "triangles": tri, "peak_mb": peak,
                     "serve_mb": serve, "server_mb": peak + serve,
@@ -636,13 +720,16 @@ class CostEstimator:
             return over
 
         now = costs(pixel)
-        voxels = self._voxels(cell, pixel)
         over = over_at(pixel)
         if voxels > MAX_VOXELS:
             over.insert(0, "voxels")
         # The finest pixel every limit holds with HEADROOM to spare: the analytic
         # ones first, then the voxel plan at that pixel (searched only when over).
-        finest = finest_by(lambda px: not over_at(px, HEADROOM))
+        # A one-field Hybrid over a limit is searched from the pixel asked up: its
+        # sheet stops being decimated where the outline half's triangles pass it, so
+        # its price need not grow as the pixel shrinks.
+        start = pixel if field is not None and over else FINEST_UM
+        finest = finest_by(lambda px: not over_at(px, HEADROOM), start)
         # Which limit set it: the one a thousandth finer would break.
         binding: str | None = None
         if finest is not None and finest > FINEST_UM:
@@ -670,22 +757,27 @@ class CostEstimator:
                 def fits_without(px: float, a: bool = with_avg, j: bool = with_joins) -> bool:
                     return not over_at(px, HEADROOM, a, j)
 
-                alt = finest_by(fits_without)
+                alt = finest_by(fits_without, start)
                 if alt is not None and self._voxels(cell, alt) > MAX_VOXELS:
                     alt = finest_fitting_pixel(lambda px: self._voxels(cell, px), alt, MAX_VOXELS)
                 if alt is not None and alt < finest - 1e-9:
                     alternatives.append({"off": name, "set": sets, "finest_um": alt,
                                          "fits": not over_at(pixel, 1.0, with_avg, with_joins)
                                          and voxels <= MAX_VOXELS})
+        curve_now = field.outline(pixel) if field is not None else outline_at(pixel)
         seconds = (SECONDS_START + SECONDS_PER_OUTLINE * cell.n_outlines
-                   + SECONDS_PER_MILLION_TRIANGLES * (now["triangles"] - hybrid_discs * DISC_TRIANGLES) / 1e6)
+                   + SECONDS_PER_MILLION_TRIANGLES * curve_now / 1e6)
         seconds *= 1.0 + (AVERAGING_DISCS_TIME if avg_discs > 0 else 0.0) + (
             AVERAGING_PATHS_TIME if avg_paths > 0 else 0.0) + (JOIN_TIME if joins else 0.0)
         seconds += DISC_SECONDS * hybrid_discs
         seconds += SERVE_SECONDS_PER_MILLION_TRIANGLES * now["triangles"] / 1e6
         tri_low = TRIANGLES_PER_FACE_LOW * now["faces"] + hybrid_discs * DISC_TRIANGLES
         tri_high = TRIANGLES_PER_FACE_HIGH * now["faces"] + hybrid_discs * DISC_TRIANGLES
-        if built:
+        if field is not None:
+            raw = field.raw(pixel)
+            tri_low = field.one.kept(raw, TRIANGLES_PER_FACE_LOW * now["faces"])
+            tri_high = field.one.kept(raw, TRIANGLES_PER_FACE_HIGH * now["faces"])
+        if built or (field is not None and field.planned):
             tri_low = tri_high = now["triangles"]
         return {
             **base,
@@ -705,6 +797,16 @@ class CostEstimator:
             "seconds": round(seconds, 1),
             "outlines": cell.n_outlines,
             "hybrid_discs": hybrid_discs,
+            # A Hybrid in one field: the plan its sheet is priced from (made at the
+            # pixel asked whenever its raster may be made here), and the sheet.
+            "one_field": None if field is None else {
+                "pixel_um": field.sheet.pixel_um,
+                "planned": field.planned,
+                "raw_triangles": int(field.raw(pixel)),
+                "outline_triangles": int(round(field.outline(pixel))),
+                "voxel_um": round(field.sheet.voxel_um, 4),
+                "reason": field.sheet.reason,
+            },
             "averaging": averaging,
             "joins": joins,
             "basis": {"kind": basis, "pixel_um": ref.pixel_um},
@@ -735,6 +837,10 @@ FIELD_PIECE_KEYS = ("pathway", "voxel_detail", "voxel_smooth_um", "ring_arc_um",
 #: And what decides a Hybrid's outline half in the field: the raster's pixel and
 #: the reach of its bridges across skipped sections.
 OUTLINE_PIECE_KEYS = ("pixel_size_um", "curve_bridge_um", "curve_link_bridge_um")
+#: What a Hybrid's render estimate depends on besides the pixel: its disc half's Face
+#: cap and Fine voxel, and in one field everything that sizes its sheet.
+HYBRID_FIELD_KEYS = ("voxel2_faces", "voxel2_um", "voxel2_blend_um", "reduce_fraction",
+                     *FIELD_PIECE_KEYS, *OUTLINE_PIECE_KEYS[1:])
 
 #: The largest outline raster the planner makes of a Hybrid's outline half, and the
 #: most exposed faces it contours: the bounds of the render estimate's reference
@@ -751,7 +857,157 @@ OUTLINE_PLAN_WAIT_S = 30.0
 
 
 class _Unplanned(Exception):
-    """A Hybrid's outline half too large to raster in the web process, or its slot busy."""
+    """A Hybrid's outline half too large to raster in the web process, or (``busy``)
+    the slot it is made in held by another raster for longer than the caller waits."""
+
+    def __init__(self, why: str, *, busy: bool = False) -> None:
+        super().__init__(why)
+        self.busy = busy
+
+
+@dataclass(frozen=True)
+class HybridSheet:
+    """A one-field Hybrid's plan at the pixel its outlines were rastered at, and what
+    sizes it again at another pixel without a raster there.
+
+    ``raw_triangles`` is the sheet the build gate prices (``FieldPlanner``'s plan,
+    the voxel the build contours at); ``outline_triangles`` the outline half's own
+    contour at ``pixel_um``.  At another pixel the field is sized as
+    :func:`~sbfsem.geometry.unify.plan_voxel` sizes it -- the discs' own voxel no
+    coarser than the pixel, and a raw budget widened by the outline half's
+    triangles there -- from these areas, and the plan's sheet is scaled by how
+    much that sizing moves (:meth:`raw_at`).  What it does not see is the field's
+    work budget, which the raster's footprint sets (a coarser raster's tiles reach
+    more of the grid), and the outline contour's area, which grows as a finer pixel
+    resolves more of it.  Measured 2026-10-20 against each pixel's own plan, from a
+    plan at 0.1 um: RPC1 c2628's sheet 7 % short at 0.07 um, 12 % at 0.05 and 15 % at
+    0.04 (its traced contour 3,098 -> 3,654 um^2); RC1 c410's, held by its work
+    budget, 14 %, 23 % and 34 %; Inferior c1178's, held by its raw budget, exact from
+    0.5 to 0.04 um.  From a plan at 0.25 um c2628 is 29 % short at 0.1 um and c410
+    60 % (its field's voxel 0.079 -> 0.055 um), so the estimate plans the pixel asked
+    for whenever its raster may be made here.  No coarser pixel draws more than the
+    plan's (all three, 0.5 to 0.04 um), and this says it draws as much.
+    """
+
+    pixel_um: float
+    raw_triangles: int
+    outline_triangles: int
+    area_um2: float
+    curve_area_um2: float
+    auto_um: float
+    typed_um: float
+    face_cap: int
+    voxel_um: float
+    reason: str
+
+    def _sized(self, pixel_um: float, outline_triangles: float) -> float:
+        from ..geometry.cylinder import EXTRA_RAW_PER_FACE
+        from ..geometry.unify import raw_budget, size_voxel
+
+        size = size_voxel(self.area_um2, self.curve_area_um2, self.auto_um,
+                          voxel_um=self.typed_um, max_raw_faces=raw_budget(self.face_cap),
+                          max_auto_um=float(pixel_um),
+                          curve_raw_faces=(int(EXTRA_RAW_PER_FACE * outline_triangles)
+                                           if self.face_cap > 0 else 0))
+        return float(min(size.raw_faces, size.raw_budget))
+
+    def raw_at(self, pixel_um: float, outline_triangles: float) -> int:
+        """The raw triangles at ``pixel_um``, whose outline half draws
+        ``outline_triangles`` there: the plan's own at its pixel and triangles."""
+        if abs(float(pixel_um) - self.pixel_um) < 1e-12 \
+                and int(round(outline_triangles)) == self.outline_triangles:
+            return self.raw_triangles
+        here = self._sized(self.pixel_um, self.outline_triangles)
+        if here <= 0:
+            return self.raw_triangles
+        return int(round(self.raw_triangles * self._sized(pixel_um, outline_triangles) / here))
+
+
+@dataclass(frozen=True)
+class OneField:
+    """How the service builds and prices one cell's Hybrid in one field, for the render
+    estimate: ``plan(pixel_um, wait_s)`` is ``FieldPlanner.hybrid_sheet`` with the
+    estimate's options at that pixel (raising :class:`_Unplanned`, ``None`` when the
+    build would not be one field), ``peak_mb(pixel_um, voxels, raw_triangles,
+    outline_triangles, averaging)`` the build gate's price of it; ``face_cap`` and
+    ``reduce_fraction`` decide the triangles it keeps."""
+
+    plan: Callable[[float, float], HybridSheet | None]
+    peak_mb: Callable[[float, float, int, int, bool], float]
+    face_cap: int
+    reduce_fraction: float = 1.0
+
+    def kept(self, raw_triangles: float, outline_triangles: float) -> float:
+        """The triangles the build keeps: its sheet times Decimate, under the Face cap
+        and the outline half's own triangles (``cylinder_render``'s decimate; every
+        build measured on 2026-10-20 kept exactly the cap and the outline half's)."""
+        raw = float(raw_triangles) * min(float(self.reduce_fraction), 1.0)
+        return min(raw, self.face_cap + float(outline_triangles)) if self.face_cap > 0 else raw
+
+
+class _FieldPrice:
+    """A one-field Hybrid's price at any pixel, from one plan (:class:`HybridSheet`).
+
+    At the plan's pixel it is the build gate's price to the MB: the plan's sheet, its
+    outline half's triangles, and the raster's voxels counted at the pixel asked.
+    Elsewhere the outline half's triangles are the estimate's own law, scaled to the
+    plan's count at its pixel; the sheet is the plan's carried there
+    (:meth:`HybridSheet.raw_at`); and the voxels, counted only at the pixel asked, go
+    as 1 / pixel^2 finer than it and 1 / pixel coarser (measured between 1.2 and 2.3,
+    RPC1 c2628, RC1 c410, Inferior c1178 from 0.25 to 0.05 um), never past
+    ``OUTLINE_PLAN_MAX_VOXELS``.  The gate's price adds the outline raster's own (50
+    bytes a voxel) to the sheet; past the raster the planner makes it prices the most
+    any budget lets a build draw instead, and the estimate holds the raster's price at
+    what such a raster costs: a one-field build keeps its raster through the field (a
+    byte a voxel) but not the outline half's contour, made and let go before it.  That
+    margin also covers the sheet's shortfall at pixels finer than its plan.  Measured
+    2026-10-20 on this Mac, Hybrid voxel2 at the default Face cap, the build process and
+    its decimator together at their highest: at 0.05 um, from a plan at 0.099 to 0.101
+    um, RPC1 c2628 (36 million voxels) 4,751 MB, priced 5,149 (6,460 with every voxel
+    and its own plan); RC1 c410 2,376 against 2,553; Inferior c1178 1,797 against 3,889.
+    At pixels the gate plans the price is the gate's: c2628 at 0.25 and 0.1 um 2,849
+    and 4,269 against 3,293 and 4,762, c1178 at 0.25 um 1,322 against 1,888, c410
+    1,149 against 1,256.
+    """
+
+    def __init__(self, one: OneField, sheet: HybridSheet, pixel_um: float, voxels: int,
+                 outline_at: Callable[[float], float]) -> None:
+        self.one = one
+        self.sheet = sheet
+        self.pixel_um = float(pixel_um)
+        self.voxels = int(voxels)
+        self._outline_at = outline_at
+        self._scale = sheet.outline_triangles / max(outline_at(sheet.pixel_um), 1.0)
+        self.planned = abs(sheet.pixel_um - self.pixel_um) < 1e-12
+        self._peaks: dict[tuple[float, bool], float] = {}
+
+    def outline(self, px: float) -> float:
+        if abs(px - self.sheet.pixel_um) < 1e-12:
+            return float(self.sheet.outline_triangles)
+        return self._outline_at(px) * self._scale
+
+    def raw(self, px: float) -> int:
+        return self.sheet.raw_at(px, self.outline(px))
+
+    def voxels_at(self, px: float) -> float:
+        ratio = self.pixel_um / float(px)
+        return float(min(self.voxels * (ratio * ratio if ratio > 1.0 else ratio),
+                         OUTLINE_PLAN_MAX_VOXELS))
+
+    def kept(self, px: float) -> float:
+        return self.one.kept(self.raw(px), self.outline(px))
+
+    def peak_mb(self, px: float, averaging: bool) -> float:
+        """The gate's price, and never less than the outline half's contour on its own
+        (made before the field, as a Closed curve build makes it): at the finest pixels
+        that one is the peak (RPC1 c2628 at 0.025 um, 9.6 million triangles)."""
+        key = (round(float(px), 9), bool(averaging))
+        if key not in self._peaks:
+            outline = self.outline(px)
+            self._peaks[key] = max(float(self.one.peak_mb(
+                float(px), self.voxels_at(px), self.raw(px), int(round(outline)),
+                bool(averaging))), _curve_build_mb(outline, bool(averaging)))
+        return self._peaks[key]
 
 
 #: What the planner keeps for a Hybrid whose outline raster is over its bounds.
@@ -829,7 +1085,8 @@ class FieldPlanner:
     def _hybrid(options: dict) -> bool:
         return str(options.get("method", "")) == "hybrid"
 
-    def _cell(self, neuron: Neuron, options: dict) -> tuple[list, list, int]:
+    def _cell(self, neuron: Neuron, options: dict,
+              wait_s: float = OUTLINE_PLAN_WAIT_S) -> tuple[list, list, int]:
         from ..geometry.cylinder import STRAND_COIN_HALF_UM
         from ..geometry.unify import field_bodies
 
@@ -845,7 +1102,7 @@ class FieldPlanner:
         items: list = []
         extra = 0
         if self._hybrid(options):
-            halves = self._outline_halves(neuron, options)
+            halves = self._outline_halves(neuron, options, wait_s)
             if halves is _TOO_LARGE:
                 with self._lock:
                     self._bodies[key] = _TOO_LARGE
@@ -868,13 +1125,17 @@ class FieldPlanner:
                 self._bodies.popitem(last=False)
         return made
 
-    def _outline_halves(self, neuron: Neuron, options: dict) -> Any:
+    def _outline_halves(self, neuron: Neuron, options: dict,
+                        wait_s: float = OUTLINE_PLAN_WAIT_S) -> Any:
         """``halves_of``'s answer, in the slot the web process makes one raster at a
-        time in; :data:`_TOO_LARGE` over the bounds."""
+        time in, waited for up to ``wait_s`` (0: not at all); :data:`_TOO_LARGE`
+        over the bounds."""
         if self._halves_of is None:
             return None
-        if not _REFERENCE_SLOT.acquire(timeout=OUTLINE_PLAN_WAIT_S):
-            raise _Unplanned("another outline raster is being made")
+        got = (_REFERENCE_SLOT.acquire(timeout=wait_s) if wait_s > 0
+               else _REFERENCE_SLOT.acquire(blocking=False))
+        if not got:
+            raise _Unplanned("another outline raster is being made", busy=True)
         try:
             return self._halves_of(neuron, options, OUTLINE_PLAN_MAX_VOXELS,
                                    OUTLINE_PLAN_MAX_FACES)
@@ -893,7 +1154,8 @@ class FieldPlanner:
         return (str(neuron.source), int(neuron.id), getattr(neuron, "load_serial", None),
                 *(repr(options.get(k)) for k in FIELD_PIECE_KEYS), *hybrid)
 
-    def _plan(self, neuron: Neuron, options: dict, voxel_um: float, faces: int) -> VoxelPlan | None:
+    def _plan(self, neuron: Neuron, options: dict, voxel_um: float, faces: int,
+              wait_s: float = OUTLINE_PLAN_WAIT_S) -> VoxelPlan | None:
         """:func:`~sbfsem.geometry.unify.plan_voxel` of the cell's bodies for a Fine
         voxel of ``voxel_um`` under Face cap ``faces``, kept: 0.04 to 0.11 s a plan."""
         from ..geometry.cylinder import EXTRA_RAW_PER_FACE
@@ -907,7 +1169,7 @@ class FieldPlanner:
             if key in self._plans:
                 self._plans.move_to_end(key)
                 return self._plans[key]
-        bodies, thin, extra = self._cell(neuron, options)
+        bodies, thin, extra = self._cell(neuron, options, wait_s)
         # A Hybrid's raster is contoured no coarser than it was drawn, and its own
         # triangles widen the raw budget (cylinder_render's extra_faces).
         hybrid = self._hybrid(options)
@@ -941,6 +1203,31 @@ class FieldPlanner:
                      getattr(neuron, "id", "?"), why, f"{MAX_RAW_FACES:,}")
             return MAX_RAW_FACES
         return None if plan is None else int(min(plan.raw_faces, plan.raw_budget))
+
+    def hybrid_sheet(self, neuron: Neuron, options: dict, *,
+                     wait_s: float = 0.0) -> HybridSheet | None:
+        """A one-field Hybrid's plan at ``options``' pixel -- the one the build gate
+        prices (:meth:`raw_triangles`), kept for it -- and what sizes it at other
+        pixels; ``None`` when the build would not be one field.  Raises
+        :class:`_Unplanned` when its outline raster is too large to make here, or
+        (``busy``) when the slot stays held for ``wait_s``."""
+        from ..geometry.unify import auto_voxel_um, body_areas
+
+        if not self._hybrid(options):
+            return None
+        typed = float(options.get("voxel2_um", 0.0) or 0.0)
+        cap = int(options.get("voxel2_faces", 0) or 0)
+        plan = self._plan(neuron, options, typed, cap, wait_s)
+        if plan is None:
+            return None
+        bodies, thin, extra = self._cell(neuron, options, wait_s)
+        area, curve_area = body_areas(bodies)
+        return HybridSheet(
+            pixel_um=float(options["pixel_size_um"]),
+            raw_triangles=int(min(plan.raw_faces, plan.raw_budget)),
+            outline_triangles=int(extra), area_um2=area, curve_area_um2=curve_area,
+            auto_um=0.0 if typed > 0 else auto_voxel_um(thin, 0.0), typed_um=typed,
+            face_cap=cap, voxel_um=float(plan.voxel_um), reason=str(plan.reason))
 
     def outline_triangles(self, neuron: Neuron, options: dict) -> int:
         """The triangles a Hybrid's outline half brings to the Face cap, as its plan

@@ -963,7 +963,13 @@ it. The estimate is made from the outlines without building (`docs/api.md`,
 `render-estimate`): the voxels exactly, the faces from one raster of the cell at
 0.1 µm (or its last build) scaled as 1 / size in the planes and 1 / size² between
 sections, within 2 % on c2628, c16137 and RC1 c410; the first estimate of a cell
-takes a few seconds, the next a fraction of one.
+takes a few seconds, the next a fraction of one. A Hybrid under Voxel remesh or
+Ultraliser on a cell with traced outlines is one surface, its outlines drawn into
+the discs' whole-cell sheet (2.7.0), and since 2.20.2 its estimate is that sheet's:
+the memory the server's build queue gives it, planned as the build plans it, and the
+triangles the build keeps (its Face cap and the outlines' own). Before, it was the
+two halves' prices added: RPC1 c2628 at the default settings showed about 1 GB
+where its build needs 2.8 GB.
 
 **Decimate** thins
 the finished mesh, which is the other lever if a render is slow to transfer;

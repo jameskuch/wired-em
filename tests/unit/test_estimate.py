@@ -634,6 +634,94 @@ def test_only_a_one_field_hybrid_is_planned_and_a_failed_plan_leaves_the_old_pri
     assert _hybrid_gate(svc, options) == _hybrid_gate(svc, options, planned=False)
 
 
+def _page(svc, options, *, memory=9000.0):
+    return svc.render_estimate(1178, "i", memory_limit_mb=memory, **options)
+
+
+def test_the_page_prices_a_one_field_hybrid_as_the_build_gate_does(mixed):
+    """The cost chip added the old price of a Hybrid's discs alone to its outline half's:
+    RPC1 c2628 at the default settings 989 MB, where the build peaks at 2,849 and the gate
+    weighs it 3,293 (2026-10-20).  It is now the gate's price of the gate's own plan, made
+    for the estimate and found by the gate, and the triangles are the ones the build keeps:
+    its Face cap and its outline half's own."""
+    svc, neuron = mixed
+    planner = svc._field_planner
+    options = _hybrid_options(svc)
+    page = _page(svc, options)
+    assert page["one_field"]["planned"] is True and page["one_field"]["pixel_um"] == 0.25
+    raw = planner.raw_triangles(neuron, options)
+    outline = planner.outline_triangles(neuron, options)
+    assert page["one_field"]["raw_triangles"] == raw
+    assert page["one_field"]["outline_triangles"] == outline
+    assert page["peak_mb"] == pytest.approx(_hybrid_gate(svc, options), abs=1)
+    assert page["triangles"] == options["voxel2_faces"] + outline
+    assert page["server_mb"] == pytest.approx(
+        page["peak_mb"] + estimate.SERVE_BASE_MB + estimate.SERVE_BYTES_PER_TRIANGLE
+        * page["triangles"] / 1e6, abs=1)
+    # Not a field of one surface: the two halves' prices, as before.
+    for pathway in ("convolution", "original"):
+        apart = _page(svc, {**options, "pathway": pathway})
+        assert apart["one_field"] is None, pathway
+
+
+def test_a_hybrids_estimate_is_kept_for_its_face_cap(mixed):
+    """An answer was kept by the pixel and the method's own options, not the Face cap that
+    sizes a one-field Hybrid's sheet: asked again at another cap, the page heard the first."""
+    svc, _neuron = mixed
+    low = _page(svc, _hybrid_options(svc, voxel2_faces=150_000))
+    high = _page(svc, _hybrid_options(svc, voxel2_faces=400_000))
+    assert high["triangles"] - low["triangles"] == 250_000
+    assert high["peak_mb"] != low["peak_mb"]
+
+
+def test_a_one_field_hybrid_too_fine_to_raster_here_is_priced_from_a_coarser_plan(mixed,
+                                                                                    monkeypatch):
+    """Past the raster the web process makes, the gate prices the most any budget lets the
+    build draw (and runs it alone); the page, which coarsens a cell over the memory, prices
+    it from the plan at the finest pixel coarser that it may make, carried to the pixel
+    asked: never under that plan's own price, and under the gate's most."""
+    svc, neuron = mixed
+    fine = {**_hybrid_options(svc), "pixel_size_um": 0.1}
+    cell = svc._estimator._cell(neuron, False)
+    monkeypatch.setattr(estimate, "OUTLINE_PLAN_MAX_VOXELS", svc._estimator._voxels(cell, 0.1) - 1)
+    page = _page(svc, fine)
+    held = page["one_field"]
+    assert held["planned"] is False and 0.1 < held["pixel_um"] < 0.25
+    coarse = {**fine, "pixel_size_um": held["pixel_um"]}
+    assert _hybrid_gate(svc, coarse) <= page["peak_mb"] < _hybrid_gate(svc, fine)
+    assert held["raw_triangles"] >= svc._field_planner.raw_triangles(neuron, coarse)
+
+
+def test_a_one_field_hybrid_over_the_memory_is_fitted_coarser_or_not_at_all(mixed):
+    """Held to a memory between the old price and the gate's, the old estimate said it fits;
+    now it is over, and the size that fits is searched from the one asked up: a one-field
+    sheet stops being decimated where its outline half's triangles pass it, so its price
+    need not grow as the pixel shrinks, and a finer size must never be offered."""
+    svc, _neuron = mixed
+    options = _hybrid_options(svc)
+    limit = _hybrid_gate(svc, options) + 50.0
+    over = _page(svc, options, memory=limit)
+    assert "memory" in over["over"]
+    assert over["finest_um"] is None or over["finest_um"] > options["pixel_size_um"]
+
+
+def test_a_one_field_hybrids_estimate_waits_for_no_other_raster(mixed):
+    """The plan is made in the one slot the web process rasters in; held by another raster,
+    the page is answered at the old price, marked approximate (not kept, asked again), and
+    priced from the plan once the slot is free."""
+    svc, _neuron = mixed
+    _page(svc, _hybrid_options(svc))
+    assert estimate._REFERENCE_SLOT.acquire(timeout=120)
+    try:
+        held = _page(svc, {**_hybrid_options(svc), "pixel_size_um": 0.2})
+    finally:
+        estimate._REFERENCE_SLOT.release()
+    assert held["approximate"] is True and held["one_field"] is None
+    again = _page(svc, {**_hybrid_options(svc), "pixel_size_um": 0.2})
+    assert again["approximate"] is False and again["one_field"]["planned"] is True
+    assert again["peak_mb"] > held["peak_mb"]
+
+
 # -- the route ----------------------------------------------------------------------
 
 
