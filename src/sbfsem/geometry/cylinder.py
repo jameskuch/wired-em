@@ -30,6 +30,7 @@ import numpy as np
 from scipy.optimize import minimize
 
 from ..progress import report
+from ..util.memory import trim_memory
 from .mesh import EMPTY_MESH, Mesh, concatenate
 from .remesh import REMESH_MIN_RADIUS_UM
 from .wrap import WRAP_BLEND, WRAP_PASSES, WRAP_REJECT_SIGMA, WRAP_SPACING_UM
@@ -1250,6 +1251,11 @@ def cylinder_render(
                 curve_raw_faces=int(EXTRA_RAW_PER_FACE * extra_faces) if voxel2_faces > 0 else 0,
                 hull_tilt_deg=exact_tube_deg if use_remesh != "convolution" else 0.0,
             )
+            # The field's blocks and their triangles, let go once welded, stay with
+            # the process as glibc heap unless handed back: here, before the
+            # smoothing takes its own (on the server, c1178 at 0.042 um under a
+            # Face cap of 3.4 million: 180 MB; the smoothing 955 -> 790 MB).
+            trim_memory(collect=False)
             if use_remesh == "ultraliser" and not unified.is_empty:
                 # Ultraliser's optimizer: Laplacian smoothing with an inflate
                 # step to dampen the shrinking of thin parts, then coarsening
@@ -1376,7 +1382,12 @@ def cylinder_render(
     # Each stage is handed the mesh as the only reference to it (decimate lets it go).
     held = [combined]
     del combined
-    for stage in stages:
+    for i, stage in enumerate(stages):
+        if i:
+            # What the first stage freed goes back before the second, so the
+            # decimator's child does not run beside it (c1178's default build:
+            # the build process 460 -> 230 MB while the child works).
+            trim_memory(collect=False)
         held.append(stage(held.pop()))
     combined = held.pop()
 

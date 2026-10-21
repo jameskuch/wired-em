@@ -13,6 +13,20 @@
 - README (Wired, how to deploy without naming the server, contributing), LICENSE.txt (the port's notice beside the original), CONTRIBUTING.md and CITATION.cff (GitHub's *Cite this repository*). CI (`.github/workflows/ci.yml`) now runs on the public copy: Ubuntu with Python 3.11 to 3.13 and macOS with 3.13; Windows joins once the suite has been run there. Tests: `tests/unit/test_publish_public.py` (new, 6: what is left out and replaced, every refusal, and a publish from a real repository and clone that carries only the committed tree).
 - **The first public CI run found that skimage on Apple Silicon draws knife-edge pixels differently.** Its arm64 build fuses `x0*y1 - x1*y0` into one multiply-add (rounding `x1*y0` alone), so on GitHub's macOS runner two of the random-polygon cases came out 11 and 1 pixels away from the fill; `math.fma` reproduces exactly those pixels, and the x86_64 builds (this Mac's Python, the Ubuntu runners, production) match the fill bit for bit. The fill is numpy, which never fuses, so it gives one answer everywhere; where skimage fuses, `tests/unit/test_rasterize.py` now holds it to skimage's rule with each product rounded on its own (`unfused_mask`), and checks that rule against skimage itself wherever skimage does not fuse (+12 tests, all 3,600 random polygons). Rings the library hands to skimage itself (small, not finite, or too large) are still compared with skimage on every platform.
 
+## 2.20.1 — 2026-10-20
+
+### A fine Voxel remesh peaks lower again, and the default build decimates beside half as much (2026-10-20)
+
+- **A render now hands what it has freed back to the system between its steps: once a whole-cell field is made (Voxel remesh, Convolution, Ultraliser, Hybrid in one field) and again between the smoothing and the decimating.** glibc keeps freed memory as heap unless it is asked to give it back (`malloc_trim`), and a field build frees much of it in small pieces: the blocks' triangles, let go once they are welded into the sheet, are about 180 MB of Inferior c1178 at 0.042 µm, and they stayed resident through the smoothing beside its own arrays. 2.19.8 already did this as a chunked decimation starts. Measured on the server, c1178, each build's peak counting the decimator's child, 2.20.0 → 2.20.1 (2.20.0 builds with 2.19.8's code), every surface the same to the bit (the same SHA-256):
+  - at 0.042 µm under a Face cap of 3.4 million (6.9 million raw triangles), 952 to 958 → 907 to 913 MB in a fresh process and 957 → 904 for the same build made again. The smoothing step itself went 953–957 → 787–795. The build's peak is now the weld of the blocks, which is its live arrays.
+  - the default build (842,000 raw triangles to 400,000), 571–572 → 513–514 MB in a fresh process and 595–600 → 513–516 made again. After the fine builds it went 755 → 524, and after an uncapped one 637 → 517. The build process holds about 230 MB while the decimator's child works, where it held 460.
+  - uncapped (2.3 million triangles kept), 497 → 439 MB.
+  - at 0.07 µm under 1.2 million (2.5 million raw), the peak is unchanged (607–616 against 611–628). It is set by the chunked decimation's child, which 2.19.8 already starts on a trimmed heap.
+- Each trim takes 2 to 17 ms. Timed on the server with the old and new code taking turns: the fine build 86.2 and 86.4 → 81.8 and 84.0 s, the default 11.3 to 12.3 → 11.2 to 11.5 s, within the runs' spread.
+- Trims inside the field step as well, before the weld and before the tied sheet is welded, were measured and not adopted. They hand back 4 to 66 MB and moved no build's peak (`docs/context/rejected-ideas.md`).
+- No stored surface changes and nothing is built again (no `GEOMETRY_VERSION` bump). The build gate's prices are unchanged.
+- Docs: `docs/deployment.md` (the build processes). Tests: `tests/unit/test_raw_sheet_memory.py` (+1: the trims fall once the field is contoured and tied and between the two stages, in either order, never with a collection, and the surface is the one built without them; it fails on 2.20.0, which makes neither).
+
 ## 2.20.0 — 2026-10-20
 
 ### The view cube in Render compare, turning every pane (2026-10-20)

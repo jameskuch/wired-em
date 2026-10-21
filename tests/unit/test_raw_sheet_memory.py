@@ -214,3 +214,41 @@ def test_the_chunked_decimator_lets_a_handed_over_sheet_go_before_the_join(monke
     assert alive and not any(alive)
     assert _same(out.vertices, expected.vertices) and _same(out.faces, expected.faces)
     assert out.meta == expected.meta
+
+
+def test_the_heap_goes_back_after_the_field_and_between_the_stages(monkeypatch, i943_path):
+    """What the field and the first stage free is handed back before the next step
+    (glibc's ``malloc_trim``; on the server 180 MB before c1178's smoothing at 0.042
+    um): once when the field is made, once between the stages, in either order,
+    and the surface is the one built without them."""
+    from sbfsem import progress
+    from sbfsem.geometry import cylinder
+    from sbfsem.io.legacy_json import read_legacy_json
+
+    neuron = read_legacy_json(i943_path)
+    options = {"pathway": "voxel2", "voxel2_um": 0.3, "voxel2_faces": 400_000, "reduce_fraction": 0.5,
+               "smooth_iterations": 1}
+    plain = cylinder.cylinder_render(neuron, **options)
+    for order, middle in (("smooth_first", ["smoothing", "trim", "decimating"]),
+                          ("decimate_first", ["decimating", "trim", "smoothing"])):
+        events: list[str] = []
+
+        def trim(*, collect: bool = True, _events=events) -> bool:
+            assert not collect               # the arrays go by their counts; no collection
+            _events.append("trim")
+            return False
+
+        def listener(stage, done=None, total=None, _events=events):
+            if not _events or _events[-1] != stage:
+                _events.append(stage)
+
+        monkeypatch.setattr(cylinder, "trim_memory", trim, raising=False)
+        with progress.reporting(listener):
+            mesh = cylinder.cylinder_render(neuron, **options, post_order=order)
+        assert events.count("trim") == 2
+        first = events.index("trim")
+        # After the field is contoured and tied, before anything else.
+        assert {"contouring", "tying gaps"} & set(events[:first])
+        assert events[first + 1:] == middle
+        if order == "smooth_first":
+            assert _same(mesh.vertices, plain.vertices) and _same(mesh.faces, plain.faces)

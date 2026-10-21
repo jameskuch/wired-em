@@ -13,7 +13,7 @@ Typical use::
 
 from __future__ import annotations
 
-__version__ = "2.20.0"
+__version__ = "2.20.1"
 
 from .core.structure import Neuron, Structure
 from .core.transforms import Transforms, viking2micron

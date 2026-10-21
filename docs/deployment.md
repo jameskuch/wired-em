@@ -196,7 +196,10 @@ that, one build of Inferior c1178 at Face cap 3,400,000 left its worker at 2.8 G
 for as long as the service ran (2026-10-17). A decimation of 200,000 triangles or
 more runs in a short-lived child of the build process (`sbfsem.geometry.quadric`),
 because `fast_simplification` never gives back what it copied: after the same build a
-worker now holds 181 MB, not 452 (2.19.8). The unit file carries
+worker now holds 181 MB, not 452 (2.19.8). A Voxel remesh, Convolution, Ultraliser or
+Hybrid build hands its freed heap back to the system (`malloc_trim`) once its field is
+made and again between the smoothing and the decimating, so neither step runs beside
+what the last one freed (2.20.1). The unit file carries
 the 16 GB numbers, so do not redeploy it onto a 3.8 GB box unchanged. The *Viking fetch* side of a batch load —
 the part that dominates for cells not yet cached, at several seconds each —
 is network-bound and already runs in parallel with no setting to change.
