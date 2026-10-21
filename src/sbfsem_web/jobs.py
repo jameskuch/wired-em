@@ -31,6 +31,12 @@ A poll may wait for the job to end (:meth:`MeshJobStore.wait`, the poll's
 ``?wait=``): the job wakes it the moment it is done, failed or cancelled, so
 the page hears of a finished build at once rather than at its next poll, and
 nothing holds a thread while it waits.
+
+A running build cannot be stopped (numpy cannot be interrupted, and its result
+lands in the cache harmlessly).  Work that runs for many minutes in steps -- a
+Render compare report (``kind="report"``, :data:`STOPPABLE_KINDS`) -- can: a
+cancel of the last request waiting on it asks it to stop, and it stops at its
+next :func:`sbfsem.progress.check_stop`, ending as ``cancelled``.
 """
 
 from __future__ import annotations
@@ -52,7 +58,7 @@ from sbfsem.service.facade import BuildInterrupted
 
 log = logging.getLogger(__name__)
 
-__all__ = ["MeshJob", "MeshJobStore"]
+__all__ = ["STOPPABLE_KINDS", "MeshJob", "MeshJobStore"]
 
 #: How long a finished job lingers for late polls before it is swept.  The
 #: mesh itself is also in the facade's cache, so a swept job costs a re-poll
@@ -71,6 +77,10 @@ def _env_int(name: str, default: int) -> int:
 #: mesh cache; numpy, scipy and the marching-cubes kernels release the GIL in
 #: their heavy loops, so two workers on two vCPUs overlap real work.
 DEFAULT_WORKERS = _env_int("SBFSEM_MESH_WORKERS", 1)
+
+#: The kinds of job a cancel stops while it runs (between its steps, see the
+#: module docstring); every other kind runs to its end once started.
+STOPPABLE_KINDS = frozenset({"report"})
 
 #: Peak resident memory the running builds may add up to, in MB.  The default is
 #: for a small machine (a 3.8 GB box with MemoryHigh 2600 MB and ~600 MB idle
@@ -105,9 +115,9 @@ class MeshJob:
     #: queued build stops only when nobody is left waiting.
     waiters: int = 1
     #: What the job makes: "mesh" (a render), "deviation" (an error map),
-    #: "diff" (a mesh-to-mesh difference) or "grid" (a cell's whole-cell grid
-    #: kept for the manual moves' Apply).  They share the pool, the memory
-    #: gate, the poll and the cancel.
+    #: "diff" (a mesh-to-mesh difference), "grid" (a cell's whole-cell grid
+    #: kept for the manual moves' Apply) or "report" (Render compare's PDF).
+    #: They share the pool, the memory gate, the poll and the cancel.
     kind: str = "mesh"
     #: Which cell and settings, for the journal ("c1178 NeitzInferiorMonkey
     #: voxel2+isotropic"): job ids alone say nothing when a build takes minutes.
@@ -115,6 +125,9 @@ class MeshJob:
     #: The stage that was running when the job failed, so the message can say
     #: where ("failed during MeshLab remesh"), not only that it did.
     failed_stage: str = ""
+    #: A running job of a :data:`STOPPABLE_KINDS` kind was asked to stop: it
+    #: stops at its next :func:`sbfsem.progress.check_stop`.
+    stop_asked: bool = False
     #: Polls waiting for the job to end (:meth:`MeshJobStore.wait`): each is called
     #: once, from the thread that ends it, under the store's lock.
     watchers: list[Callable[[], None]] = field(default_factory=list, repr=False, compare=False)
@@ -227,8 +240,17 @@ class MeshJobStore:
 
         try:
             try:
-                with progress.reporting(listen):
+                with progress.reporting(listen), progress.stoppable(lambda: job.stop_asked):
                     result = fn()
+            except progress.Stopped:
+                log.info("%s job %s (%s) stopped as asked after %.0f s, during %r", job.kind,
+                         job.id, job.label or "-", time.time() - (job.started or time.time()),
+                         job.stage)
+                with self._lock:
+                    job.finished = time.time()
+                    job.status = "cancelled"
+                    _wake(job)
+                return
             except BuildInterrupted:
                 # The service is stopping (a deploy or a restart) and took the build
                 # with it.  Left running, not failed: the page polls on through the
@@ -333,13 +355,21 @@ class MeshJobStore:
         """Let go of a job; stop it if it has not started and nobody else waits.
 
         A running numpy build cannot be interrupted, and its result is cached
-        harmlessly anyway.  A build two requests joined (two tabs, two people,
+        harmlessly anyway; a running job of a :data:`STOPPABLE_KINDS` kind is
+        asked to stop at its next step.  A build two requests joined (two tabs, two people,
         the same surface) used to be stopped by the first one's cancel -- a
         cell unloaded in one tab left the other with no surface and no error;
         now it is stopped only by the last.
         """
         with self._lock:
             job = self._jobs.get(job_id)
+            if job is not None and job.status == "running" and job.kind in STOPPABLE_KINDS:
+                # Work in steps: the last one waiting asks it to stop at its next step.
+                job.waiters -= 1
+                if job.waiters > 0:
+                    return False
+                job.stop_asked = True
+                return True
             if job is not None and job.status == "queued":
                 job.waiters -= 1
                 if job.waiters > 0:

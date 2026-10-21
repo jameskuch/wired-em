@@ -11,6 +11,12 @@ The listener lives in a :class:`contextvars.ContextVar`, so each job thread
 has its own and concurrent builds never hear each other.  A build that runs
 in a worker process installs a listener there that forwards to the parent
 (``sbfsem.service.facade``).
+
+Work that runs for many minutes in steps (Render compare's report) can also be
+stopped between its steps: the job installs a test with :func:`stoppable`, and
+the work calls :func:`check_stop` where stopping is safe.  With nothing
+installed :func:`check_stop` does nothing, so a build that never asks is never
+interrupted.
 """
 
 from __future__ import annotations
@@ -20,13 +26,21 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 
-__all__ = ["Listener", "Throttle", "current", "prefixed", "report", "reporting"]
+__all__ = ["Listener", "Stopped", "Throttle", "check_stop", "current", "prefixed", "report",
+           "reporting", "stoppable"]
 
 #: ``listener(stage, done, total)``; ``done``/``total`` are ``None`` for a
 #: stage without a count.
 Listener = Callable[[str, "int | None", "int | None"], None]
 
 _listener: ContextVar[Listener | None] = ContextVar("sbfsem_progress", default=None)
+
+#: ``stop()`` says whether the work should stop now; ``None`` when nobody can stop it.
+_stop: ContextVar[Callable[[], bool] | None] = ContextVar("sbfsem_stop", default=None)
+
+
+class Stopped(Exception):
+    """The work was asked to stop, and :func:`check_stop` stopped it between steps."""
 
 
 def report(stage: str, done: int | None = None, total: int | None = None) -> None:
@@ -51,6 +65,34 @@ def reporting(listener: Listener | None) -> Iterator[None]:
         yield
     finally:
         _listener.reset(token)
+
+
+@contextmanager
+def stoppable(stop: Callable[[], bool] | None) -> Iterator[None]:
+    """Let :func:`check_stop` in this context ask ``stop()`` whether to stop."""
+    token = _stop.set(stop)
+    try:
+        yield
+    finally:
+        _stop.reset(token)
+
+
+def check_stop() -> None:
+    """Raise :class:`Stopped` when the work here was asked to stop.
+
+    Called between the steps of long work, where nothing is left half done; a
+    test that itself fails is taken as "carry on" (stopping must never break
+    the work it guards).
+    """
+    stop = _stop.get()
+    if stop is None:
+        return
+    try:
+        asked = bool(stop())
+    except Exception:  # noqa: BLE001 - see the docstring
+        return
+    if asked:
+        raise Stopped("stopped")
 
 
 @contextmanager

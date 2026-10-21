@@ -2993,6 +2993,80 @@ the volume the render claims beyond any annotation's support. Closed-curve
 outlines are shifted from their mosaic frame into the registered volume
 frame by their own annotation's offset before measuring.
 
+### The comparison report (PDF)
+
+**Report…**, in Render compare's toolbar, makes a color PDF of what the panes
+hold. Every *rendering* is one layer of a pane as it was built (its technique
+with all of its settings); you choose:
+
+- **Renderings**: every built layer is listed with what sets it apart from the
+  others of its technique ("Face cap 100,000") and its triangles. A layer that
+  is not built yet cannot be chosen (press Compare first); a layer whose panel
+  was changed after it was built is marked, and measured as it was built.
+  **vs annotations** gives a rendering its page against the cell's annotations.
+- **Comparisons**: a box for every pair of the chosen renderings. Each pair is
+  measured *both ways* (A against B and B against A), whether or not a
+  Difference pane shows it. The quick picks: **All**, **None**, **Same
+  technique** (one technique under different settings: what each setting
+  does), **Across techniques**, **Panes** (the first layer of every pane against
+  the others), **Within panes**, and **Differences on screen** (the pairs the
+  Difference panes show). Up to 15 pairs every pair starts ticked; beyond, the
+  panes, the layers within each pane and the Differences on screen.
+- **Viewpoints**: **This view** (the panes' camera now; under Flip Z, mirrored
+  as on screen), **XY1**, **XZ1** and **YZ1**, the viewer's named views. Every
+  picture from one viewpoint is in the same frame on every page.
+- **Sign**: **Exact (enclosure)**, what Difference panes use, or **Faster
+  (normal)**, about four times faster and wrong where the nearest sample is on
+  a piece buried in the other surface.
+- **Include**: a picture of each pane as it is on screen, and the addendum.
+  **Paper**: Letter or A4.
+
+The dialog says how many pages and about how long; **Create PDF** makes it on
+the server and saves it (`sbfsem-compare-c943-NeitzInferiorMonkey-2026-10-20.pdf`).
+**Stop** ends it (the server stops at its next step). Closing the dialog does
+not: the status line follows the report, and it is saved when it is done. The
+server keeps the file for ten minutes (**Save again**). On Inferior c1178,
+three renderings of 400,000, 194,000 and 77,000 triangles, three pairs and
+three viewpoints took 79 s and made 34 pages (1.05 MB); a measurement a pane
+already made costs nothing.
+
+What is in it, in order (the PDF's bookmarks follow it, and every page number
+in the contents, the tables and the matrices is a link):
+
+1. **The cover**: the cell, its volume and copy (registration setting), when,
+   the renderings, and the panes as they were on screen.
+2. **The summary**: every rendering's size and shape (triangles, area, volume,
+   visual bodies) and its error against the annotations; four **matrices** of
+   the error between every pair (the symmetric mean distance, the Hausdorff
+   distance, and, row against column, the mean signed distance and the 95th
+   percentile); every pair **ranked**, most different first; charts of the
+   error against the annotations and of volume, area, triangles and creases.
+3. **One section per pane**: the pane as it was on screen and its layers; for
+   each rendering a page of its **settings** (every option its technique uses;
+   the ones changed from the technique's defaults in blue, the ones it ignores
+   in gray) and its **shape**, and a page **against the annotations** (pictures
+   colored by the distance to the nearest annotation on one scale for the whole
+   report, the distribution, the error along Z with the section numbers, the
+   rims inside and outside the render, and the worst places with their Location
+   IDs and sections); then three pages for each **pair** it leads: pictures of
+   both surfaces colored by their signed distance to each other and of where
+   their outlines differ; every number both ways (mean, RMS, signed mean,
+   percentiles, the share within 0.05 to 2 µm, the volume between them from
+   the distances beside the volumes themselves) with their distributions and
+   profiles along Z; and **where they differ**: the section cut where they
+   disagree most with both surfaces' outlines over that section's annotations,
+   close-ups of the worst places, and tables of the places by X, Y, Z and
+   section.
+4. **The addendum**: nine pages, each a definition with the formula the code
+   computes and a figure of what it measures (distance to a surface and its
+   sampling, the sign, weighting by area, the summary numbers, the volume from
+   distances with an example computed as the report is made, the distance to a
+   disc in its section plane, the pictures, and the limits).
+
+Two first layers of different panes are both yellow on screen; where the
+layers' colors do not tell every rendering apart, the report gives each its
+own color and shows the screen's beside it.
+
 ## Network
 
 One network per volume: cells in different volumes cannot be connected, and an

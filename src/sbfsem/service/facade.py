@@ -3436,6 +3436,34 @@ class SbfsemService:
         finally:
             trim_memory()
 
+    #: What drawing a report adds beside its measurements, MB: the pictures'
+    #: z-buffers at twice their size, matplotlib's pages and the PDF while it is
+    #: put together (a 30-page report of c1178 at 400,000 faces, 2026-10-20).
+    REPORT_MB = 700.0
+
+    def report_weight_mb(self, neuron: Neuron, spec) -> float:
+        """The memory gate's weight of a Render compare report: the heaviest of
+        its builds or measurements (they come one after another) and its drawing."""
+        return self.measure_weight_mb(neuron, *(dict(r.options) for r in spec.renderings)) \
+            + self.REPORT_MB
+
+    def compare_report(self, neuron: Neuron, spec):
+        """Render compare's report (:func:`sbfsem.export.compare_pdf.write_compare_report`)
+        of this copy of the cell: a :class:`~sbfsem.export.compare_pdf.ReportFile`.
+
+        Its surfaces, error maps and differences come from this service's caches
+        (:class:`_ReportSource`), so a rendering a pane already built and a pair a
+        Difference pane already measured cost nothing, and what the report builds
+        or measures is there for the panes afterwards.  Stops between its steps
+        when its job is cancelled (:func:`sbfsem.progress.check_stop`).
+        """
+        from ..export.compare_pdf import write_compare_report
+
+        try:
+            return write_compare_report(spec, _ReportSource(self, neuron, spec))
+        finally:
+            trim_memory()
+
     def mesh_deviation(self, neuron_id: int, source, *,
                        options: dict | None = None) -> DeviationMapDTO:
         """One rendering held to the cell's own annotations, point by point.
@@ -4261,6 +4289,55 @@ class SbfsemService:
             labels=labels,
             invalid=[InvalidEntryDTO(text=e.text, reason=e.reason) for e in parsed.invalid],
         )
+
+
+class _ReportSource:
+    """Where a Render compare report's surfaces and measurements come from: the
+    service's own caches (:meth:`SbfsemService.compare_report`), for one copy of
+    one cell, the spec's renderings by index.  A difference is measured both
+    ways by the spec's sign rule, with the samples a Difference pane uses."""
+
+    SAMPLES = 250_000
+    #: The service stopping under a build ends the report: its job is asked again
+    #: after the restart (api.js pollJob), not written with pages of failures.
+    fatal = (BuildInterrupted,)
+
+    def __init__(self, svc: SbfsemService, neuron: Neuron, spec) -> None:
+        self.svc, self.neuron, self.spec = svc, neuron, spec
+
+    def _options(self, index: int) -> dict:
+        return dict(self.spec.renderings[index].options)
+
+    def mesh(self, index: int) -> Mesh:
+        return self.svc.mesh_for(self.neuron, self._options(index))
+
+    def deviation(self, index: int):
+        from ..export.compare_pdf import RenderingDeviation
+
+        options = self._options(index)
+        mesh = self.mesh(index)
+        if mesh.is_empty:
+            raise ValueError("the rendering produced no mesh; there is nothing to measure")
+        found = self.svc._cached_deviation_map(self.neuron, options, mesh)
+        if found is None:
+            return None
+        summary = self.svc._cached_deviation(self.neuron, options, mesh)
+        return RenderingDeviation(found, summary.model_dump() if summary is not None else {})
+
+    def difference(self, a: int, b: int):
+        oa, ob = self._options(a), self._options(b)
+        mesh_a, mesh_b = self.mesh(a), self.mesh(b)
+        if mesh_a.is_empty or mesh_b.is_empty:
+            raise ValueError("one of the renderings produced no mesh; there is nothing to compare")
+        return self.svc._cached_difference(self.neuron, oa, ob, mesh_a, mesh_b, self.SAMPLES,
+                                           sign=self.spec.sign, both=True)
+
+    def annotations(self):
+        return annotation_ground_truth(self.neuron)
+
+    def annotation_names(self):
+        targets = annotation_targets(self.neuron)
+        return (targets.ids, targets.sections) if len(targets.ids) else None
 
 
 def _registration_dto(status: dict | None) -> LiveRegistrationDTO | None:

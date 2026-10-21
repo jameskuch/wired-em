@@ -506,6 +506,8 @@ Opening the editor changes nothing on screen; each edit previews on the depth-co
           <label class="check" title="Orbiting one pane orbits all of them">
             <input type="checkbox" id="compare-sync" checked> Sync cameras
           </label>
+          <button id="compare-report" data-help-delay="2000"
+                  data-help="A color PDF of what the panes hold: each rendering you choose held to the annotations, and every pair you choose measured against each other both ways, whether or not a Difference pane shows it, with a summary table of the error between every pair, pictures from the viewpoints you choose, and an addendum that defines every number with its formula and a figure. Made on the server; the dialog says how long it will take.">Report…</button>
           <!-- Error paint on every solid surface layer of every pane, and back (compare.js);
                half-ticked when only some layers have it. -->
           <label class="check" data-help-delay="2000"
@@ -740,6 +742,11 @@ Opening the editor changes nothing on screen; each edit previews on the depth-co
       <button id="open-confirm" type="button" class="primary" disabled>Open</button>
     </div>
   </form>
+</dialog>
+
+<!-- Render compare's report: built by reportdialog.js from the panes it is opened over. -->
+<dialog id="compare-report-dialog" class="dlg dlg-report" aria-label="Comparison report">
+  <form method="dialog" class="dlg-body"></form>
 </dialog>
 
 <dialog id="video-dialog" class="dlg">

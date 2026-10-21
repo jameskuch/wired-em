@@ -97,6 +97,12 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   Sync cameras; without Sync every pane turns to the same view about its own pivot, and a drag orbits each
   by the same amount; the house resets each pane; it moves with the pane count and into a maximized pane;
   the 3D render's View cube box hides it too.
+* ``comparereport`` -- Render compare's Report… (reportdialog.js), with real clicks: it lists the panes'
+  built layers (a Difference pane is not one) with every pair ticked and the page count the server then
+  makes; None and "Differences on screen" pick what they say, and a rendering left out takes its pairs with
+  it; Create PDF sends the chosen renderings, pairs, viewpoints, the panes' camera and a picture of every
+  pane, follows the job and saves the PDF it names; Stop ends a report on the server (cancelled); a report
+  goes on with the dialog closed, the status line following it, and is saved when it is done.
 * ``locate`` -- Viking's "Show in SBFSEM-tools" (``/open?...&location=N``) and a Location ID typed into the
   readout took the view to the annotation and left it unmarked (2026-10-20): both select it now, drawn
   yellow, the readout naming it, and it stays selected once the cell has finished drawing; with the cell's
@@ -2770,6 +2776,118 @@ def comparecube(c: Chrome, r: Report, ctx):
             js(c, f'{COMPARE}.viewCube.root.hidden && !document.querySelector(".compare-viewport.has-viewcube")'))
 
 
+REPORT = "document.getElementById('compare-report-dialog')"
+
+
+def _report_button(c: Chrome, label: str, section: int | None = None) -> None:
+    """Click the report dialog's button whose text is `label`: the first one, or the first in its
+    `section`th box (0 the renderings, 1 the comparisons)."""
+    where = REPORT if section is None else f"{REPORT}.querySelectorAll('.rep-section')[{section}]"
+    _click_js(c, """[...%s.querySelectorAll('button')].find((b) => b.textContent.trim() === %s)"""
+              % (where, json.dumps(label)))
+    c.settle(3)
+
+
+def comparereport(c: Chrome, r: Report, ctx):
+    r.start('compare: the report dialog makes and saves a PDF of the panes')
+    boot(c, ctx.url)
+    _dismiss_offer(c)
+    load(c, ctx.cell, mesh=False)
+    _compare_tab(c, 4)
+    _click_js(c, "document.getElementById('compare-build')")
+    c.wait_for(f'{COMPARE}.panes.every((p) => p.state === "ready")', 240)
+    c.settle(3)
+    # Every request of the dialog, and every PDF it would save, recorded rather than sent to disk.
+    js(c, """(() => { const a = window.sbfsem.api; window.__reports = [];
+        const real = a.compareReportJob.bind(a);
+        a.compareReportJob = (source, id, body, options) => { window.__reports.push(body); return real(source, id, body, options); };
+        window.__saved = []; const make = URL.createObjectURL.bind(URL);
+        URL.createObjectURL = (blob) => { window.__saved.push({ type: blob.type, size: blob.size }); return make(blob); };
+        HTMLAnchorElement.prototype.click = function () { window.__clicked = (window.__clicked || []).concat(this.download || ''); };
+    })()""")
+    _click_js(c, "document.getElementById('compare-report')")
+    c.settle(3)
+    r.check('Report… opens the dialog', js(c, f'{REPORT}.open'))
+    rows = js(c, f"[...{REPORT}.querySelectorAll('.rep-table tbody tr')].map((t) => t.textContent)")
+    r.check('it lists the three built layers, not the Difference pane', len(rows or []) == 3, rows)
+    count = js(c, f"{REPORT}.querySelectorAll('.rep-count')[1].textContent")
+    r.check('every pair is ticked to start with', count == '3 of 3 pairs', count)
+    estimate = js(c, f"{REPORT}.querySelector('.rep-estimate').textContent")
+    r.check('it says how many pages and how long', 'pages' in (estimate or '') and 'on the server' in estimate,
+            estimate)
+    _report_button(c, 'None', section=1)
+    _report_button(c, 'Differences on screen', section=1)
+    ticked = js(c, f"""[...{REPORT}.querySelectorAll('.rep-matrix input')].map((i) => i.checked)""")
+    r.check('"Differences on screen" ticks the pair pane 4 shows, R1 against R2', ticked == [True, False, False],
+            ticked)
+    # Leave the third layer out: its pairs go, and only one pair is left to tick.
+    _click_js(c, f"{REPORT}.querySelectorAll('.rep-table tbody tr')[2].querySelector('input')")
+    c.settle(3)
+    count = js(c, f"{REPORT}.querySelectorAll('.rep-count')[1].textContent")
+    r.check('a rendering left out takes its pairs with it', count == '1 of 1 pair', count)
+    # Fewer pages: two viewpoints and no addendum.
+    for label in ('XZ1', 'Addendum: the mathematics'):
+        _click_js(c, """[...%s.querySelectorAll('label')].find((l) => l.textContent.trim() === %s)
+            .querySelector('input')""" % (REPORT, json.dumps(label)))
+    c.settle(3)
+    expected = js(c, f"{REPORT}.querySelector('.rep-estimate').textContent.match(/About (\\d+) pages/)[1]")
+    _report_button(c, 'Create PDF')
+    r.check('Create PDF starts the report', js(c, f"!{REPORT}.querySelector('.rep-progress').hidden"))
+    done = c.wait_for(f"!{REPORT}.querySelector('.rep-done').hidden", 300)
+    text = js(c, f"{REPORT}.querySelector('.rep-done').textContent")
+    r.check('the PDF is made and saved under the name the server gives', done and 'Saved sbfsem-compare-c'
+            in (text or '') and js(c, "(window.__clicked || []).some((n) => n.endsWith('.pdf'))"), text)
+    r.check('with the pages the dialog said', f': {expected} pages' in (text or ''), (expected, text))
+    saved = js(c, 'window.__saved')
+    r.check('and the file is a PDF', any(s.get('type') == 'application/pdf' and s.get('size', 0) > 10_000
+                                        for s in saved or []), saved)
+    body = js(c, 'window.__reports[0]')
+    r.check('the request names two renderings, one pair and the two viewpoints',
+            len(body['renderings']) == 2 and body['pairs'] == [[0, 1]] and body['views'] == ['view', 'xy1'],
+            {k: body[k] for k in ('pairs', 'views')})
+    r.check('it carries a picture of every pane and the panes\' camera',
+            sum(1 for p in body['panes'] if str(p.get('snapshot', '')).startswith('data:image/jpeg'))
+            == 4 and body['camera'] and len(body['camera']['direction']) == 3,
+            ([bool(p.get('snapshot')) for p in body['panes']], body['camera']))
+    r.check('the Difference pane names the two renderings it measures',
+            body['panes'][3]['kind'] == 'difference' and body['panes'][3]['difference'] == [0, 1],
+            {k: v for k, v in body['panes'][3].items() if k != 'snapshot'})
+
+    # -- Stop: the job is cancelled on the server ------------------------------------------------------
+    _report_button(c, 'All', section=0)
+    _report_button(c, 'All', section=1)
+    c.settle(3)
+    js(c, "window.__jobs = []; const f = window.fetch; window.fetch = (u, o) => { "
+          "const p = f(u, o); if (String(u).includes('compare-report-job')) p.then((x) => x.clone().json())"
+          ".then((j) => window.__jobs.push(j.job_id)); return p; }")
+    _report_button(c, 'Create PDF')
+    c.wait_for('window.__jobs.length > 0', 30)
+    c.settle(6)
+    _click_js(c, f"{REPORT}.querySelector('.rep-stop')")
+    stopped = c.wait_for(f"{REPORT}.querySelector('.rep-progress').hidden", 60)
+    r.check('Stop ends the report in the dialog', stopped and js(c, f"{REPORT}.querySelector('.dlg-error').hidden"))
+    job = js(c, "fetch('/api/mesh-jobs/' + window.__jobs[0]).then((x) => x.json()).then((j) => j.status)", wait=True)
+    deadline = time.time() + 60
+    while job not in ('cancelled', 'done') and time.time() < deadline:
+        time.sleep(1)
+        job = js(c, "fetch('/api/mesh-jobs/' + window.__jobs[0]).then((x) => x.json()).then((j) => j.status)",
+                 wait=True)
+    r.check('and the server stops it between its steps', job == 'cancelled', job)
+
+    # -- closed while it works: the status line follows it, and it is saved -------------------------------
+    js(c, 'window.__clicked = []')
+    _report_button(c, 'Create PDF')
+    c.settle(6)
+    press_key(c, REPORT, 'Escape')
+    c.settle(3)
+    r.check('Escape closes the dialog while the report goes on', not js(c, f'{REPORT}.open'))
+    status = js(c, "document.getElementById('compare-status').textContent")
+    r.check('the status line follows it', 'Report for c' in (status or ''), status)
+    saved = c.wait_for("(window.__clicked || []).some((n) => n.endsWith('.pdf'))", 300)
+    status = js(c, "document.getElementById('compare-status').textContent")
+    r.check('and it is saved when it is done', saved and 'Report saved' in (status or ''), status)
+
+
 SECTIONS = {
     'notice': notice, 'waiting': waiting, 'draws': draws, 'undo': undo, 'idle': idle,
     'picker': picker, 'save': save, 'analysis': analysis, 'strata': strata, 'twod': twod, 'sheets': sheets, 'volume': volume,
@@ -2790,6 +2908,7 @@ SECTIONS = {
     'locate': locate,
     'viewcube': viewcube,
     'comparecube': comparecube,
+    'comparereport': comparereport,
 }
 
 

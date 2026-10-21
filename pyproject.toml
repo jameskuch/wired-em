@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sbfsem-pytools"
-version = "2.20.2"
+version = "2.21.0"
 description = "Python port of SBFSEM-tools: serial block-face EM connectomics analysis and rendering"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -42,6 +42,10 @@ dependencies = [
   # Viking's section corrections are served over gRPC (sbfsem.io.corrections
   # encodes the few messages itself, so no protobuf runtime is needed).
   "grpcio>=1.60",
+  # Render compare's report: matplotlib draws the pages, pypdf puts them
+  # together with their bookmarks and links and stores the pictures as JPEG
+  # (pure Python, BSD).
+  "pypdf>=5.4,<7",
 ]
 
 [project.optional-dependencies]

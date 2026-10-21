@@ -56,11 +56,15 @@ __all__ = [
     "REQUIRES",
     "Field",
     "FieldState",
+    "OptionRow",
     "Preset",
     "api_defaults",
     "app_defaults",
+    "describe_options",
     "field_by_key",
     "field_state",
+    "match_preset",
+    "option_text",
     "fixture_source",
     "js_source",
     "preset_by_id",
@@ -836,6 +840,94 @@ def field_state(
             title=REQUIRES[f.requires] if disabled and f.requires else "",
         )
     return out
+
+
+def match_preset(options: Mapping[str, Any]) -> Preset | None:
+    """The named technique a set of options is, as the browser's ``matchPreset``
+    names it: the presets of its method and pathway, the one with its MeshLab
+    mode first; ``None`` for a method and pathway no preset has."""
+    same = [p for p in PRESETS
+            if p.method == options.get("method") and p.pathway == options.get("pathway")]
+    meshlab = options.get("meshlab", "none") or "none"
+    for preset in same:
+        if preset.meshlab() == meshlab:
+            return preset
+    return same[0] if same else None
+
+
+#: Options whose 0 is a setting of its own, as their help says.
+_ZERO_MEANS = {"voxel2_um": "automatic", "voxel2_faces": "no cap"}
+
+
+def option_text(f: Field, value: Any) -> str:
+    """An option's value as the panel shows it: an enum by its label, a percent
+    as one, a blank optional number as "none", numbers without trailing zeros
+    and whole counts with thousands separators."""
+    if f.choices:
+        for choice, label in f.choices:
+            if choice == value:
+                return str(label)
+    if f.key in _ZERO_MEANS and value is not None and float(value) == 0:
+        return f"0 ({_ZERO_MEANS[f.key]})"
+    if value is None:
+        return "none"
+    if f.kind == "bool":
+        return "on" if value else "off"
+    if f.kind == "percent":
+        return f"{float(value) * 100:g} %"
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if isinstance(value, int) or (f.kind == "int" and float(value).is_integer()):
+        return f"{int(value):,}"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+@dataclass(frozen=True)
+class OptionRow:
+    """One render option of a set, in words: its label, the value (``text``),
+    the technique's default (``default_text``), whether the value is not that
+    default (``changed``), and whether the build ignores it here (``inert``,
+    with ``why``)."""
+
+    key: str
+    label: str
+    value: Any
+    text: str
+    default_text: str
+    changed: bool
+    inert: bool
+    why: str
+
+
+def describe_options(options: Mapping[str, Any]) -> list[OptionRow]:
+    """The geometry options a build with ``options`` shows, in the panel's
+    order and words: every option the technique does not hide, against the
+    defaults the app starts the technique with (the app's defaults with the
+    preset's method, pathway and own settings on top; a person's saved
+    technique defaults live in their browser and are not known here).  What
+    the report prints for a rendering."""
+    full = {**app_defaults(), **dict(options)}
+    preset = match_preset(full)
+    defaults = {**app_defaults(), **({"method": preset.method, "pathway": preset.pathway,
+                                      **preset.set} if preset else {})}
+    states = field_state(full)
+    rows: list[OptionRow] = []
+    for f in FIELDS:
+        if f.scope != "geometry" or "body" not in f.wire or states[f.key].hidden:
+            continue
+        value, default = full.get(f.key), defaults.get(f.key)
+        if isinstance(value, float) and isinstance(default, (int, float)):
+            changed = abs(float(value) - float(default)) > 1e-12 * max(1.0, abs(float(default)))
+        else:
+            changed = value != default
+        rows.append(OptionRow(
+            key=f.key, label=f.label, value=value, text=option_text(f, value),
+            default_text=option_text(f, default), changed=bool(changed),
+            inert=states[f.key].inert, why=states[f.key].why,
+        ))
+    return rows
 
 
 def visibility_cases() -> list[dict[str, Any]]:

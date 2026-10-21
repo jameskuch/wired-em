@@ -1046,6 +1046,59 @@ body.fullscreen .update-banner { padding-left: 100px; }
 .dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 /* The Open/Save file browser: folders on the left, documents on the right. */
 .dlg-wide { width: min(720px, calc(100vw - 32px)); }
+/* Render compare's report (reportdialog.js): renderings, the pair matrix, the options. */
+.dlg-report { width: min(860px, calc(100vw - 32px)); max-height: calc(100vh - 32px); }
+.dlg-report .dlg-body { max-height: calc(100vh - 34px); overflow: auto; }
+.rep-section { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; }
+.rep-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; font-size: 13px; margin-bottom: 6px; }
+.rep-count { color: var(--muted); font-size: 12px; }
+.rep-tools, .rep-picks { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.rep-picks { margin: 0 0 6px; }
+.rep-mini { font-size: 11.5px; padding: 2px 8px; }
+.rep-hint { margin: 0 0 6px; font-size: 11.5px; color: var(--muted); }
+/* The app's tables are numeric (right-aligned, monospace, sticky heads); these are not. */
+table.rep-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: inherit; }
+table.rep-table th { position: static; text-align: left; font-weight: 600; color: var(--muted); font-size: 11px;
+  padding: 2px 6px; border-bottom: 1px solid var(--line); }
+table.rep-table td { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--line); vertical-align: middle;
+  white-space: normal; }
+table.rep-table td:nth-child(1), table.rep-table td:nth-child(2) { white-space: nowrap; }
+table.rep-table tbody tr:hover { background: none; }
+table.rep-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+table.rep-table .center { text-align: center; }
+.rep-table tr.rep-off td { color: var(--muted); }
+.rep-name { white-space: nowrap; }
+.rep-swatch { display: inline-block; width: 11px; height: 11px; border-radius: 2px; vertical-align: -1px;
+  border: 1px solid rgb(0 0 0 / 0.35); }
+.rep-stale { color: var(--warn); }
+.rep-matrix-wrap { overflow: auto; max-height: 340px; }
+table.rep-matrix { width: auto; border-collapse: collapse; font-size: 11px; font-family: inherit; }
+table.rep-matrix tbody tr:hover { background: none; }
+.rep-matrix th { position: static; font-weight: 600; padding: 1px 4px; white-space: nowrap; text-align: center;
+  border-bottom: none; }
+.rep-matrix th.rep-col, .rep-matrix th.rep-rowhead { box-shadow: inset 0 -3px 0 var(--swatch); }
+.rep-matrix th.rep-rowhead { box-shadow: inset 3px 0 0 var(--swatch); text-align: right; padding-right: 6px; }
+.rep-matrix td { width: 22px; height: 20px; text-align: center; border: 1px solid var(--line); padding: 0; }
+.rep-matrix td.rep-blank { background: var(--hover); }
+.rep-matrix input { margin: 0; }
+.rep-options { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.rep-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.rep-label { width: 82px; color: var(--muted); font-size: 12px; }
+.rep-check { display: inline-flex; align-items: center; gap: 4px; }
+.rep-estimate { margin: 0; font-size: 12.5px; }
+.rep-progress { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.rep-progress[hidden] { display: none; }
+.rep-progress-line { display: flex; align-items: center; gap: 8px; }
+.rep-bar { flex: 1; height: 8px; }
+.rep-done { margin: 0; font-size: 12.5px; }
+.rep-done[hidden] { display: none; }
+.rep-notes { color: var(--warn); margin-top: 4px; }
+.rep-table-wrap { overflow-x: auto; }
+@media (max-width: 640px) {
+  .rep-label { width: 100%; }
+  .rep-table th:nth-child(5), .rep-table td:nth-child(5),
+  .rep-table th:nth-child(6), .rep-table td:nth-child(6) { display: none; }
+}
 .browser {
   display: grid; grid-template-columns: 200px 1fr; gap: 10px;
 }

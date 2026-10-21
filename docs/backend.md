@@ -742,6 +742,62 @@ the vertex figures say a tenth of the surface is off where half of it is. On
 c606 the mean |d| is 0.223 µm by vertex and 0.343 by area, the 95th percentile
 0.558 and 1.546.
 
+### The comparison report
+
+`sbfsem.export.compare_pdf.write_compare_report(spec, source)` writes Render
+compare's report: a color PDF of renderings of one cell held to its annotations
+and to each other, both ways. `spec` (`ReportSpec`) names the renderings
+(`ReportRendering`: label, color, pane, layer and the options it was built
+with), the pairs (indices), the panes (`ReportPane`, with a picture of each),
+the viewpoints (`sbfsem.geometry.raster.View`; `NAMED_VIEWS` holds XY1, XZ1 and
+YZ1), the sign rule, the paper and the volume's Z scale (`z_scale_nm`, which
+turns a Z into a section). `source` (`ReportSource`) gives the surfaces and the
+measurements by index: `mesh(i)`, `deviation(i)` (a `RenderingDeviation`: the
+`deviation_map` and the `annotation_deviation` summary), `difference(a, b)`
+(`mesh_difference(..., both=True)`), `annotations()` and `annotation_names()`
+(Location IDs and sections). The web service's source reads its own caches
+(`SbfsemService.compare_report`); a test builds meshes and passes them in.
+
+```python
+from sbfsem.export.compare_pdf import ReportRendering, ReportSpec, write_compare_report
+from sbfsem.geometry.raster import NAMED_VIEWS
+
+spec = ReportSpec(cell=943, source="i", volume="Inferior Monkey", z_scale_nm=70.0,
+                  renderings=(ReportRendering("Voxel remesh", "#ffd400", 1, 1,
+                                              {"method": "cylinder", "pathway": "voxel2"}),
+                              ReportRendering("Original", "#56b4e9", 2, 1,
+                                              {"method": "cylinder", "pathway": "original"})),
+                  pairs=((0, 1),), views=(NAMED_VIEWS["xy1"], NAMED_VIEWS["xz1"]))
+report = svc.compare_report(svc.neuron(943, "i"), spec)      # a ReportFile
+open(report.filename, "wb").write(report.pdf)
+```
+
+The numbers are `sbfsem.analysis.compare_report`'s: `surface_facts` (triangles,
+area, divergence volume, open edges, visual bodies, creases), `field_stats`
+(one direction of a difference over the surface, every vertex weighted by the
+area it stands for: mean |d|, RMS, signed mean, percentiles, the share within
+0.05 to 2 µm, the share outside, ∫ d dA, a signed histogram, a profile along Z
+and the places that carry the most of ∫ |d| dA) and `pair_result` (both
+directions, the Hausdorff distance, the symmetric mean distance and the Z
+where the two disagree most). For two closed surfaces close together,
+½(∫_A d dA − ∫_B d dA) is the volume between them to third order: two concentric
+spheres of 10 and 9.5 µm give 597.5 against the exact 597.4 µm³, where each
+one-sided integral is 5 % off.
+
+The pictures are `sbfsem.geometry.raster`'s: an orthographic z-buffer in NumPy
+(`rasterize`, exact coverage at twice the size, averaged), the viewer's views
+and Flip Z, one frame per viewpoint for the whole report (`frame_around`), and
+`section_segments` for a cut at a Z. A 327,000-triangle sphere draws in 0.37 s;
+its drawn area is π r² to 0.01 %. The pages are matplotlib figures
+(`sbfsem.export.pdfpage.Page`: inches from the top-left, measured word wrap,
+tables and charts), written in two streams (the body as each rendering and pair
+is measured; the front matter last, when every number is known) and put
+together by pypdf (`assemble`), which adds the bookmarks and links and stores
+the pictures as JPEG. Every page number is known before anything is drawn
+(`Plan`). The addendum is `sbfsem.export.compare_addendum`. A rendering or pair
+that fails gets pages that say why; `progress.check_stop()` between the steps
+lets the job's cancel stop it (`sbfsem_web.jobs.STOPPABLE_KINDS`).
+
 ### The browser's halves of the error views
 
 Four modules hold what the browser does with those fields, so the panes, the

@@ -3161,6 +3161,72 @@ export class CompareView {
     if (next) await this.build(next);
   }
 
+  // -- the report --------------------------------------------------------------
+
+  /**
+   * What a report can hold (comparereport.js, reportdialog.js): the compared
+   * cell, every technique layer of every pane as it was BUILT (`options` is its
+   * snapshot, `builtOptions`, never its panel's settings; `stale` says the panel
+   * changed since), the layers that cannot be measured and why, every pane with
+   * its kind and, for a Difference, the two layers it measures (refs), and the
+   * panes' camera for "This view".  Null before the first Compare.
+   */
+  reportSources() {
+    const record = this.record;
+    if (!record) return null;
+    const renderings = [];
+    const panes = [];
+    for (const pane of this.panes) {
+      const number = pane.index + 1;
+      if (this._isDiff(pane)) {
+        const { a, b, problem } = this._diffSources(pane.layers[0]);
+        panes.push({ number, kind: 'difference', layers: 1, a: problem ? null : a.key, b: problem ? null : b.key });
+        continue;
+      }
+      panes.push({ number, kind: 'layers', layers: pane.layers.length });
+      pane.layers.forEach((layer, k) => {
+        const built = !!layer.mesh && !!layer.builtOptions && layer.builtGen === record.loadGen;
+        renderings.push({
+          ref: layer.key, pane: number, layer: k + 1, layers: pane.layers.length,
+          label: techniqueName(built ? layer.builtOptions : layer.config.options),
+          color: layer.config.color,
+          options: built ? layer.builtOptions : null,
+          faces: built ? layer.mesh.n_faces : 0,
+          vertices: built ? layer.mesh.n_vertices : 0,
+          built,
+          stale: built && this._meshStale(layer),
+          why: built ? '' : (layer.task ? 'still being built' : 'not built yet: press Compare'),
+        });
+      });
+    }
+    return { record, renderings, panes, camera: this.reportCamera() };
+  }
+
+  /** The panes' camera for a report's "This view": the first pane's (with Sync cameras on,
+   * every pane's), from what is looked at toward the camera, its up, and Flip Z; or null. */
+  reportCamera() {
+    const renderer = this.panes[0]?.renderer;
+    const state = renderer?.cameraState?.();
+    if (!state) return null;
+    const direction = state.position.map((v, i) => v - state.target[i]);
+    if (!direction.some((v) => Math.abs(v) > 1e-12)) return null;
+    return { direction, up: state.up, flip_z: !!renderer.flipZ };
+  }
+
+  /** Each pane as it is on screen, a JPEG data URL at most `maxWidth` wide, by pane number. */
+  paneSnapshots({ maxWidth = 1200, quality = 0.9 } = {}) {
+    const out = new Map();
+    for (const pane of this.panes) {
+      try {
+        out.set(pane.index + 1, pane.renderer.snapshotURL({ type: 'image/jpeg', quality, maxWidth }));
+      } catch (error) {
+        // A pane the browser will not read back (a lost context) is left out of the report.
+        console.warn('pane picture failed', error);
+      }
+    }
+    return out;
+  }
+
   /** Public stale marker, for settings that live outside this view (the
    * cell picker): with the picker's current key, what is shown is out of
    * date when that is another cell or another load of it. */

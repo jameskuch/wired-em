@@ -40,6 +40,7 @@ import { ConflictPanel } from './conflictpanel.js';
 
 import { Renderer3D } from './render3d.js';
 import { CompareView } from './compare.js';
+import { ReportDialog } from './reportdialog.js';
 import { DisplayPanel } from './display.js';
 import { ViewCube } from './viewcube.js';
 import {
@@ -1295,6 +1296,13 @@ function bindEvents() {
   $('compare-sync').addEventListener('change', (e) => {
     compare.setSync(e.target.checked);
   });
+  // The report: a PDF of what the panes hold (reportdialog.js), made on the server.
+  const reportDialog = new ReportDialog($('compare-report-dialog'), {
+    compare,
+    onStatus: (text, kind) => setCompareStatus(text, kind),
+    volumeName,
+  });
+  $('compare-report').addEventListener('click', () => reportDialog.open());
 
   $('show-axes').addEventListener('change', (e) => {
     renderer.setAxesVisible(e.target.checked);

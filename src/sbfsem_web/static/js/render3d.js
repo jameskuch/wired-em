@@ -2651,11 +2651,28 @@ export class Renderer3D {
   }
 
   snapshot(filename = 'sbfsem.png') {
-    this.webgl.render(this.scene, this.camera);
     const link = document.createElement('a');
     link.download = filename;
-    link.href = this.webgl.domElement.toDataURL('image/png');
+    link.href = this.snapshotURL();
     link.click();
+  }
+
+  /**
+   * The picture on screen as a data URL, drawn first so it is this frame.  With
+   * `maxWidth`, a wider canvas is scaled down to it (a report wants a pane's look,
+   * not its device pixels); `type` and `quality` are toDataURL's.
+   */
+  snapshotURL({ type = 'image/png', quality = undefined, maxWidth = 0 } = {}) {
+    this.webgl.render(this.scene, this.camera);
+    const canvas = this.webgl.domElement;
+    if (!(maxWidth > 0) || canvas.width <= maxWidth || typeof document === 'undefined') {
+      return canvas.toDataURL(type, quality);
+    }
+    const out = document.createElement('canvas');
+    out.width = maxWidth;
+    out.height = Math.max(1, Math.round(canvas.height * maxWidth / canvas.width));
+    out.getContext('2d').drawImage(canvas, 0, 0, out.width, out.height);
+    return out.toDataURL(type, quality);
   }
 
   // -- per-cell Z range -----------------------------------------------------

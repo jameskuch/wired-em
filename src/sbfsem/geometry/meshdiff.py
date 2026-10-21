@@ -52,6 +52,7 @@ __all__ = [
     "dihedral_angles",
     "enclosed_points",
     "enclosed_points_open",
+    "error_spots",
     "mesh_difference",
     "nearest_annotation",
     "sample_surface",
@@ -1418,6 +1419,22 @@ def _error_spots(
         ))
     spots.sort(key=lambda spot: -spot.excess_um3)
     return tuple(spots)
+
+
+def error_spots(
+    xyz: np.ndarray, error: np.ndarray, area: np.ndarray, owner: np.ndarray | None = None,
+    *, count: int = SPOT_COUNT, radius_um: float = SPOT_RADIUS_UM,
+) -> tuple[ErrorSpot, ...]:
+    """The places that carry the most of ``area * error`` over a surface, no
+    two closer than ``radius_um`` (the error map's worst spots, for any
+    non-negative field: a distance to the annotations, or |d| of a
+    difference).  ``owner`` names each vertex's annotation; without one every
+    spot's owner is 0."""
+    xyz = np.asarray(xyz, dtype=float).reshape(-1, 3)
+    error = np.asarray(error, dtype=float).ravel()
+    area = np.asarray(area, dtype=float).ravel()
+    own = np.zeros(len(xyz), dtype=np.int64) if owner is None else np.asarray(owner, dtype=np.int64)
+    return _error_spots(xyz, error, area, own, count=count, radius_um=radius_um)
 
 
 def _rim_bias(rim_error: np.ndarray, enclosed: np.ndarray) -> RimBias:

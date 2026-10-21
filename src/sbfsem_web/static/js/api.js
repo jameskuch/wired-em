@@ -755,6 +755,21 @@ export const api = {
     if (!job.result) throw new ApiError(500, `c${id} difference finished without a result`);
     return job.result;
   },
+  /**
+   * Render compare's report (comparereport.js `reportBody` in), as a server job:
+   * resolves with what the PDF is, `{ filename, bytes, pages, seconds, notes, jobId }`;
+   * `compareReportPath(jobId)` is where it is fetched from (for the ten minutes a
+   * finished job is kept).  Stop (`signal`) cancels the job, and the server stops
+   * it at its next step.
+   */
+  compareReportJob: async (source, id, body, { signal, onStatus } = {}) => {
+    const job = await pollJob(
+      () => postJSON(`/api/neurons/${source}/${id}/compare-report-job`, body, `starting the c${id} report…`),
+      { label: `c${id} report…`, what: `c${id} report`, signal, onStatus });
+    if (!job.result) throw new ApiError(500, `c${id} report finished without a file`);
+    return { ...job.result, jobId: job.job_id };
+  },
+  compareReportPath: (jobId) => `/api/compare-reports/${encodeURIComponent(jobId)}`,
   synapseMesh: (source, id, type, opts = {}) =>
     getJSON(`/api/neurons/${source}/${id}/synapses/${encodeURIComponent(type)}/mesh`
       + q({ radius_um: opts.radius_um ?? 0.5, shape: opts.shape ?? 'circle' })),

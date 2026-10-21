@@ -38,6 +38,11 @@ export const STORAGE_GROUPS = [
     keys: ['sbfsem.visualizations.v1'],
   },
   { id: 'connectivity', label: 'Connectivity query', help: 'The last query on the Connectivity tab', keys: ['sbfsem.connectivity.query'] },
+  {
+    id: 'report', label: 'Report options',
+    help: 'Render compare’s report: the viewpoints, sign, paper and what to include, as last chosen',
+    keys: ['sbfsem:compare-report'],
+  },
   { id: 'dropdowns', label: 'Dropdown lists', help: 'Whether dropdowns open as the page’s own lists', keys: ['sbfsem:select-lists'] },
   {
     id: 'viking', label: 'Viking programs',

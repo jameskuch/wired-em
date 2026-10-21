@@ -8,9 +8,13 @@ attach to the same facade).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import email.message
+import hashlib
 import json
 import logging
+import math
 import re
 import tempfile
 from collections.abc import Callable
@@ -1160,9 +1164,11 @@ def _job_status_body(job) -> dict:
         "kind": job.kind,
         "failed_stage": job.failed_stage,
         # A render's result is its mesh; a measurement's has no geometry (the
-        # client holds the mesh and the result says which one it is for).
+        # client holds the mesh and the result says which one it is for); a
+        # report's is what the file is (GET /api/compare-reports/{id} sends it).
         "mesh": job.result if status == "done" and job.kind == "mesh" else None,
-        "result": job.result if status == "done" and job.kind != "mesh" else None,
+        "result": (job.result.meta() if job.kind == "report" else job.result)
+        if status == "done" and job.kind != "mesh" else None,
     }
 
 
@@ -1203,6 +1209,11 @@ def cancel_mesh_job(request: Request, job_id: str):
     """Stop a queued job; a running build cannot be interrupted, and its
     result lands in the mesh cache harmlessly."""
     return {"cancelled": request.app.state.mesh_jobs.cancel(job_id)}
+
+
+#: The longest pane picture a report request may carry, as base64 text (about
+#: 4.5 MB of PNG: a full-screen pane at a device pixel ratio of 2 is ~1-3 MB).
+REPORT_SNAPSHOT_CHARS = 6_000_000
 
 
 class MeshOptionsBody(BaseModel):
@@ -1360,6 +1371,181 @@ def start_diff_job(request: Request, source: str, neuron_id: int, body: MeshDiff
         weight_mb=weight, kind="diff", label=label,
     )
     return {"job_id": job.id, "status": job.status, "kind": job.kind, "weight_mb": weight}
+
+
+class ReportRenderingBody(BaseModel):
+    """One rendering of a Render compare report: a layer as it was built."""
+
+    #: The options the layer's surface was built with (its snapshot).
+    options: MeshOptionsBody
+    label: str = Field(min_length=1, max_length=120)
+    #: The layer's color on screen.
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+    pane: int = Field(ge=1, le=6)
+    layer: int = Field(ge=1, le=4)
+    #: Also hold it to the annotations (its error map page).
+    deviation: bool = True
+    #: Its panel was changed after it was built (the report says so).
+    stale: bool = False
+
+
+class ReportPaneBody(BaseModel):
+    """A pane of the compare grid, as the page showed it."""
+
+    number: int = Field(ge=1, le=6)
+    kind: Literal["layers", "difference"] = "layers"
+    layers: int = Field(default=0, ge=0, le=4)
+    #: A Difference pane: the two renderings it measures (indices into ``renderings``).
+    difference: tuple[int, int] | None = None
+    #: A picture of the pane, as a ``data:image/png;base64,`` or
+    #: ``data:image/jpeg;base64,`` URL (left out of the report when it is neither).
+    snapshot: str | None = Field(default=None, max_length=REPORT_SNAPSHOT_CHARS)
+
+
+class ReportCameraBody(BaseModel):
+    """The panes' camera for the report's "This view": from what is looked at
+    toward the camera, its up vector (both in the scene's frame) and Flip Z."""
+
+    direction: tuple[float, float, float]
+    up: tuple[float, float, float]
+    flip_z: bool = False
+
+
+#: A viewpoint a report draws from: the panes' camera, or one of the viewer's named views.
+ReportView = Literal["view", "xy1", "xz1", "yz1"]
+_REPORT_VIEWS: list[ReportView] = ["xy1", "xz1"]
+
+
+class CompareReportBody(BaseModel):
+    """What a Render compare report holds (``POST .../compare-report-job``)."""
+
+    renderings: list[ReportRenderingBody] = Field(min_length=1, max_length=24)
+    #: Pairs of renderings to measure both ways (indices into ``renderings``).
+    pairs: list[tuple[int, int]] = Field(default_factory=list, max_length=276)
+    panes: list[ReportPaneBody] = Field(default_factory=list, max_length=6)
+    #: The viewpoints every picture is drawn from: the panes' camera ("view", which
+    #: needs ``camera``) and the viewer's XY1, XZ1 and YZ1.
+    views: list[ReportView] = Field(default_factory=lambda: list(_REPORT_VIEWS), min_length=1, max_length=4)
+    camera: ReportCameraBody | None = None
+    sign: Literal["normal", "enclosure"] = "enclosure"
+    addendum: bool = True
+    page: Literal["letter", "a4"] = "letter"
+    #: The browser's date, time and zone, for the cover.
+    created: str = Field(default="", max_length=64)
+
+
+#: The pictures a report request may carry, by data URL prefix, with the bytes
+#: each must start with.
+_PICTURE_KINDS = {"data:image/png;base64,": b"\x89PNG\r\n\x1a\n", "data:image/jpeg;base64,": b"\xff\xd8\xff"}
+
+
+def _picture_from_data_url(value: str | None) -> bytes | None:
+    """The PNG or JPEG a ``data:image/...;base64,`` URL carries, or None for anything else."""
+    for prefix, magic in _PICTURE_KINDS.items():
+        if value and value.startswith(prefix):
+            try:
+                data = base64.b64decode(value[len(prefix):], validate=True)
+            except (binascii.Error, ValueError):
+                return None
+            return data if data.startswith(magic) else None
+    return None
+
+
+def _report_spec(neuron, src: str, body: CompareReportBody):
+    """The report a request asks for, as the library takes it (400 on a request
+    that names no viewpoint it can draw, or a pair that is not two renderings)."""
+    from sbfsem import __version__
+    from sbfsem.export.compare_pdf import ReportPane, ReportRendering, ReportSpec
+    from sbfsem.geometry.raster import NAMED_VIEWS, View
+
+    renderings = tuple(
+        ReportRendering(label=r.label, color=r.color.lower(), pane=r.pane, layer=r.layer,
+                        options=r.options.model_dump(), deviation=r.deviation, stale=r.stale)
+        for r in body.renderings)
+    views: list[View] = []
+    for key in dict.fromkeys(body.views):
+        if key != "view":
+            views.append(NAMED_VIEWS[key])
+            continue
+        camera = body.camera
+        if camera is None:
+            continue
+        numbers = (*camera.direction, *camera.up)
+        if not all(math.isfinite(x) for x in numbers) or not any(camera.direction):
+            raise ValueError("the camera's direction and up must be finite, and the direction not zero")
+        views.append(View("view", "This view (the panes' camera)", camera.direction, camera.up,
+                          mirror_z=camera.flip_z))
+    if not views:
+        raise ValueError("no viewpoint to draw from: 'view' needs the panes' camera")
+    n = len(renderings)
+    panes = []
+    for pane in body.panes:
+        difference = pane.difference
+        if difference is not None and not (0 <= difference[0] < n and 0 <= difference[1] < n
+                                           and difference[0] != difference[1]):
+            difference = None
+        panes.append(ReportPane(number=pane.number, kind=pane.kind, layers=pane.layers,
+                                difference=difference, snapshot=_picture_from_data_url(pane.snapshot)))
+    scale = getattr(neuron, "volume_scale", None)
+    return ReportSpec(
+        cell=int(neuron.id), source=src, volume=neuron.volume.display_name, renderings=renderings,
+        pairs=tuple((int(a), int(b)) for a, b in body.pairs), panes=tuple(panes), views=tuple(views),
+        sign=body.sign, addendum=body.addendum, page=body.page, created=body.created,
+        build=__version__, copy=getattr(neuron, "copy_tag", None),
+        z_scale_nm=float(scale[2]) if scale is not None and len(scale) > 2 else None,
+    )
+
+
+@router.post("/neurons/{source}/{neuron_id}/compare-report-job")
+def start_compare_report_job(request: Request, source: str, neuron_id: int,
+                             body: CompareReportBody):
+    """Start (or join) a Render compare report: a color PDF of the renderings
+    held to the annotations and every chosen pair to each other, both ways
+    (:mod:`sbfsem.export.compare_pdf`).
+
+    A job, like a measurement (minutes for many pairs of a large cell): poll
+    ``/api/mesh-jobs/{id}``; its result says what the file is (``filename``,
+    ``bytes``, ``pages``), and ``GET /api/compare-reports/{id}`` sends it.  A
+    cancel stops it between its steps.  Renderings and measurements come from
+    the service's caches, so whatever the panes already built is free.
+    """
+    from sbfsem.export.compare_pdf import Plan
+
+    svc = service(request)
+    src = _source(source)
+    neuron = _neuron_or_404(svc, neuron_id, src)
+    try:
+        spec = _report_spec(neuron, src, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    weight = svc.report_weight_mb(neuron, spec)
+    digest = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
+    key = ("report", src, int(neuron_id), neuron.load_serial, digest)
+    job = request.app.state.mesh_jobs.submit(
+        key, lambda: svc.compare_report(neuron, spec), weight_mb=weight, kind="report",
+        label=f"c{neuron_id} {src} report: {len(spec.renderings)} renderings, {len(spec.pairs)} pairs",
+    )
+    return {"job_id": job.id, "status": job.status, "kind": job.kind, "weight_mb": weight,
+            "pages": Plan(spec).total}
+
+
+@router.get("/compare-reports/{job_id}")
+def compare_report_file(request: Request, job_id: str):
+    """The PDF a finished report job made (``POST .../compare-report-job``), as a
+    download.  Held for ten minutes after it is made, like every finished job;
+    a signed-in Viking user must be allowed the volume it describes."""
+    job = request.app.state.mesh_jobs.get(job_id)
+    if job is None or job.kind != "report":
+        raise HTTPException(status_code=404, detail="No such report (it may have expired, or "
+                            "the server restarted): ask for it again")
+    _require_volume(request, str(job.key[1]))
+    if job.status != "done":
+        raise HTTPException(status_code=409, detail=f"The report is not ready: it is {job.status}")
+    report = job.result
+    return Response(content=report.pdf, media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="{report.filename}"',
+        "Cache-Control": "no-store",
+    })
 
 
 @router.post("/neurons/{source}/{neuron_id}/mesh-diff", response_model=MeshDiffDTO)
