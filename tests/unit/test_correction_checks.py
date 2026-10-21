@@ -143,12 +143,65 @@ def test_links_to_unknown_annotations_and_to_itself_are_ignored():
     frame = stage_frame(make_cell().nodes.query("ParentID == 9"))
     frame["Rum"] = make_cell().nodes.query("ParentID == 9")["Rum"].to_numpy()
     found = cc.scan(frame, np.array([3, 3, 777]), np.array([3, 4, 1]))
-    # Only 3-4 is left, and the two are as wide: 4 moved toward 3 (and past it) is a
-    # candidate at 1x only; 3 moved away from 4.  Without its link to the soma, 3 is
-    # not pulled.
-    assert [(p.location_id, p.neighbor_id, p.ratio) for p in found.candidates] == [(4, 3, 1.0)]
-    assert found.at(1.5) == []
+    # Only 3-4 is left, and the two are as wide (1x): both moved, so both are next
+    # to one as wide.  4 moved toward 3 but 3.1 times past it, and 3 moved away
+    # from 4, so neither is a pull; without its link to the soma, 3 is not pulled.
+    assert found.n_next_to_wider(1.0) == 2 and found.n_next_to_wider(1.5) == 0
+    assert found.candidates == []
     assert cc.scan(frame, np.zeros(0, np.int64), np.zeros(0, np.int64)).candidates == []
+
+
+def scan_rows(rows: dict, links: list) -> cc.PullScan:
+    """``rows``: ID -> (Z, r, registered x, y, correction dx, dy), all um."""
+    ids = list(rows)
+    frame = pd.DataFrame({
+        "ID": ids, "Z": [rows[i][0] for i in ids], "Rum": [rows[i][1] for i in ids],
+        "registered_x_um": [rows[i][2] for i in ids], "registered_y_um": [rows[i][3] for i in ids],
+        "corr_dx_um": [rows[i][4] for i in ids], "corr_dy_um": [rows[i][5] for i in ids],
+    })
+    return cc.scan(frame, np.array([a for a, _ in links]), np.array([b for _, b in links]))
+
+
+def test_a_tip_moved_past_its_thin_neighbor_is_not_a_pull():
+    """RC2 c74420's 773079 on production, 2026-10-20: a tip of r 0.035 um, its one
+    neighbor (r 0.21 um, 6x) 0.33 um away, moved 1.06 um the same way, 3.1 times as
+    far as the neighbor.  Listed by 2.22.0; the fit did not pull it toward a soma."""
+    found = scan_rows({
+        1: (622, 0.21, 0.0, 0.0, 0.0, 0.0),
+        2: (624, 0.035, 0.33, 0.0, -1.06, 0.0),
+    }, [(1, 2)])
+    assert found.n_next_to_wider(4.0) == 1   # moved, next to one 6x as wide
+    assert found.candidates == []
+
+
+def test_a_pull_toward_a_soma_two_sections_away_goes_a_third_of_the_way():
+    """RC1 c410's 1567770 on production, 2026-10-20: the fit put it on the line
+    between its neighbors as far as its section is between theirs, a third of the way
+    from the thin one (one section up) to the soma (two down), 0.31 of the way to the
+    soma.  A band around 0.5 would have left this pull out."""
+    thin_x, own_x = 4.88, 4.71
+    t = (67 - 68) / (65 - 68)
+    moved_to = thin_x + t * (0.0 - thin_x)
+    found = scan_rows({
+        1: (65, 3.16, 0.0, 0.0, 0.0, 0.0),                 # the soma
+        2: (67, 0.1, own_x, 0.0, moved_to - own_x, 0.0),
+        3: (68, 0.06, thin_x, 0.0, 0.0, 0.0),
+    }, [(1, 2), (2, 3)])
+    (p,) = found.at(4.0)
+    assert (p.location_id, p.neighbor_id) == (2, 1)
+    assert p.frac == pytest.approx((own_x - moved_to) / own_x)
+    assert p.frac == pytest.approx(0.309, abs=5e-4)
+
+
+def test_a_move_onto_the_wider_one_is_listed_and_one_past_it_is_not():
+    for dx, listed in ((-2.0, [2]), (-2.0 * cc.MAX_FRAC - 0.2, [])):
+        found = scan_rows({
+            1: (100, 1.0, 0.0, 0.0, 0.0, 0.0),
+            2: (100, 0.1, 2.0, 0.0, dx, 0.0),
+        }, [(1, 2)])
+        assert [p.location_id for p in found.candidates] == listed, dx
+        if listed:
+            assert found.candidates[0].frac == pytest.approx(1.0)
 
 
 # -- InferiorMonkey c1178 as Viking's service corrected it on 2026-10-20 -------------
@@ -212,6 +265,12 @@ def test_c1178_under_field_and_fit_adds_a_short_pull(c1178):
     assert p.move_um == pytest.approx(1.127, abs=5e-4)
     assert p.ratio == pytest.approx(6.7, abs=0.05)
     assert p.frac == pytest.approx(0.43, abs=0.005)
+    # 1720976 (r 0.279 um, its neighbor 1.35x) moved 1.058 um onto its neighbor, 1.03 um
+    # away, and the field's part 1.4 % past it: not a pull.  Under Curve fit alone it
+    # lands on it (0.99998 of the way), a candidate at 1x.
+    assert 1720976 not in {q.location_id for q in found.candidates}
+    assert [(q.location_id, round(q.frac, 4)) for q in scan_c1178(c1178, "curvefit").at(1.0)
+            if q.location_id == 1720976] == [(1720976, 1.0)]
 
 
 # -- the service and the endpoint ----------------------------------------------------

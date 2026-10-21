@@ -403,7 +403,9 @@ export class SettingsPanel {
       el('p', { class: 'settings-text', text: 'Annotations Viking’s section correction (Curve fit, or Field + fit) '
         + 'moved toward a much wider annotation linked to them, in the cells loaded on this server that you may see. '
         + 'Viking’s curve fit takes a soma’s or a large outline’s center as a point of the process, so a thin process '
-        + 'leaving it is pulled about halfway to that center: “of the way” near 0.5 is that bug. '
+        + 'leaving it is pulled toward that center: halfway when its neighbors are a section either side, '
+        + 'a third, two thirds or three quarters of the way when they are not. An annotation that moved past '
+        + 'the wider one (more than 1 of the way) is not this bug and is not listed. '
         + 'A row selects its annotation in the 3D view; ↗ shows it in Viking.' }),
       el('div', { class: 'row settings-actions' }, [
         el('label', { for: 'correction-log-ratio', text: 'Wider by at least' }),

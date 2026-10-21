@@ -936,8 +936,9 @@ class CorrectionPullDTO(BaseModel):
 
     See :mod:`sbfsem.analysis.correction_checks`; lengths in um, positions
     before the correction.  ``ratio`` is ``None`` for a zero-width annotation.
-    ``frac`` is how far along the line to the neighbor the move took it
-    (about 0.5 is Viking's curve-fit bug).
+    ``frac`` is how far along the line to the neighbor the move took it, at
+    most 1 (since 2.22.1): about 0.5 when its neighbors are a section either
+    side, 1/3, 2/3 or 3/4 when they are not.
     """
 
     location_id: int

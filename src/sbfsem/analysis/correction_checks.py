@@ -19,17 +19,29 @@ the cell's own only):
 * *j* is at least ``ratio`` times as wide (``Rum``; :data:`DEFAULT_RATIO` 4);
 * *d* points at *j*: the cosine between *d* and *j* - *i*, at the registered
   positions, is over :data:`MIN_COS`;
-* *d* is long for the annotation: over ``max(2 r_i, 1 um)``.
+* *d* is long for the annotation: over ``max(2 r_i, 1 um)``;
+* *d* does not carry it past *j*: ``frac``, how far along the line to *j* the
+  move took it (the projection of *d* on that line over the line's length), is
+  at most :data:`MAX_FRAC` (the user's choice, 2026-10-20).
 
-``frac`` is how far along the line to *j* the move took it (the projection of
-*d* on that line over the line's length); about 0.5 is this bug's signature.
+The fit puts an annotation with two links on the line between its neighbors'
+centroids, as far along it as its section is between theirs, so ``frac`` is
+about ``t = (z_i - z_k) / (z_j - z_k)``, *k* the thin neighbor: 0.5 with one
+neighbor a section either side, 1/3, 2/3 or 3/4 when they are not.  Measured
+on production on 2026-10-20 (19 cells, 64 rows at 4x): 45 such rows in six
+cells sat within 0.08 um of that point (0.1 to 0.4 um on RC2); RC1 c410's
+1567770 went 0.31 of the way to a soma two sections away, t 1/3.  The five rows
+over 1 were not the pull: three tips (one link, r 0.02 to 0.07 um) beside a
+thin neighbor under 0.7 um away, moved just over 1 um; a tip that followed its
+pulled neighbor (RPC1 c430's 197239); and a point of r 0.001 um inside an
+outline, placed 3/4 of the way to its other, thin neighbor (RPC2 c787's 142616).
 A flagged annotation's chain neighbors that moved the same way by about the
 same amount are listed with it (``moved_with``): a thin tip whose own
 neighbor is thin follows the pulled one, so the one-hop rule misses it
 (c1178's 1328723 moved 10.9 um to the same place as 1328721).
 
-:func:`scan` keeps every annotation that passes the direction and length tests
-next to a wider one (ratio at least :data:`MIN_RATIO`); :meth:`PullScan.at`
+:func:`scan` keeps every annotation that passes the direction, length and
+``frac`` tests next to a wider one (ratio at least :data:`MIN_RATIO`); :meth:`PullScan.at`
 filters them by a ratio, so a page can change it without the cell being
 scanned again.
 """
@@ -47,6 +59,7 @@ from .shifts import MOVED_UM, moves_apply, stage_frame
 __all__ = [
     "DEFAULT_RATIO",
     "FIT_MODES",
+    "MAX_FRAC",
     "MAX_RATIO",
     "MIN_COS",
     "MIN_MOVE_UM",
@@ -73,6 +86,8 @@ MIN_COS = 0.8
 #: ... and be longer than ``max(MOVE_PER_RADIUS * r_i, MIN_MOVE_UM)``.
 MOVE_PER_RADIUS = 2.0
 MIN_MOVE_UM = 1.0
+#: ... and not carry it past the wider neighbor: ``frac`` at most this.
+MAX_FRAC = 1.0
 #: A chain neighbor moved with a flagged annotation when its move differs from
 #: the flagged one's by at most this fraction of the flagged one's length.
 SAME_MOVE = 0.25
@@ -100,7 +115,8 @@ class Pull:
     ratio: float
     #: From this annotation to the neighbor, at the registered positions.
     distance_um: float
-    #: The move's projection on the line to the neighbor, over ``distance_um``.
+    #: The move's projection on the line to the neighbor, over ``distance_um``
+    #: (at most :data:`MAX_FRAC`).
     frac: float
     #: The cosine between the move and the line to the neighbor.
     cos: float
@@ -122,8 +138,8 @@ class Pull:
 class PullScan:
     """:func:`scan`'s answer for one cell."""
 
-    #: Every annotation that passes the direction and length tests beside a
-    #: neighbor at least :data:`MIN_RATIO` times as wide, longest move first.
+    #: Every annotation that passes the direction, length and ``frac`` tests
+    #: beside a neighbor at least :data:`MIN_RATIO` times as wide, longest move first.
     candidates: list[Pull] = field(default_factory=list)
     #: The ratio to the widest linked neighbor of every annotation that moved
     #: (over :data:`~sbfsem.analysis.shifts.MOVED_UM`) and has one at least as
@@ -191,7 +207,7 @@ def scan(frame: pd.DataFrame, edges_a, edges_b) -> PullScan:
         cos = np.where(move[who] > 0, toward / move[who], 0.0)
         frac = np.where(distance > 0, toward / distance, 0.0)
     long_move = move[who] > np.maximum(MOVE_PER_RADIUS * r[who], MIN_MOVE_UM)
-    keep = np.flatnonzero(wider & (cos > MIN_COS) & long_move & (distance > 0))
+    keep = np.flatnonzero(wider & (cos > MIN_COS) & long_move & (distance > 0) & (frac <= MAX_FRAC))
     if not len(keep):
         return out
 

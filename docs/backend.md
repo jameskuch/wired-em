@@ -140,8 +140,17 @@ scan.n_next_to_wider(4.0)          # moved annotations next to one that wide
 
 A pull is an annotation whose widest linked one is at least the ratio as wide,
 whose correction move points at it (cosine over 0.8, at the registered
-positions) and is longer than `max(2 r, 1 um)`; `frac` is how far along the
-line it went, and `moved_with` the chain neighbors that moved with it.
+positions), is longer than `max(2 r, 1 um)` and does not carry it past it
+(`frac`, how far along the line it went, at most `MAX_FRAC` = 1 since 2.22.1);
+`moved_with` lists the chain neighbors that moved with it. The fit puts an
+annotation with two links on the line between its neighbors' centroids, as far
+along it as its section is between theirs, so `frac` is about
+`(z_i - z_k) / (z_j - z_k)`, k the thin neighbor and j the wide one: 0.5 with
+one a section either side, 1/3, 2/3 or 3/4 otherwise. On production (2026-10-20,
+19 cells, 64 rows at 4x) 45 such rows in six cells sat within 0.08 um of that
+point (0.1 to 0.4 um on RC2); the five over 1 were tips beside a thin neighbor
+under 0.7 um away, a tip that followed its pulled neighbor and a point of
+r 0.001 um inside an outline, none the soma's pull.
 `SbfsemService` scans every cell it corrects with a fit (milliseconds: 3 ms on
 c1178), logs the pulls at 4x, and serves them as `/api/correction-log`.
 

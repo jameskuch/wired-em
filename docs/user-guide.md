@@ -3406,14 +3406,19 @@ looks wrong rather than for the work itself.
   moved 10.6 µm toward the soma disc 1557441, 0.5 of the way. Each row gives the
   volume, cell, mode and service version, the annotation's Location ID and section, its
   radius and how far it moved, the wider annotation and its radius, how many times wider,
-  how far along the line between them it moved (*Of the way*: near 0.5 is this bug), and
-  the annotations on its chain that moved with it. A Location ID selects that annotation in
-  the 3D view (a cell this tab has not loaded goes to the Structure ID box instead, with its
-  volume), and ↗ shows it in Viking. *Wider by at least* (default 4×, kept in this browser)
+  how far along the line between them it moved (*Of the way*), and the annotations on its
+  chain that moved with it. The fit puts the annotation on the line between its two
+  neighbors, as far along it as its section is between theirs, so *Of the way* is near 0.5
+  when they are a section either side and near a third, two thirds or three quarters when
+  they are not (RC1 c410's 1567770 went 0.31 of the way to a soma two sections away). A
+  Location ID selects that annotation in the 3D view (a cell this tab has not loaded goes
+  to the Structure ID box instead, with its volume), and ↗ shows it in Viking. *Wider by at least* (default 4×, kept in this browser)
   sets which pulls are listed; it does not change Viking's correction, which takes no such
-  setting yet. A pull is listed when the move points at the wider annotation and is longer
-  than the annotation's diameter (and than 1 µm). Cells under the residual field alone
-  are listed as not checked. The server's log names the pulls at 4× as each cell is loaded.
+  setting yet. A pull is listed when the move points at the wider annotation, is longer
+  than the annotation's diameter (and than 1 µm), and does not carry it past the wider one
+  (since 2.22.1: of five such rows on production at 4×, four were tips beside a thin
+  neighbor under 0.7 µm away and one a point drawn inside an outline, none this bug).
+  Cells under the residual field alone are listed as not checked. The server's log names the pulls at 4× as each cell is loaded.
 - **This server** is shown in full to an admin (the server lists them in
   `SBFSEM_ADMIN_USERS`; on a local checkout everyone is one): the version, how long it
   has been up, its memory, the cells and surfaces it holds, its disk cache, its build
