@@ -45,6 +45,7 @@
 
 import { api } from './api.js';
 import { Renderer3D } from './render3d.js';
+import { ViewCube } from './viewcube.js';
 import { loadGeneration } from './state.js';
 import { JobCard, formatElapsed } from './jobcard.js';
 import { SliceState, SHIFT_DEFAULTS, normalizeShiftDisplay, pairsFor } from './shifts.js';
@@ -121,6 +122,10 @@ const layerKey = (id) => `L${id}`;
 // A pane narrower than this (px) shows its layers as dots: the names are in the
 // tooltips and the editor.
 const NARROW_PX = 260;
+
+// How many columns the grid has for each pane count (app.css, .compare-grid.panes-N): the view
+// cube sits in the last pane of the top row, the grid's top-right corner.
+const COLUMNS = [1, 1, 2, 3, 2, 3, 3];
 
 // A one-layer pane whose chips' line has less than this (px) shows its state as a dot, not a word: "out of
 // date" is 71 px, the layer's chip at its narrowest 66, the annotations' 66, and the gaps between them.
@@ -260,6 +265,7 @@ export class CompareView {
     this._outdated = false;  // the cell picker now names another cell or load
     this._annotations = null; // { key, promise } the cell's annotations, fetched once
     this.maximized = null;   // the pane that fills the grid, if one does
+    this.viewCube = null;    // the view cube in the grid's top-right corner (setViewCube)
     this._pop = null;        // the popover open now: { pane, which, el, anchor }
     this._layerSeq = 0;
     // The Position shift layer, shared by every pane that has its box ticked: one
@@ -350,6 +356,7 @@ export class CompareView {
     for (const pane of this.panes) if (pane.shift) this._applyShifts(pane);
     this._shiftStrip();
     this._syncOptions();
+    this._placeCube();
   }
 
   /** Rebuild every Difference pane's editor so its source lists are current. */
@@ -413,6 +420,8 @@ export class CompareView {
       ...request, record: this.record || this.cell(), pane: pane.index,
     });
     pane.renderer.controls.addEventListener('change', () => this._syncFrom(pane));
+    // Every pane draws every frame it is in sight; the cube reads the one it shows.
+    pane.renderer.onFrame = () => this.viewCube?.update();
     // Slice keys on any pane step the shared slice (a pane has no annotation selection).
     pane.renderer.onSliceStep = (event) => this._sliceKey(event, pane);
     // After the renderer, so its layer sits over the canvas.
@@ -1272,6 +1281,7 @@ export class CompareView {
       p.renderer.setPaused(away);
     }
     this.grid.classList.toggle('has-maximized', !!pane);
+    this._placeCube();
     this._closePop();
     for (const p of this.panes) this._syncHead(p);
     if (pane) {
@@ -1998,6 +2008,10 @@ export class CompareView {
       dst.camera.position.copy(src.camera.position);
       dst.controls.target.copy(src.controls.target);
       dst.camera.up.copy(src.camera.up);
+      // The orbit frame follows the up, as every change of it in the renderer does: with the
+      // old pole, the update below pushed a view down that pole (XY1 after a turn from the 3D
+      // view) 1e-6 rad off it, OrbitControls' clamp short of the pole.
+      dst._syncControlsUp?.();
       dst.camera.zoom = src.camera.zoom;
       dst.camera.near = src.camera.near;
       dst.camera.far = src.camera.far;
@@ -2014,6 +2028,82 @@ export class CompareView {
     for (const pane of this.panes) {
       if (pane !== source) this._copyCamera(source, pane);
     }
+  }
+
+  // -- the view cube ---------------------------------------------------------------
+
+  /**
+   * Show or hide the view cube (viewcube.js) in the grid's top-right corner, the same cube
+   * as the 3D render's.  It sits in the viewport of whichever pane is there (the last of
+   * the top row, or the pane that fills the grid), shows the focused pane's camera, and
+   * turns every pane.  With Sync cameras the focused pane turns and Sync carries the others
+   * along, frame by frame; without it each pane turns to the same direction about its own
+   * pivot, keeping its own zoom, and a drag on the cube orbits each by the same amount.
+   * The house is Reset view: the focused pane's, followed by the rest with Sync, every
+   * pane's own without it.
+   */
+  setViewCube(on) {
+    if (!on && !this.viewCube) return;
+    if (!this.viewCube) {
+      const lead = () => this._cubeLead().renderer;
+      const view = {
+        get flipZ() { return lead().flipZ; },
+        viewFrame: () => lead().viewFrame(),
+        turnTo: (dir, up) => this._cubeTurn(dir, up),
+        spinBy: (yaw, pitch) => { for (const r of this._cubeTargets()) r.spinBy(yaw, pitch); },
+        endSpin: () => { for (const r of this._cubeTargets()) r.endSpin(); },
+      };
+      this.viewCube = new ViewCube(this.grid, view, { onHome: () => this._cubeHome() });
+    }
+    this.viewCube.setVisible(on);
+    this._placeCube();
+  }
+
+  /** The pane whose camera the cube shows: the one filling the grid, else the focused
+   * pane, else the first with something drawn. */
+  _cubeLead() {
+    if (this.maximized) return this.maximized;
+    const drawn = (p) => p && !p.renderer.bounds.isEmpty();
+    const focused = this.panes[this.focus];
+    return drawn(focused) ? focused : (this.panes.find(drawn) ?? focused ?? this.panes[0]);
+  }
+
+  /** The renderers a turn of the cube moves itself: with Sync cameras the shown pane alone
+   * (Sync copies it into the rest), without it every pane with something drawn. */
+  _cubeTargets() {
+    if (this.syncEnabled) return [this._cubeLead().renderer];
+    return this.panes.filter((p) => !p.renderer.bounds.isEmpty()).map((p) => p.renderer);
+  }
+
+  async _cubeTurn(dir, up) {
+    const lead = this._cubeLead();
+    const arrived = await Promise.all(this._cubeTargets().map((r) => r.turnTo(dir, up)));
+    // The glide's last step is too small for the controls to call it a change, so Sync never
+    // copied the arrival itself (the other pane stopped 1.1e-6 rad short of an edge view,
+    // measured): the other panes take it here.
+    if (this.syncEnabled && this.panes.includes(lead)) this._syncFrom(lead);
+    return arrived.some(Boolean);
+  }
+
+  _cubeHome() {
+    if (!this.syncEnabled) {
+      for (const p of this.panes) p.renderer.resetView();
+      return;
+    }
+    const lead = this._cubeLead();
+    lead.renderer.resetView();
+    this._syncFrom(lead);
+  }
+
+  /** Put the cube in the viewport of the pane at the grid's top right; that pane's Position
+   * shift legend moves to its bottom right (app.css). */
+  _placeCube() {
+    const cube = this.viewCube;
+    if (!cube) return;
+    const host = this.maximized
+      ?? this.panes[Math.min(COLUMNS[this.panes.length] ?? 1, this.panes.length) - 1];
+    for (const p of this.panes) p.viewport.classList.toggle('has-viewcube', cube.visible && p === host);
+    if (host) cube.attach(host.viewport);
   }
 
   /** The Sync cameras checkbox.  Turning it on lines everything up with the

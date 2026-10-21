@@ -251,7 +251,8 @@ Autodesk Fusion 360, stays where it is and turns with the view, so it always
 shows which way the volume's axes run. Its faces are labeled with the axis
 each one faces (**+X**, **−Y**, **+Z** …), and an X/Y/Z tripod in the axes'
 colors runs from the corner nearest the volume's origin. **View cube** in the
-toolbar, beside Axes, shows or hides it (on by default; kept with the session).
+toolbar, beside Axes, shows or hides it, here and in Render compare (on by
+default; kept with the session).
 
 - **Double-click a face** to look straight down that axis. The six faces are
   the six viewpoint buttons exactly, with the same up: +Z is XY1, −Z XY2, −Y
@@ -279,7 +280,8 @@ picture stays there at the size it had, and turns in a row, with nothing
 moved in between, keep the same pivot. Every turn and every drag is one
 undo step. Under **Flip Z** the face on top is the volume's −Z and the
 tripod's Z runs down, as the Axes helper's does. The cube is drawn over the
-render, not in it: it is never in a snapshot or a video.
+render, not in it: it is never in a snapshot or a video. **Render compare** has
+the same cube in its top-right corner, turning every pane (see *Render compare*).
 
 ### An exact viewpoint
 
@@ -2684,6 +2686,15 @@ against each other where they overlap. Up to four per pane.
   blending translucent shells that cross each other is not exact from every
   angle (the hover text of **α** says so). To read such a picture, reorder the layers,
   use Ghost, hide one, or cut the pane with a Z range.
+- **The view cube** (see *View cube* under the 3D render) sits in the grid's
+  top-right corner, in whichever pane is there: the last of the top row, or the
+  pane that fills the grid. It shows the focused pane's camera and turns every
+  pane: with **Sync cameras** the focused pane turns and the rest follow it
+  frame by frame; without it every pane turns to the same direction about its
+  own pivot, keeping its own zoom, and a drag on the cube orbits each by the
+  same amount. Its house resets the focused pane (with Sync, every pane
+  follows) or, without Sync, each pane. The **View cube** box in the 3D
+  render's toolbar shows or hides it here too.
 - **⋯** is the pane's tool menu: **Reset view** (with Sync cameras every pane
   follows), **Save picture** (a PNG of the pane), **Maximize** / **Restore** (the
   other panes keep their layers and wait, with their rendering paused) and a
@@ -2799,7 +2810,8 @@ row below the panes, shown while some pane has its box ticked and shared by all
 of them: the pair, **Only above**, the exaggeration (**Fit** is Auto), the
 arrows' **Width**, **One slice ±N** with a stepper, the color and **Full color
 at**, with a chip that says how many arrows are drawn (the facts in its hover).
-Each pane that draws the layer has its own legend, top right. They start from the
+Each pane that draws the layer has its own legend, top right (bottom right in the
+pane that holds the view cube, above a Difference pane's scale). They start from the
 compared cell's own settings and stay in Compare (changing them here does not
 change the cell). Every ticked pane draws the same exaggeration, the same
 scale and the same slice, and `]`, `[`, `PageUp`, `PageDown`, `Home`, `End` and

@@ -235,6 +235,11 @@ export class Renderer3D {
   setShiftPlane(key, z) { this.calls.push(['setShiftPlane', key, z]); }
   cameraState() { return {}; } restoreCamera() {}
   resetView() { this.framed += 1; this.realFramed = !this.paused; }
+  // The view cube's way in: what it reads and the turns it asks for.
+  viewFrame() { return { right: [1, 0, 0], up: [0, 1, 0], back: [0, 0, 1] }; }
+  turnTo(dir, up) { this.calls.push(['turnTo', dir, up]); return Promise.resolve(!!this.meshes.size); }
+  spinBy(yaw, pitch) { this.calls.push(['spinBy', yaw, pitch]); }
+  endSpin() { this.calls.push(['endSpin']); }
   updateSize() {
     if (this.paused || this.realFramed || !this.meshes.size) return;
     this.resetView();
@@ -246,7 +251,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sbfsem-compare-test-'));
 for (const name of ['compare.js', 'comparelayers.js', 'api.js', 'jobcard.js', 'loadprogress.js', 'state.js',
   'shifts.js', 'shiftlayer.js', 'shiftpanel.js', 'shiftlegend.js', 'fatlines.js', 'renderoptions.js',
   'render-schema.js', 'compareoptions.js', 'renderform.js', 'renderestimate.js', 'regstatus.js',
-  'renderconflicts.js', 'conflictpanel.js']) {
+  'renderconflicts.js', 'conflictpanel.js', 'viewcube.js']) {
   let text = fs.readFileSync(path.join(jsDir, name), 'utf8');
   text = text.replace("'./render3d.js'", "'./render3d_stub.js'");
   fs.writeFileSync(path.join(tmp, name), text);
@@ -3999,6 +4004,82 @@ test('a pane with no estimates has no row', () => {
   setTech(view, 0, 'voxel2');
   press(view, 0);
   assert.equal(conflictRow(view).hidden, true);
+});
+
+// -- the view cube ------------------------------------------------------------
+
+test('the view cube sits in the pane at the grid\'s top right, whatever the count, and in a pane that fills it', () => {
+  const { view } = makeView(4);
+  view.setViewCube(true);
+  const cube = view.viewCube;
+  const host = () => view.panes.findIndex((p) => cube.root.parentElement === p.viewport);
+  const marked = () => view.panes.filter((p) => p.viewport.classList.contains('has-viewcube')).map((p) => p.index);
+  assert.equal(host(), 1, 'two by two: the second pane');
+  assert.deepEqual(marked(), [1], 'its legend moves aside; no other pane is marked');
+  assert.equal(cube.root.hidden, false);
+  for (const [count, want] of [[3, 2], [6, 2], [5, 2], [2, 1], [1, 0], [4, 1]]) {
+    view.setPaneCount(count);
+    assert.equal(host(), want, `${count} panes`);
+    assert.deepEqual(marked(), [want], `${count} panes: one pane marked`);
+  }
+  view.toggleMaximize(view.panes[3]);
+  assert.equal(host(), 3, 'the pane that fills the grid holds it');
+  view.toggleMaximize(view.panes[3]);
+  assert.equal(host(), 1, 'and the grid back puts it back');
+  view.setViewCube(false);
+  assert.equal(cube.root.hidden, true);
+  assert.deepEqual(marked(), [], 'hidden, no pane makes room for it');
+});
+
+test('with Sync cameras the cube turns the pane it shows and Sync carries the rest; without, every drawn pane turns', async () => {
+  const { view } = makeView(3);
+  view.setViewCube(true);
+  const r = view.panes.map((p) => p.renderer);
+  r[0].meshes.set('L', { n_faces: 1 });
+  r[2].meshes.set('L', { n_faces: 1 });
+  const asked = (renderer, kind) => renderer.calls.filter((c) => c[0] === kind);
+  view.focus = 2;
+  const turned = await view.viewCube.view.turnTo([0, 0, 1], [0, 1, 0]);
+  assert.equal(turned, true);
+  assert.deepEqual(r.map((x) => asked(x, 'turnTo').length), [0, 0, 1], 'synced: the focused pane alone turns');
+  // ... and its arrival is copied into the others at the end, whatever the controls called a change.
+  const copied = [];
+  const copy = view._copyCamera.bind(view);
+  view._copyCamera = (from, to) => { copied.push([from.index, to.index]); copy(from, to); };
+  await view.viewCube.view.turnTo([0, 0, -1], [0, 1, 0]);
+  assert.deepEqual(copied, [[2, 0], [2, 1]], 'the arrival is copied from the shown pane into the rest');
+  view._copyCamera = copy;
+  view.focus = 1;   // nothing drawn there: the first pane that has a surface is shown
+  assert.equal(view._cubeLead(), view.panes[0]);
+  view.viewCube.view.spinBy(0.1, 0);
+  assert.deepEqual(r.map((x) => asked(x, 'spinBy').length), [1, 0, 0]);
+  view.setSync(false);
+  await view.viewCube.view.turnTo([1, 0, 0], [0, 0, 1]);
+  assert.deepEqual(r.map((x) => asked(x, 'turnTo').length), [1, 0, 3], 'unsynced: every pane with a surface turns');
+  assert.deepEqual(asked(r[0], 'turnTo')[0].slice(1), [[1, 0, 0], [0, 0, 1]], 'to the same direction and up');
+  view.viewCube.view.spinBy(0.1, -0.2);
+  view.viewCube.view.endSpin();
+  assert.deepEqual(r.map((x) => asked(x, 'spinBy').length), [2, 0, 1]);
+  assert.deepEqual(r.map((x) => asked(x, 'endSpin').length), [1, 0, 1]);
+});
+
+test('the cube\'s house resets the shown pane with Sync, every pane without; the cube reads the shown pane\'s Flip Z', () => {
+  const { view } = makeView(2);
+  view.setViewCube(true);
+  const r = view.panes.map((p) => p.renderer);
+  r[0].meshes.set('L', { n_faces: 1 });
+  r[1].meshes.set('L', { n_faces: 1 });
+  const before = r.map((x) => x.framed);
+  view.focus = 1;
+  view.viewCube.home.fire('click');
+  assert.deepEqual(r.map((x, i) => x.framed - before[i]), [0, 1], 'synced: the focused pane is framed, Sync copies it');
+  view.setSync(false);
+  view.viewCube.home.fire('click');
+  assert.deepEqual(r.map((x, i) => x.framed - before[i]), [1, 2], 'unsynced: each pane frames itself');
+  r[1].flipZ = true;
+  assert.equal(view.viewCube.view.flipZ, true);
+  view.focus = 0;
+  assert.equal(view.viewCube.view.flipZ, false);
 });
 
 // -- run -------------------------------------------------------------------

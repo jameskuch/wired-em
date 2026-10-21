@@ -2319,6 +2319,10 @@ select[aria-expanded="true"] { border-color: var(--accent); }
 #colorbar:not([hidden]) ~ .shift-legend { bottom: 94px; }
 #viewport.inverted .shift-legend { background: rgb(255 255 255 / 0.84); color: #16191d; }
 .compare-viewport .shift-legend { top: 8px; bottom: auto; right: 8px; width: 160px; z-index: 5; }
+/* The pane in the grid's top-right corner holds the view cube there (compare.js _placeCube): its legend goes
+   to the bottom right, where the 3D render has it, and above a Difference pane's scale and numbers. */
+.compare-viewport.has-viewcube .shift-legend { top: auto; bottom: 8px; }
+.compare-pane:has(> .compare-legend:not([hidden])) .compare-viewport.has-viewcube .shift-legend { bottom: 112px; }
 .shift-legend-block { display: flex; flex-direction: column; gap: 4px; }
 .shift-legend-block + .shift-legend-block { border-top: 1px solid rgb(127 127 127 / 0.4); padding-top: 5px; }
 .shift-legend-head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }

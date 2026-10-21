@@ -93,6 +93,10 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   cube orbits, and one begun straight after a turn is one undo step, not two; the house is
   Reset view; the overlay row makes room for it; Flip Z relabels it; hidden, it stays hidden after a
   reload and Restore.
+* ``comparecube`` -- the same cube in Render compare's top-right pane: a double-click turns every pane with
+  Sync cameras; without Sync every pane turns to the same view about its own pivot, and a drag orbits each
+  by the same amount; the house resets each pane; it moves with the pane count and into a maximized pane;
+  the 3D render's View cube box hides it too.
 * ``locate`` -- Viking's "Show in SBFSEM-tools" (``/open?...&location=N``) and a Location ID typed into the
   readout took the view to the annotation and left it unmarked (2026-10-20): both select it now, drawn
   yellow, the readout naming it, and it stays selected once the cell has finished drawing; with the cell's
@@ -2661,6 +2665,111 @@ def viewcube(c: Chrome, r: Report, ctx):
             js(c, "!document.getElementById('show-viewcube').checked && document.querySelector('.viewcube').hidden"))
 
 
+
+def comparecube(c: Chrome, r: Report, ctx):
+    r.start('comparecube: the view cube turns every pane')
+    boot(c, ctx.url)
+    load(c, ctx.cell)
+    _compare_tab(c, 2)
+    _click_js(c, "document.getElementById('compare-build')")
+    drawn = f'{COMPARE}.panes.every((p) => !p.renderer.bounds.isEmpty()) && !{COMPARE}.running'
+    if not c.wait_for(drawn, 600):
+        r.check('both panes are built', False)
+        return
+    c.settle(3)
+    host = f'{COMPARE}.panes.findIndex((p) => {COMPARE}.viewCube && {COMPARE}.viewCube.root.parentElement === p.viewport)'
+    r.check('the cube is in the top-right pane (pane 2 of 2)', js(c, host) == 1, js(c, host))
+
+    def at(region: list[int]) -> tuple[float, float]:
+        return tuple(js(c, """(async () => {
+            const m = await import('/static/js/viewcube.js'); const cube = %s.viewCube;
+            const b = cube.stage.getBoundingClientRect();
+            const [x, y] = m.project(cube.view.viewFrame(), %s);
+            return [b.left + b.width / 2 + x, b.top + b.height / 2 + y]; })()"""
+                        % (COMPARE, json.dumps([0.8 * v for v in region])), wait=True))
+
+    def double(x: float, y: float) -> None:
+        c.move(x, y)
+        for count in (1, 2):
+            c.send('Input.dispatchMouseEvent', type='mousePressed', x=x, y=y, button='left', buttons=1,
+                   clickCount=count)
+            c.send('Input.dispatchMouseEvent', type='mouseReleased', x=x, y=y, button='left', buttons=0,
+                   clickCount=count)
+
+    def frames() -> list[dict]:
+        return js(c, f'{COMPARE}.panes.map((p) => p.renderer.viewFrame())')
+
+    def targets() -> list[list[float]]:
+        return js(c, f'{COMPARE}.panes.map((p) => p.renderer.controls.target.toArray())')
+
+    def near(a: list[float], b: list[float], eps: float = 1e-6) -> bool:
+        return all(abs(x - y) <= eps for x, y in zip(a, b, strict=True))
+
+    def all_at(back: list[float], up: list[float], seconds: float = 3.0) -> bool:
+        end = time.time() + seconds
+        while time.time() < end:
+            if all(near(f['back'], back) and near(f['up'], up) for f in frames()):
+                return True
+            time.sleep(0.05)
+        return False
+
+    h = 2 ** -0.5
+    double(*at([0, 0, 1]))
+    r.check('with Sync cameras, a double-click on +Z turns both panes to XY1', all_at([0, 0, 1], [0, 1, 0]), frames())
+
+    js(c, "document.getElementById('compare-sync').click()")
+    js(c, """(() => { const r = %s.panes[0].renderer; r.controls.target.x += 5; r.camera.position.x += 5;
+        r.controls.update(); })()""" % COMPARE)
+    c.settle(2)
+    before = targets()
+    double(*at([1, 0, 1]))
+    r.check('without Sync, a double-click on an edge turns every pane to that view',
+            all_at([h, 0, h], [-h, 0, h]), frames())
+    after = targets()
+    r.check('each about its own pivot (pane 1 keeps its 5 µm aside)',
+            abs((after[0][0] - after[1][0]) - (before[0][0] - before[1][0])) < 1e-6, (before, after))
+
+    start = [f['back'] for f in frames()]
+    x, y = at([0, 0, 0])
+    c.press(x, y)
+    for i in range(1, 21):
+        c.move(x - i * 2, y, buttons=1)
+        time.sleep(0.02)
+    c.release(x - 40, y)
+    c.wait_for(f'{COMPARE}.panes.every((p) => !p.renderer._spin.yaw && !p.renderer._spin.pitch)', 10)
+    turned = [math.degrees(math.acos(max(-1.0, min(1.0, sum(a * b for a, b in zip(f['back'], s0, strict=True))))))
+              for f, s0 in zip(frames(), start, strict=True)]
+    r.check('a drag on the cube orbits every pane by the same amount',
+            min(turned) > 20 and max(turned) - min(turned) < 0.01, [f'{t:.2f}' for t in turned])
+
+    c.move(*at([0, 0, 0]))
+    c.settle(2)
+    home = js(c, """(() => { const b = %s.viewCube.home.getBoundingClientRect();
+        return [b.left + b.width / 2, b.top + b.height / 2]; })()""" % COMPARE)
+    c.click(*home)
+    c.settle(2)
+    reset = [f['back'] for f in frames()]
+    default = [0.52720, -0.68706, 0.5]          # MATLAB's view(-37.5, 30), Reset view's direction
+    r.check('the house resets every pane to the default direction', all(near(b, default, 1e-4) for b in reset), reset)
+    js(c, "document.getElementById('compare-sync').click()")
+
+    js(c, """(() => { const s = document.getElementById('compare-panes'); s.value = '3';
+        s.dispatchEvent(new Event('change', { bubbles: true })); })()""")
+    c.settle(2)
+    r.check('at three panes it moves to pane 3', js(c, host) == 2, js(c, host))
+    js(c, f'{COMPARE}.toggleMaximize({COMPARE}.panes[0])')
+    c.settle(2)
+    r.check('and into a pane that fills the grid', js(c, host) == 0, js(c, host))
+    js(c, f'{COMPARE}.toggleMaximize({COMPARE}.panes[0])')
+    c.settle(2)
+    r.check('and back', js(c, host) == 2, js(c, host))
+
+    js(c, "document.getElementById('show-viewcube').click()")
+    c.settle(2)
+    r.check('the View cube box in the 3D render hides it here too',
+            js(c, f'{COMPARE}.viewCube.root.hidden && !document.querySelector(".compare-viewport.has-viewcube")'))
+
+
 SECTIONS = {
     'notice': notice, 'waiting': waiting, 'draws': draws, 'undo': undo, 'idle': idle,
     'picker': picker, 'save': save, 'analysis': analysis, 'strata': strata, 'twod': twod, 'sheets': sheets, 'volume': volume,
@@ -2680,6 +2789,7 @@ SECTIONS = {
     'visualizations': visualizations,
     'locate': locate,
     'viewcube': viewcube,
+    'comparecube': comparecube,
 }
 
 

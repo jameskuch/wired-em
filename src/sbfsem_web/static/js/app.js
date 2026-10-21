@@ -2860,9 +2860,11 @@ function resetViewNow() {
   pushHistoryNow();
 }
 
-/** Show or hide the view cube; the overlay row and the notices make room for it. */
+/** Show or hide the view cube, in the 3D render and in Render compare; the 3D render's
+ * overlay row and notices make room for it. */
 function showViewCube(on) {
   viewCube?.setVisible(on);
+  compare?.setViewCube(on);
   $('view-render').classList.toggle('with-viewcube', !!on);
 }
 

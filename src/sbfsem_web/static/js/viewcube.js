@@ -335,15 +335,17 @@ const TURN_HELP = {
 };
 
 /**
- * The cube itself, over a Renderer3D's viewport.  The renderer calls `update()`
- * after every frame it draws (its `onFrame`); the cube reads the camera from it
- * and turns it through `turnTo` and `spinBy`.  `onHome` is the house (the app's
- * Reset view, an undo step); `onTurned` follows every turn the cube made, once
- * the view has arrived.
+ * The cube itself, over a view.  The `view` is what it reads and turns: a
+ * Renderer3D (the 3D render's), or anything with the same `viewFrame()`,
+ * `flipZ`, `turnTo(dir, up)` (a promise of whether it arrived), `spinBy(yaw,
+ * pitch)` and `endSpin()` (Render compare's, over all its panes).  Whoever
+ * draws the view calls `update()` after every frame (a renderer's `onFrame`).
+ * `onHome` is the house; `onTurned` follows every turn the cube made, once the
+ * view has arrived.  `attach(container)` moves the cube to another host.
  */
 export class ViewCube {
-  constructor(container, renderer, { onHome = null, onTurned = null } = {}) {
-    this.renderer = renderer;
+  constructor(container, view, { onHome = null, onTurned = null } = {}) {
+    this.view = view;
     this.onHome = onHome;
     this.onTurned = onTurned;
     this.visible = false;
@@ -451,7 +453,7 @@ export class ViewCube {
         if (press.travel > 3) {
           press.dragged = true;
           this.root.classList.add('dragging');
-          this.renderer.spinBy(-dx * DRAG_RADIANS_PER_PX, -dy * DRAG_RADIANS_PER_PX);
+          this.view.spinBy(-dx * DRAG_RADIANS_PER_PX, -dy * DRAG_RADIANS_PER_PX);
         }
       }
       this._refreshHover();
@@ -474,7 +476,7 @@ export class ViewCube {
       this._press = null;
       this._lastDragged = press.dragged;
       this.root.classList.remove('dragging');
-      if (press.dragged) this.renderer.endSpin();
+      if (press.dragged) this.view.endSpin();
       if (e.type === 'pointercancel' || !stage.contains(document.elementFromPoint(e.clientX, e.clientY))) {
         this._pointer = null;
       }
@@ -500,13 +502,22 @@ export class ViewCube {
   }
 
   _frame() {
-    return this.renderer.viewFrame();
+    return this.view.viewFrame();
   }
 
-  async _turn(view) {
-    if (!view) return;
-    const arrived = await this.renderer.turnTo(view.dir, view.up);
+  async _turn(to) {
+    if (!to) return;
+    const arrived = await this.view.turnTo(to.dir, to.up);
     if (arrived) this.onTurned?.();
+  }
+
+  /** Move the cube into another host element (a no-op when it is there already). */
+  attach(container) {
+    if (!container || this.root.parentElement === container) return;
+    container.append(this.root);
+    this._pointer = null;
+    this._matrix = '';
+    this.update();
   }
 
   setVisible(on) {
@@ -518,10 +529,10 @@ export class ViewCube {
     }
   }
 
-  /** Follow the camera: called after each frame the renderer draws. */
+  /** Follow the camera: called after each frame the view draws. */
   update() {
     if (!this.visible) return;
-    const flip = !!this.renderer.flipZ;
+    const flip = !!this.view.flipZ;
     if (flip !== this._flip) this._relabel(flip);
     const frame = this._frame();
     const matrix = cssMatrix(cubeMatrix(frame));
@@ -581,7 +592,7 @@ export class ViewCube {
       return;
     }
     const button = buttonFor(region);
-    const name = volumeLabel(region, !!this.renderer.flipZ);
+    const name = volumeLabel(region, !!this.view.flipZ);
     this.caption.innerHTML = '';
     const title = document.createElement('strong');
     title.textContent = button ? `${name} · ${button.toUpperCase()}` : name;
