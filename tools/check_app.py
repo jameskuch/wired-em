@@ -92,6 +92,10 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   kept in the browser and refuses what is not a number; a Location ID selects its annotation in the 3D view,
   drawn yellow; Show in Viking answers on a Mac that Viking runs on Windows; the card scrolls its table rather
   than the page at 480 px.
+* ``shiftpulls`` -- the same pulls in the cell's own panel (2026-10-20): the shut Position shift section's
+  summary counts them at 4x with the layer off; open, a line says how many and lists their Location IDs, and
+  one selects its annotation, drawn yellow; the Settings tab's ratio box changes what the panel lists (20x:
+  none, no count); the row wraps inside the panel at 480 px.
 * ``viewcube`` -- the view cube in the corner (viewcube.js), with a real mouse: a double-click on a
   face turns the view to that face's toolbar viewpoint exactly, on an edge to the 45 degree view and on a
   corner to the view between three faces; a single click turns nothing; looking at a face, the triangles
@@ -2434,6 +2438,80 @@ def correctionlog(c: Chrome, r: Report, ctx):
     js(c, "localStorage.removeItem('sbfsem:correction-log-ratio')")
 
 
+POSITION_SHIFT = """[...document.querySelectorAll('.cell-section')]
+    .find((s) => s.querySelector('.sec-name').textContent === 'Position shift')"""
+PULLS = """(() => { const s = %s; const row = s?.querySelector('.shift-pulls');
+    return { summary: s?.querySelector('.sec-summary')?.textContent ?? null,
+             line: row?.querySelector('.shift-pulls-text')?.textContent ?? null,
+             help: (row?.querySelector('.shift-pulls-text')?.dataset.help || '').length,
+             ids: [...(row?.querySelectorAll('button.shift-pull-id') || [])].map((b) => Number(b.dataset.location)),
+             layerOn: !!s?.querySelector('.switch-row input[type=checkbox]')?.checked }; })()""" % POSITION_SHIFT
+
+
+def shiftpulls(c: Chrome, r: Report, ctx):
+    r.start('shiftpulls: the cell panel lists the annotations the curve fit pulled toward a much wider one')
+    boot(c, ctx.url)
+    _dismiss_offer(c)
+    set_control(c, 'pathway', 'original')
+    js(c, "localStorage.removeItem('sbfsem:correction-log-ratio')")
+    key = load(c, 1178, source='NeitzInferiorMonkey', mesh=False)
+    js(c, "document.querySelector(%s).click(); true" % json.dumps(f'.neuron-item[data-key="{key}"] .chev'))
+    c.wait_for("!!document.querySelector('.cell-panel')", 10)
+    counted = c.wait_for(f"/ · \\d+ pulled$/.test(({POSITION_SHIFT})?.querySelector('.sec-summary')"
+                         "?.textContent || '')", 30)
+    shut = js(c, PULLS)
+    r.check('the shut Position shift section counts the pulls (at 4x), with the layer off',
+            bool(counted and shut['summary'].startswith('off · ') and not shut['layerOn']), shut)
+
+    js(c, f"({POSITION_SHIFT}).querySelector('.section-head').click()")
+    c.wait_for(f"!!({POSITION_SHIFT})?.querySelector('.shift-pulls button.shift-pull-id')", 10)
+    got = js(c, PULLS)
+    n = len(got['ids'])
+    r.check('open, a line says how many and lists 1328721 and 2028495 as buttons, with help on the line',
+            {1328721, 2028495} <= set(got['ids'])
+            and got['line'] == f'Curve fit pulled {n} annotations toward one 4× as wide or wider:'
+            and got['summary'].endswith(f'· {n} pulled') and got['help'] > 100, got)
+
+    js(c, f"({POSITION_SHIFT}).querySelector('button.shift-pull-id[data-location=\"1328721\"]').click()")
+    chosen = c.wait_for("window.sbfsem.renderer.selection?.locationId === 1328721", 30)
+    sel = js(c, SELECTED)
+    r.check('a Location ID selects its annotation in the 3D view, drawn yellow',
+            chosen and sel and sel['kind'] == 'annotation' and sel['drawn'] and sel['color'] == sel['yellow'], sel)
+
+    def ratio(text: str) -> None:
+        js(c, "document.querySelector('[data-view=settings]').click()")
+        c.wait_for("!!document.getElementById('correction-log-ratio')", 15)
+        js(c, """(() => { const i = document.getElementById('correction-log-ratio'); i.value = %s;
+            i.dispatchEvent(new Event('change', { bubbles: true })); })()""" % json.dumps(text))
+        js(c, "document.querySelector('[data-view=render]').click()")
+        c.settle(1)
+
+    ratio('20')
+    gone = c.wait_for(f"!({POSITION_SHIFT})?.querySelector('.shift-pulls') && "
+                      f"!/pulled/.test(({POSITION_SHIFT})?.querySelector('.sec-summary')?.textContent || '')", 15)
+    r.check('the Settings ratio at 20x lists none here either (13x at most), and the count goes',
+            gone, js(c, PULLS))
+    ratio('4')
+    back = c.wait_for(f"({POSITION_SHIFT})?.querySelectorAll('.shift-pulls button.shift-pull-id').length === {n}", 15)
+    r.check('back at 4x they are listed again', back, js(c, PULLS))
+
+    c.emulate('mac', 480, 900)
+    c.settle(2)
+    fit = js(c, """(() => { const s = %s; const row = s?.querySelector('.shift-pulls');
+        const box = (e) => e?.getBoundingClientRect();
+        const page = () => document.scrollingElement.scrollWidth - window.innerWidth;
+        const out = { page: page(), row: row ? Math.round(box(row).right - box(s).right) : null,
+                      over: row ? row.scrollWidth - row.clientWidth : null };
+        if (row) { row.style.display = 'none'; out.withoutRow = page(); row.style.display = ''; }
+        out.wide = [...document.querySelectorAll('body *')].filter((e) => box(e).right > window.innerWidth + 1)
+          .slice(0, 8).map((e) => `${e.tagName.toLowerCase()}#${e.id}.${e.className}`.slice(0, 80));
+        return out; })()""" % POSITION_SHIFT)
+    r.check('at 480 px the row wraps inside the panel', fit['row'] is not None and fit['row'] <= 0
+            and fit['over'] <= 0 and fit['page'] <= fit.get('withoutRow', 0), fit)
+    c.emulate('mac', 1440, 900)
+    js(c, "localStorage.removeItem('sbfsem:correction-log-ratio')")
+
+
 def visualizations(c: Chrome, r: Report, ctx):
     """The Visualizations menu (2026-10-19): the open row's Look dropdown, the right-click submenu
     with its "apply to all cells" follow-up, Save, and the manager's file and delete."""
@@ -2986,6 +3064,7 @@ SECTIONS = {
     'helpmovie': helpmovie,
     'settings': settings,
     'correctionlog': correctionlog,
+    'shiftpulls': shiftpulls,
     'visualizations': visualizations,
     'locate': locate,
     'viewcube': viewcube,

@@ -231,6 +231,13 @@ export function parseRatio(text, { min = RATIO_LIMITS.min, max = RATIO_LIMITS.ma
   return Math.min(max, Math.max(min, value));
 }
 
+/** The ratio this browser keeps for the log (`store`: localStorage, or null), else the default. */
+export function savedRatio(store) {
+  let text = '';
+  try { text = store?.getItem(RATIO_KEY) ?? ''; } catch { /* refused: the default */ }
+  return parseRatio(text) ?? RATIO_LIMITS.fallback;
+}
+
 /** A ratio as the log writes it: 13.4×, 4×, ∞ for a zero-width annotation. */
 export function formatRatio(ratio) {
   if (ratio == null || !Number.isFinite(ratio)) return '∞';
@@ -238,6 +245,14 @@ export function formatRatio(ratio) {
 }
 
 const um = (value, digits = 2) => (Number.isFinite(value) ? value.toFixed(digits) : '—');
+
+/** One pull in words: a log row's hover, and an ID's in the cell panel. */
+export function pullTitle(p) {
+  const moved = p.moved_with?.length ? `; ${p.moved_with.join(', ')} moved with it` : '';
+  return `Location ${p.location_id} (r ${um(p.r_um)} µm, section ${p.z}) moved ${um(p.move_um)} µm, `
+    + `cos ${um(p.cos)} toward ${p.neighbor_id} (r ${um(p.neighbor_r_um)} µm, ${um(p.distance_um)} µm away): `
+    + `${um(p.frac)} of the way there${moved}`;
+}
 
 /**
  * The log as the card draws it: one entry per checked cell, in the server's
@@ -276,13 +291,36 @@ export function correctionLogView(log, { volumeName = (s) => s } = {}) {
         frac: um(p.frac),
         distance: um(p.distance_um),
         movedWith: [...(p.moved_with || [])],
-        title: `Location ${p.location_id} (r ${um(p.r_um)} µm, section ${p.z}) moved ${um(p.move_um)} µm, `
-          + `cos ${um(p.cos)} toward ${p.neighbor_id} (r ${um(p.neighbor_r_um)} µm, ${um(p.distance_um)} µm away): `
-          + `${um(p.frac)} of the way there`,
+        title: pullTitle(p),
       })),
     });
   }
   return { ratio, checked, unchecked };
+}
+
+/** What the pull line's hover says about the bug (the log's card says it at more length). */
+export const PULLS_HELP = 'Viking’s section correction (Curve fit, or Field + fit) takes a soma’s or a large '
+  + 'outline’s center as a point of the process, so a thin process leaving it is pulled toward that center: '
+  + 'halfway when its neighbors are a section either side, a third, two thirds or three quarters of the way when '
+  + 'they are not. These annotations moved toward a linked one at least this many times as wide, by more than '
+  + 'their diameter and not past it. The ratio is the Settings tab’s Correction log’s, kept in this browser; it '
+  + 'changes what is listed, not Viking’s correction. Click an ID to select it in the 3D view.';
+
+/**
+ * A cell's own pulls (`GET /neurons/{source}/{id}/correction-pulls`) as its Position
+ * shift section shows them: `count` for the section's summary, `line` before the IDs,
+ * one `{ locationId, title }` per pull.  Null with nothing to show: not checked (no
+ * curve fit), or none pulled.
+ */
+export function cellPullsView(answer) {
+  const n = answer?.checked ? (answer.pulls?.length ?? 0) : 0;
+  if (!n) return null;
+  const ratio = formatRatio(answer.ratio ?? RATIO_LIMITS.fallback);
+  return {
+    count: `${n} pulled`,
+    line: `Curve fit pulled ${n} annotation${n === 1 ? '' : 's'} toward one ${ratio} as wide or wider:`,
+    ids: answer.pulls.map((p) => ({ locationId: p.location_id, title: pullTitle(p) })),
+  };
 }
 
 // -- the view ----------------------------------------------------------------
@@ -325,14 +363,18 @@ export class SettingsPanel {
    * `annotations`: what the Correction log's rows do in the page:
    * `{ loaded(source, cellId), select(source, cellId, locationId), load(source, cellId),
    * viking(source), openInViking(source, cellId, locationId), volumeName(source) }`.
+   * `onRatioChange(ratio)`: the log's ratio was changed (the cell panels list by it too).
    */
-  constructor({ root, api, assets, beforeReload = () => {}, stopSaving = () => {}, annotations = null }) {
+  constructor({
+    root, api, assets, beforeReload = () => {}, stopSaving = () => {}, annotations = null, onRatioChange = null,
+  }) {
     this.root = root;
     this.api = api;
     this.assets = assets;
     this.beforeReload = beforeReload;
     this.stopSaving = stopSaving;
     this.annotations = annotations;
+    this.onRatioChange = onRatioChange;
     this.built = false;
   }
 
@@ -387,8 +429,7 @@ export class SettingsPanel {
   }
 
   _buildLog() {
-    const saved = parseRatio(browserStore('localStorage')?.getItem(RATIO_KEY) ?? '');
-    this.ratio = saved ?? RATIO_LIMITS.fallback;
+    this.ratio = savedRatio(browserStore('localStorage'));
     this.ratioInput = el('input', {
       id: 'correction-log-ratio', type: 'number', inputmode: 'decimal', step: '0.5',
       min: RATIO_LIMITS.min, max: RATIO_LIMITS.max, value: this.ratio, class: 'settings-ratio',
@@ -434,6 +475,7 @@ export class SettingsPanel {
     this.ratio = value;
     this.ratioInput.value = value;
     try { browserStore('localStorage')?.setItem(RATIO_KEY, String(value)); } catch { /* not kept: fine */ }
+    this.onRatioChange?.(value);
     this._refreshLog();
   }
 

@@ -1725,6 +1725,19 @@ turn the correction on in the volume's default mode: **Apply field + fit** on a
 Neitz lab volume, **Apply curve fit** on the others. Every control explains itself after a two-second hover,
 most with a drawing.
 
+**Pulled toward a soma** (since 2.23.0). Under **Curve fit** or **Field + fit**,
+the section also says which of the cell's annotations Viking's curve fit pulled
+toward a much wider linked one, the cell's own rows of the Settings tab's
+[Correction log](#settings-debug-tools), whether the layer is on or not: *Curve fit
+pulled 3 annotations toward one 4× as wide or wider:* followed by their Location IDs
+(Inferior Monkey c1178 under Field + fit: 1328721, 2028495 and 690259). A Location ID
+selects that annotation in the 3D view, drawn yellow; its hover says how far it moved,
+toward which annotation, how far along the way and what moved with it. The shut section
+counts them (`off · 3 pulled`). The ratio is the Correction log's *Wider by at least*,
+kept in this browser (default 4×); changing it there changes what the cell panels list.
+Nothing is shown for a cell with none, or under no correction or the residual field
+alone.
+
 **What is drawn.** One arrow per annotation that moved, in its section plane,
 **Arrow width** pixels wide on the screen at any zoom (2.5 by default, 1 to 8),
 with a filled head and a shaft that fades toward its tail, so which way it
@@ -3419,6 +3432,9 @@ looks wrong rather than for the work itself.
   (since 2.22.1: of five such rows on production at 4×, four were tips beside a thin
   neighbor under 0.7 µm away and one a point drawn inside an outline, none this bug).
   Cells under the residual field alone are listed as not checked. The server's log names the pulls at 4× as each cell is loaded.
+  A cell's own pulls are also listed in its panel's
+  [Position shift](#position-shift-where-each-annotation-was-and-where-it-is-drawn) section,
+  at this ratio.
 - **This server** is shown in full to an admin (the server lists them in
   `SBFSEM_ADMIN_USERS`; on a local checkout everyone is one): the version, how long it
   has been up, its memory, the cells and surfaces it holds, its disk cache, its build

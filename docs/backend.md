@@ -152,7 +152,9 @@ point (0.1 to 0.4 um on RC2); the five over 1 were tips beside a thin neighbor
 under 0.7 um away, a tip that followed its pulled neighbor and a point of
 r 0.001 um inside an outline, none the soma's pull.
 `SbfsemService` scans every cell it corrects with a fit (milliseconds: 3 ms on
-c1178), logs the pulls at 4x, and serves them as `/api/correction-log`.
+c1178), logs the pulls at 4x, and serves them as `/api/correction-log` (every
+loaded cell, `correction_log`) and `/api/neurons/{source}/{id}/correction-pulls`
+(one copy of one cell, `correction_pulls`).
 
 ## The data model
 

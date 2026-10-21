@@ -44,6 +44,7 @@ from sbfsem.service.dto import (
     ClosedCurveDTO,
     ConnectivityDTO,
     CorrectionLogDTO,
+    CorrectionPullsDTO,
     DendriteDiameterDTO,
     DeviationMapDTO,
     EdgeDTO,
@@ -1760,6 +1761,21 @@ def shift_summary(request: Request, source: str, neuron_id: int,
     src = _source(source)
     _neuron_or_404(svc, neuron_id, src)
     return svc.shift_summary(neuron_id, src, pair)
+
+
+@router.get("/neurons/{source}/{neuron_id}/correction-pulls", response_model=CorrectionPullsDTO)
+def correction_pulls(request: Request, source: str, neuron_id: int,
+                     ratio: float = Query(PULL_DEFAULT_RATIO, ge=PULL_MIN_RATIO, le=PULL_MAX_RATIO,
+                                          description="How many times wider the linked annotation "
+                                                      "must be")):
+    """The annotations Viking's curve fit pulled toward a much wider linked one in
+    this cell: its rows of ``GET /correction-log``, for the copy named by
+    ``?copy=``.  A copy loaded without a section correction is ``off``, not checked.
+    """
+    svc = service(request)
+    src = _source(source)
+    _neuron_or_404(svc, neuron_id, src)
+    return svc.correction_pulls(neuron_id, src, ratio)
 
 
 @router.get("/neurons/{source}/{neuron_id}/morphometrics", response_model=MorphometricsDTO)

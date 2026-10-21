@@ -18,6 +18,7 @@ const {
   STORAGE_GROUPS, groupOf, inventory, resetGroups, pageAssets, buildCheck,
   formatBytes, formatDuration, restartPhase, serverRows, RESTART_WAIT_S,
   RATIO_KEY, RATIO_LIMITS, parseRatio, formatRatio, correctionLogView,
+  savedRatio, pullTitle, cellPullsView, PULLS_HELP,
 } = await load('settings.js');
 
 const cases = [];
@@ -213,6 +214,39 @@ test('the log view names each cell with its volume and mode, and keeps the unche
 test('an empty or missing log is drawn as nothing to show', () => {
   assert.deepEqual(correctionLogView({ ratio: 6, cells: [] }), { ratio: 6, checked: [], unchecked: [] });
   assert.deepEqual(correctionLogView(null), { ratio: 4, checked: [], unchecked: [] });
+});
+
+test('the saved ratio is the box value, or the default when there is none, it is not a number or the store refuses', () => {
+  assert.equal(savedRatio(new FakeStorage({ [RATIO_KEY]: '6' })), 6);
+  assert.equal(savedRatio(new FakeStorage({ [RATIO_KEY]: '500' })), RATIO_LIMITS.max);
+  assert.equal(savedRatio(new FakeStorage({ [RATIO_KEY]: 'four' })), 4);
+  assert.equal(savedRatio(new FakeStorage()), 4);
+  assert.equal(savedRatio(null), 4);
+  assert.equal(savedRatio({ getItem() { throw new Error('SecurityError'); } }), 4);
+});
+
+test('a pull in words names what moved with it', () => {
+  const [pull] = LOG.cells[0].pulls;
+  assert.equal(pullTitle(pull), 'Location 1328721 (r 0.74 µm, section 1160) moved 10.64 µm, cos 1.00 toward '
+    + '1557441 (r 9.89 µm, 21.50 µm away): 0.49 of the way there; 1328723 moved with it');
+  assert.equal(pullTitle({ ...pull, moved_with: [] }).endsWith('0.49 of the way there'), true);
+});
+
+test('a cell panel shows its pulls with a count, and nothing without a checked pull', () => {
+  const answer = { ...LOG.cells[0], ratio: 4, ratio_sent_to_viking: false };
+  const view = cellPullsView(answer);
+  assert.equal(view.count, '1 pulled');
+  assert.equal(view.line, 'Curve fit pulled 1 annotation toward one 4× as wide or wider:');
+  assert.deepEqual(view.ids.map((i) => i.locationId), [1328721]);
+  assert.equal(view.ids[0].title, pullTitle(answer.pulls[0]));
+  const two = cellPullsView({ ...answer, ratio: 13.42, pulls: [answer.pulls[0], { ...answer.pulls[0], location_id: 7 }] });
+  assert.equal(two.line, 'Curve fit pulled 2 annotations toward one 13× as wide or wider:');
+  assert.equal(two.count, '2 pulled');
+  assert.equal(cellPullsView({ ...LOG.cells[1], ratio: 4 }), null, 'none pulled');
+  assert.equal(cellPullsView({ ...LOG.cells[2], ratio: 4 }), null, 'not checked');
+  assert.equal(cellPullsView({ ...answer, checked: false }), null, 'pulls of an unchecked copy are not shown');
+  assert.equal(cellPullsView(null), null);
+  assert.match(PULLS_HELP, /halfway when its neighbors are a section either side/);
 });
 
 let failed = 0;

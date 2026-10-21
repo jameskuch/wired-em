@@ -2375,6 +2375,21 @@ select[aria-expanded="true"] { border-color: var(--accent); }
   .status-chip.warn { color: var(--warn); }
 }
 .compare-shifts .status-chip { max-width: 40ch; }
+/* The curve fit's pulls toward a much wider annotation (shiftpanel.js pullsRow): the line, then its IDs. */
+.section-body .shift-pulls {
+  grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: baseline; gap: 1px 2px;
+  margin: 2px 0 4px; font-size: 12px; line-height: 18px;
+}
+.shift-pulls-text { flex: 1 0 100%; color: #8a4f05; cursor: help; }
+@media (prefers-color-scheme: dark) {
+  .shift-pulls-text { color: var(--warn); }
+}
+.shift-pulls button.shift-pull-id {
+  font: inherit; font-family: var(--mono); font-size: 11px; background: none; border: none; padding: 0 3px;
+  border-radius: 3px; color: var(--accent); cursor: pointer; line-height: inherit;
+  text-decoration: underline dotted; text-underline-offset: 2px;
+}
+.shift-pulls button.shift-pull-id:hover { background: var(--hover); }
 
 /* -- The Position shift legend (shiftlegend.js) --------------------------------
    Over the render, like the chip: bottom right, above the chip's row so the two

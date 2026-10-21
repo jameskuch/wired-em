@@ -15,6 +15,10 @@ import {
   syncSlice, thresholdsForPair, ThresholdMemory,
 } from './shiftlayer.js';
 import { ShiftLegend, legendBlocks } from './shiftlegend.js';
+import { dataKey } from './state.js';
+
+/** The correction modes that run Viking's curve fit, the only ones the Correction log checks. */
+const FIT_MODES = Object.freeze(['curvefit', 'all']);
 
 export class ShiftController {
   /**
@@ -25,15 +29,17 @@ export class ShiftController {
    * `dom`: the chip's elements (`chip`, `text`, `steps`, `prev`, `next`, `range`, `off`) and the
    * `viewport` the legend goes in; `hasTransforms(record)`: the cell's volume has its current
    * section transforms read here (`/api/volumes`), so all three pairs can exist;
-   * `defaultCorrection(record)`: the correction mode its volume's cells get when they name none.
+   * `defaultCorrection(record)`: the correction mode its volume's cells get when they name none;
+   * `pullRatio()`: the Correction log's ratio in this browser (settings.js `savedRatio`).
    */
   constructor({
     renderer, state, api, nodesFor, outlinesFor, cachedNodes, cachedOutlines, fail, hooks, dom,
     volumeTag = (source) => source, hasTransforms = () => true, defaultCorrection = () => 'curvefit',
+    pullRatio = () => 4,
   }) {
     Object.assign(this, {
       renderer, state, api, nodesFor, outlinesFor, cachedNodes, cachedOutlines, fail, hooks, dom,
-      volumeTag, hasTransforms, defaultCorrection,
+      volumeTag, hasTransforms, defaultCorrection, pullRatio,
     });
     // What the arrows' colors mean, in a corner of the render while some cell draws them.
     // Above the chip, whatever its height: it wraps in a narrow window and with the slice's stepper.
@@ -45,6 +51,7 @@ export class ShiftController {
     this.layers = new Map();      // cell key -> its latest layer, empty ones too
     this.panels = new Map();      // cell key -> the open panel's update(layer, center)
     this.summaries = new WeakMap();   // nodes array -> Map(pair -> promise of /shift-summary)
+    this.pulls = new Map();           // cell key -> { stamp, answer } of /correction-pulls
     this.thresholds = new ThresholdMemory();
     this._tokens = new Map();
     this._focus = [];               // the chosen annotations: [{ slot, key, locationId }]
@@ -379,6 +386,30 @@ export class ShiftController {
     return byPair.get(layer.pair);
   }
 
+  /**
+   * The annotations Viking's curve fit pulled toward a much wider linked one in this
+   * cell (its rows of the Settings tab's Correction log), at that log's ratio: the
+   * server's answer once it is here, else null.  Asked once per copy, annotations and
+   * ratio, and only of a cell its curve fit moved; the cell list is drawn again when
+   * the answer comes.  A failed ask shows nothing, and is not repeated for that stamp.
+   */
+  pullsFor(record) {
+    const sc = record.summary?.section_correction;
+    if (!sc?.applied || !FIT_MODES.includes(sc.mode)) return null;
+    const ratio = this.pullRatio();
+    const stamp = `${dataKey(record)}|${ratio}`;
+    const held = this.pulls.get(record.key);
+    if (held?.stamp === stamp) return held.answer;
+    const entry = { stamp, answer: null };
+    this.pulls.set(record.key, entry);
+    this.api.correctionPulls(record.source, record.id, ratio).then((answer) => {
+      if (this.pulls.get(record.key) !== entry) return;
+      entry.answer = answer;
+      this.hooks.renderNeuronList();
+    }, () => {});
+    return null;
+  }
+
   /** What shiftpanel.buildShiftPanel acts through for one cell. */
   panelContext(record, helpers) {
     return {
@@ -398,6 +429,8 @@ export class ShiftController {
       correction: () => this.defaultCorrection(record),
       applyCorrection: () => this.hooks.setRegistration(record, { corrections: this.defaultCorrection(record) }),
       summary: () => this.summaryFor(record),
+      pulls: () => this.pullsFor(record),
+      selectLocation: (locationId) => this.hooks.selectLocation?.(record, locationId),
       // The pairs the cell's volume can have at all: the correction alone where its transforms are not read.
       pairs: () => pairsFor(this.hasTransforms(record)),
       rerender: () => this.hooks.renderNeuronList(),

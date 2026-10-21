@@ -797,6 +797,9 @@ export const api = {
    */
   shiftSummary: (source, id, pair = 'correction') =>
     getJSON(`/api/neurons/${source}/${id}/shift-summary${q({ pair })}`),
+  /** The cell's own rows of the Correction log at `ratio`, from the copy the page loaded. */
+  correctionPulls: (source, id, ratio) =>
+    getJSON(`/api/neurons/${source}/${id}/correction-pulls${q({ ratio })}`),
   surfaceArea: (source, id) => getJSON(`/api/neurons/${source}/${id}/surface-area`),
   dendriteDiameter: (source, id, binWidth = 5) =>
     getJSON(`/api/neurons/${source}/${id}/dendrite-diameter${q({ bin_width: binWidth })}`),

@@ -52,7 +52,7 @@ import { setGradientLibrary } from './colormaps.js';
 import { ViewRecorder, supportedFormats } from './video.js';
 import { NetworkView, SYNAPSE_COLORS } from './network.js';
 import { ConnectivityView } from './connectivity.js';
-import { SettingsPanel, pageAssets } from './settings.js';
+import { SettingsPanel, pageAssets, savedRatio } from './settings.js';
 import { fillLinkedNeuronsCard, sortableHead, sortRows } from './linkedneurons.js';
 import { stratificationChart, barChart } from './charts.js';
 import * as session from './session.js';
@@ -571,8 +571,10 @@ async function boot() {
     volumeTag: volumeAbbrev,
     hasTransforms: (record) => volumeHasTransforms(record.source),
     defaultCorrection: (record) => volumeDefaultCorrection(record.source),
+    // The cell panel lists the Correction log's pulls at the Settings tab's ratio.
+    pullRatio: () => savedRatio(browserStore('localStorage')),
     hooks: {
-      applyDisplay, debounced, setRegistration, renderNeuronList, look: lookAt,
+      applyDisplay, debounced, setRegistration, renderNeuronList, look: lookAt, selectLocation,
     },
     dom: {
       viewport: $('viewport'),
@@ -695,6 +697,7 @@ async function boot() {
         openLocationInViking(state.neurons.get(keyOf(source, id)) || { source, id }, locationId),
       volumeName: volumeLongName,
     },
+    onRatioChange: () => renderNeuronList(),
   });
 
   try {
@@ -6665,7 +6668,8 @@ function cellPanel(record) {
   // Asked for 2026-10-15: where each annotation was before the section correction
   // (or the current transforms) and where it is drawn, as arrows, a slice or every
   // section at once.  Draws from the cached annotations; moves no geometry.
-  section(panel, record, 'shift', 'Position shift', shiftSummary(display, shifts.layerOf(record)),
+  section(panel, record, 'shift', 'Position shift',
+    shiftSummary(display, shifts.layerOf(record), shifts.pullsFor(record)),
     (body) => buildShiftPanel(body, record,
       shifts.panelContext(record, { slider, showToggle, field })));
 

@@ -981,6 +981,19 @@ class CorrectionLogCellDTO(BaseModel):
     pulls: list[CorrectionPullDTO] = Field(default_factory=list)
 
 
+class CorrectionPullsDTO(CorrectionLogCellDTO):
+    """``GET /api/neurons/{source}/{id}/correction-pulls``: one copy of a cell, as
+    the correction log lists it, at the ``ratio`` asked for.
+
+    A copy loaded without a section correction is ``mode`` ``off``, not
+    checked.  A copy with manual moves answers with its base copy's pulls: a
+    person's moves come after the correction.
+    """
+
+    ratio: float
+    ratio_sent_to_viking: bool = False
+
+
 class CorrectionLogDTO(BaseModel):
     """``GET /api/correction-log``: every loaded cell the viewer may see, and its pulls.
 

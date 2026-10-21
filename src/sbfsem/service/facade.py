@@ -120,6 +120,7 @@ from .dto import (
     ConnectivityNodeDTO,
     CorrectionLogCellDTO,
     CorrectionPullDTO,
+    CorrectionPullsDTO,
     DendriteDiameterDTO,
     DeviationAnnotationsDTO,
     DeviationBiasDTO,
@@ -270,6 +271,8 @@ class MeshBuffers(NamedTuple):
 
 
 _Result = TypeVar("_Result", bound=BaseModel)
+#: The correction log's row for one copy of a cell, or the per-cell answer built on it.
+_CorrectionCell = TypeVar("_CorrectionCell", bound=CorrectionLogCellDTO)
 
 
 class ResultBuffers(NamedTuple, Generic[_Result]):
@@ -3940,29 +3943,51 @@ class SbfsemService:
                     for tag, neuron in copies.items() if ".m" not in tag]
         out = []
         for key, tag, neuron in held:
-            status = getattr(neuron, "correction_status", None) or {}
-            if not status.get("requested"):
+            if not (getattr(neuron, "correction_status", None) or {}).get("requested"):
                 continue
-            found: PullScan | None = getattr(neuron, "correction_pulls", None)
-            mode = str(status.get("mode") or "neighbor")
-            corrected = neuron.section_correction or {}
-            cell = CorrectionLogCellDTO(
-                source=key.source, neuron_id=key.neuron_id, copy_tag=tag, mode=mode,
-                checked=found is not None, service_version=corrected.get("service_version") or None,
-                stos_group=corrected.get("stos_group"))
-            if not status.get("applied"):
-                cell.note = str(status.get("note") or "Not applied")
-            elif mode not in FIT_MODES:
-                cell.note = "Not checked: this mode has no curve fit"
-            elif found is None:
-                cell.note = "Not checked: the check failed (the server log says why)"
-            if found is not None:
-                cell.n_annotations, cell.n_moved = found.n_annotations, found.n_moved
-                cell.n_next_to_wider = found.n_next_to_wider(ratio)
-                cell.pulls = [CorrectionPullDTO(**p.as_dict()) for p in found.at(ratio)]
-            out.append(cell)
+            out.append(self._correction_cell(CorrectionLogCellDTO, key, tag, neuron, ratio))
         out.sort(key=lambda c: (c.source, c.neuron_id, c.copy_tag))
         return out
+
+    def correction_pulls(self, neuron_id: int, source, ratio: float = DEFAULT_RATIO) -> CorrectionPullsDTO:
+        """One copy of a cell as :meth:`correction_log` lists it: the annotations its
+        curve fit pulled toward a linked one at least ``ratio`` times as wide.  About
+        the copy this call is about (``requested_copy``); one loaded without a
+        section correction is ``off`` and not checked.  A copy with manual moves
+        shares its base copy's scan (``moved_copy`` is shallow), as it should: the
+        moves come after the correction."""
+        neuron = self.neuron(neuron_id, source)
+        key = _Key(Volumes.from_str(source).source, int(neuron_id))
+        tag = str(getattr(neuron, "copy_tag", None) or "")
+        cell = self._correction_cell(CorrectionPullsDTO, key, tag, neuron, ratio, {"ratio": ratio})
+        if not (getattr(neuron, "correction_status", None) or {}).get("requested"):
+            cell.mode, cell.note = "off", "Not checked: loaded without a section correction"
+        return cell
+
+    @staticmethod
+    def _correction_cell(dto: type[_CorrectionCell], key: _Key, tag: str, neuron: Neuron,
+                         ratio: float, extra: Mapping[str, Any] | None = None) -> _CorrectionCell:
+        """``dto`` (a :class:`CorrectionLogCellDTO`) for one held copy of a cell at
+        ``ratio``, with ``extra`` for the fields of its own."""
+        status = getattr(neuron, "correction_status", None) or {}
+        found: PullScan | None = getattr(neuron, "correction_pulls", None)
+        mode = str(status.get("mode") or "neighbor")
+        corrected = neuron.section_correction or {}
+        cell = dto(
+            source=key.source, neuron_id=key.neuron_id, copy_tag=tag, mode=mode,
+            checked=found is not None, service_version=corrected.get("service_version") or None,
+            stos_group=corrected.get("stos_group"), **(extra or {}))
+        if not status.get("applied"):
+            cell.note = str(status.get("note") or "Not applied")
+        elif mode not in FIT_MODES:
+            cell.note = "Not checked: this mode has no curve fit"
+        elif found is None:
+            cell.note = "Not checked: the check failed (the server log says why)"
+        if found is not None:
+            cell.n_annotations, cell.n_moved = found.n_annotations, found.n_moved
+            cell.n_next_to_wider = found.n_next_to_wider(ratio)
+            cell.pulls = [CorrectionPullDTO(**p.as_dict()) for p in found.at(ratio)]
+        return cell
 
     def shift_summary(self, neuron_id: int, source, pair: str = "correction") -> ShiftSummaryDTO:
         """How far the section correction and the current transforms moved a cell, and

@@ -17,6 +17,7 @@ import {
 import { WIDTH_MAX, WIDTH_MIN } from './fatlines.js';
 import { shiftChip } from './shiftlayer.js';
 import { MODE_LABELS } from './regstatus.js';
+import { PULLS_HELP, cellPullsView } from './settings.js';
 
 /**
  * A hover explanation in the app's own panel (data-help), after a long pause,
@@ -64,13 +65,51 @@ export function statusChip(parent, side = 'right') {
   return { el: chip, set };
 }
 
-/** The header summary of the cell panel's section. */
-export function shiftSummary(display, layer) {
+/**
+ * The header summary of the cell panel's section, and after it how many annotations
+ * the curve fit pulled toward a much wider one (`pulls`: the cell's /correction-pulls
+ * answer, or null), whether the layer is on or not.
+ */
+export function shiftSummary(display, layer, pulls = null) {
+  const view = cellPullsView(pulls);
+  const text = layerSummary(display, layer);
+  return view ? `${text} · ${view.count}` : text;
+}
+
+function layerSummary(display, layer) {
   const d = normalizeShiftDisplay(display);
   if (!d.showShift) return 'off';
   if (!layer) return 'loading';
   if (layer.empty) return 'nothing moved';
   return summaryText(layer.display, layer.k, layer.pair);
+}
+
+/**
+ * The line of annotations Viking's curve fit pulled toward a much wider linked one,
+ * each ID a button that selects it (`select(locationId)`); nothing when none was.
+ */
+export function pullsRow(parent, pulls, select) {
+  const view = cellPullsView(pulls);
+  if (!view) return null;
+  const row = document.createElement('div');
+  row.className = 'shift-pulls';
+  const words = document.createElement('span');
+  words.className = 'shift-pulls-text';
+  words.textContent = view.line;
+  help(words, PULLS_HELP);
+  row.append(words);
+  for (const { locationId, title } of view.ids) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'shift-pull-id';
+    button.textContent = String(locationId);
+    button.dataset.location = String(locationId);
+    help(button, `${title}. Click to select it in the 3D view.`);
+    button.addEventListener('click', () => select?.(locationId));
+    row.append(button);
+  }
+  parent.append(row);
+  return row;
 }
 
 // -- a logarithmic slider -----------------------------------------------------------------------------
@@ -301,6 +340,8 @@ export function buildShiftPanel(body, record, ctx) {
     ctx.rerender();
   });
   helpFor(master.parentElement, 'master');
+  // Whether or not the layer is on: what the correction did wrong is not a drawing setting.
+  pullsRow(body, ctx.pulls?.(), ctx.selectLocation);
   if (!display.showShift) return;
   const chip = statusChip(row);
   let verdictText = '';

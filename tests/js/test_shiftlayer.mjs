@@ -18,6 +18,7 @@ const load = (name) => import(pathToFileURL(path.join(jsDir, name)).href);
 const S = await load('shifts.js');
 const L = await load('shiftlayer.js');
 const { ShiftController, onlyShiftKeys } = await load('shiftcontrol.js');
+const { shiftSummary } = await load('shiftpanel.js');
 
 const cases = [];
 const test = (name, fn) => cases.push([name, fn]);
@@ -750,6 +751,105 @@ test('syncSlice hands the renderer the plane\'s rect and color and the tint; the
   record.display = { ...record.display, shiftSlice: false };
   await controller.refresh(record);
   assert.equal(renderer.tints.get('A/1'), null);
+});
+
+// -- the Correction log's pulls in the cell panel ------------------------------------------------------
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const PULL = { location_id: 103, z: 13, r_um: 0.5, dx_um: -3, dy_um: 0, move_um: 3, neighbor_id: 100,
+  neighbor_r_um: 10, ratio: 20, distance_um: 6, frac: 0.5, cos: 1, moved_with: [104] };
+
+test('a cell panel asks for its curve-fit pulls once per copy, annotations and ratio, and draws again when they come', async () => {
+  const { controller, records, hooks } = makeController();
+  const record = records.get('A/1');
+  const asked = [];
+  let ratio = 4;
+  controller.pullRatio = () => ratio;
+  controller.api = {
+    correctionPulls: async (source, id, r) => { asked.push([source, id, r]); return { checked: true, ratio: r, pulls: [PULL] }; },
+  };
+  const fitted = (extra = {}) => ({ ...summary, section_correction: { ...applied(10), mode: 'curvefit' },
+    copy_tag: 'curvefit.1', data_stamp: '2026-10-20T00:00:00Z', ...extra });
+
+  // Not corrected by a curve fit: nothing to ask.
+  for (const sc of [{ ...applied(10), mode: 'neighbor' }, { requested: true, applied: false, mode: 'curvefit' }, null]) {
+    record.summary = { ...summary, section_correction: sc };
+    assert.equal(controller.pullsFor(record), null);
+  }
+  assert.deepEqual(asked, []);
+
+  record.summary = fitted();
+  assert.equal(controller.pullsFor(record), null, 'asked, not here yet');
+  assert.equal(controller.pullsFor(record), null, 'and not asked twice');
+  const renders = hooks.renders;
+  await tick();
+  assert.deepEqual(asked, [['A', 1, 4]]);
+  assert.equal(hooks.renders, renders + 1, 'the cell list is drawn again with the answer');
+  assert.deepEqual(controller.pullsFor(record).pulls.map((p) => p.location_id), [103]);
+  assert.equal(asked.length, 1);
+
+  // The Settings ratio, the copy and the annotations each make it another question.
+  ratio = 6;
+  controller.pullsFor(record);
+  record.summary = fitted({ copy_tag: 'all.1', section_correction: { ...applied(10), mode: 'all' } });
+  controller.pullsFor(record);
+  record.summary = fitted({ copy_tag: 'all.1', section_correction: { ...applied(10), mode: 'all' }, data_stamp: '2026-10-21T00:00:00Z' });
+  controller.pullsFor(record);
+  await tick();
+  assert.deepEqual(asked.slice(1), [['A', 1, 6], ['A', 1, 6], ['A', 1, 6]]);
+  assert.equal(controller.pullsFor(record).ratio, 6);
+
+  // A failed question shows nothing and is not repeated for the same stamp.
+  controller.api.correctionPulls = async () => { asked.push('failed'); throw new Error('404'); };
+  ratio = 8;
+  assert.equal(controller.pullsFor(record), null);
+  await tick();
+  assert.equal(controller.pullsFor(record), null);
+  assert.equal(asked.filter((a) => a === 'failed').length, 1);
+});
+
+test('an answer that comes after the cell changed copy is dropped', async () => {
+  const { controller, records } = makeController();
+  const record = records.get('A/1');
+  let release;
+  controller.api = {
+    correctionPulls: (source, id, r) => (r === 4
+      ? new Promise((resolve) => { release = () => resolve({ checked: true, ratio: 4, pulls: [PULL] }); })
+      : Promise.resolve({ checked: true, ratio: r, pulls: [] })),
+  };
+  let ratio = 4;
+  controller.pullRatio = () => ratio;
+  record.summary = { ...summary, section_correction: { ...applied(10), mode: 'curvefit' }, copy_tag: 'curvefit.1' };
+  controller.pullsFor(record);
+  ratio = 5;
+  controller.pullsFor(record);
+  await tick();
+  release();
+  await tick();
+  assert.deepEqual(controller.pullsFor(record).pulls, [], 'the answer for 5x, not the late one for 4x');
+});
+
+test('the panel acts through the controller: its pulls, and selecting one of them', () => {
+  const { controller, records, hooks } = makeController();
+  const record = records.get('A/1');
+  const picked = [];
+  hooks.selectLocation = (r, id) => { picked.push([r.key, id]); return true; };
+  controller.pulls.set(record.key, { stamp: 'held', answer: { checked: true, ratio: 4, pulls: [PULL] } });
+  const ctx = controller.panelContext(record, {});
+  assert.equal(typeof ctx.pulls, 'function');
+  ctx.selectLocation(103);
+  assert.deepEqual(picked, [['A/1', 103]]);
+});
+
+test('the section summary carries the pull count, whether the layer is on or not', async () => {
+  const answer = { checked: true, ratio: 4, pulls: [PULL, { ...PULL, location_id: 105 }] };
+  assert.equal(shiftSummary({ showShift: false }, null, answer), 'off · 2 pulled');
+  assert.equal(shiftSummary({ showShift: true }, null, answer), 'loading · 2 pulled');
+  assert.equal(shiftSummary({ showShift: false }, null, { ...answer, pulls: [] }), 'off');
+  assert.equal(shiftSummary({ showShift: false }, null, null), 'off');
+  assert.equal(shiftSummary({ showShift: false }, null), 'off');
+  const layer = L.buildLayer(base);
+  assert.equal(shiftSummary({ showShift: true }, layer, answer), `${shiftSummary({ showShift: true }, layer)} · 2 pulled`);
 });
 
 let failed = 0;
