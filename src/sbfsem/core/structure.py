@@ -149,6 +149,9 @@ class Structure:
         #: load); ``None`` for a cell it was handed (a file), which a later
         #: load takes as it is.
         self.loaded_synapses: bool | None = None
+        #: When (``time.monotonic()``) the service last found this copy current
+        #: in Viking, or fetched it past the disk cache; ``None`` never.
+        self.fresh_checked_at: float | None = None
         if omitted_ids is None:
             omitted_ids = self._default_omitted_ids()
         self.omitted_ids = np.asarray(list(omitted_ids), dtype=np.int64)

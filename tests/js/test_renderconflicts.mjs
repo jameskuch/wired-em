@@ -16,6 +16,8 @@ const rc = await import(pathToFileURL(path.join(jsDir, 'renderconflicts.js')).hr
 
 const cases = [];
 const test = (name, fn) => cases.push([name, fn]);
+// No technique defaults saved: the fixes after a failed build read them (renderfallback.js).
+globalThis.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
 
 /** A Closed curve estimate as the server answers it (Inferior c16137 at 0.008 um, a 3 GB server). */
 const curve = (over = {}) => ({
@@ -171,6 +173,66 @@ test('other methods and pathways are never marked', () => {
   assert.equal(rc.buildsField({ method: 'curvemesh', pathway: 'ultraliser' }), true);
   assert.equal(rc.buildsField({ method: 'closedcurve', pathway: 'voxel2' }), false);
   assert.deepEqual(rc.withSuggestion(vr, { set: { voxel2_faces: 0 } }).voxel2_faces, 0);
+});
+
+// -- after a build: every technique ------------------------------------------------------
+
+/** Temporal c162392 as the server held it on 2026-10-21: one disc, nothing linked. */
+const oneDisc = { n_nodes: 1, n_edges: 0, n_disc_annotations: 1, n_curve_annotations: 0, type_id: 1 };
+const orig = { method: 'cylinder', pathway: 'voxel' };
+
+test('a build that came back empty marks the technique and offers what draws the cell', () => {
+  const got = rc.renderConflicts([{ name: 'c162392', failure: { kind: 'empty' }, summary: oneDisc }], orig,
+    { expert: true });
+  assert.deepEqual(got.keys, ['method', 'pathway']);
+  assert.equal(got.headline, 'Voxel remesh orig built nothing for c162392');
+  assert.deepEqual(got.reasons, ['c162392 has 1 annotation, no links']);
+  assert.deepEqual(got.suggestions.map((s) => s.set.method), ['closedcurve', 'closedcurve']);
+  assert.deepEqual(got.suggestions.map((s) => s.set.pixel_size_um), [0.25, undefined]);
+  assert.equal(got.suggestions[0].best, true);
+  assert.match(got.note, /^Expert render mode/);
+});
+
+test('every technique is marked once its build failed, not only the outline and field ones', () => {
+  for (const pathway of ['original', 'adaptive_taubin', 'wrap', 'voxel', 'convolution', 'ultraliser', 'voxel2']) {
+    const got = rc.renderConflicts([{ name: 'c1', failure: { kind: 'error', detail: 'boom' },
+      summary: { n_nodes: 50, n_edges: 49, n_curve_annotations: 0 } }], { method: 'cylinder', pathway });
+    assert.ok(got, pathway);
+    assert.ok(got.suggestions.length >= 2, `${pathway}: several ways`);
+  }
+  const tube = rc.renderConflicts([{ name: 'c1', failure: { kind: 'empty' }, summary: oneDisc }],
+    { method: 'curvemesh', pathway: 'original' });
+  assert.equal(tube.headline, 'Tube (curveToMesh) built nothing for c1');
+});
+
+test('a failure is said before an estimate, and without expert mode the note says the app tried', () => {
+  const got = rc.renderConflicts([
+    { name: 'c16137', estimate: curve(), failure: { kind: 'memory', detail: 'killed', exhausted: true }, summary: {} },
+  ], { ...cc, pathway: 'original' });
+  assert.equal(got.headline, 'Closed curve volume ran out of memory on the server for c16137');
+  assert.deepEqual(got.keys, ['pixel_size_um']);
+  assert.equal(got.suggestions[0].set.pixel_size_um, 0.016);
+  assert.match(got.note, /none drew the cell/);
+});
+
+test('built as set once, without expert mode: the note says Apply tries the fixes', () => {
+  const got = rc.renderConflicts([{ name: 'c1', failure: { kind: 'empty' }, summary: oneDisc }], orig);
+  assert.match(got.note, /^Built as set this once/);
+});
+
+test('several cells: the count, and each one\'s reason', () => {
+  const got = rc.renderConflicts([
+    { name: 'c1', failure: { kind: 'empty' }, summary: oneDisc },
+    { name: 'c2', estimate: undefined },
+    { name: 'c3', failure: { kind: 'empty' }, summary: { ...oneDisc, n_nodes: 3 } },
+  ], orig);
+  assert.equal(got.headline, 'Voxel remesh orig failed for 2 of 3 cells');
+  assert.deepEqual(got.reasons, ['c1 has 1 annotation, no links', 'c3 has 3 annotations, no links']);
+});
+
+test('in expert mode a Voxel size past a limit is said to be refused, not fitted', () => {
+  const got = rc.renderConflicts([{ name: 'c16137', estimate: curve() }], cc, { expert: true });
+  assert.match(got.note, /^Expert render mode builds them as set/);
 });
 
 let failed = 0;

@@ -255,6 +255,12 @@ export function upsertNeuron(detail, { render, display, select = true } = {}) {
   const { summary } = detail;
   const key = keyOf(summary.source, summary.id);
   const existing = state.neurons.get(key);
+  // Drawn with other settings because the ones asked for failed (renderfallback.js),
+  // a cell keeps them until its annotations change; new data is built as asked again.
+  const sameData = existing?.summary?.data_stamp === summary.data_stamp
+    && existing?.summary?.n_nodes === summary.n_nodes;
+  const fallback = render === undefined && sameData ? existing?.fallback ?? null : null;
+  const prior = existing?.fallback && !sameData ? existing.fallback.asked : existing?.render;
   const record = {
     key,
     id: summary.id,
@@ -267,7 +273,9 @@ export function upsertNeuron(detail, { render, display, select = true } = {}) {
     opacity: existing?.opacity ?? 0.92,
     // An explicit `render` wins (a restored session), then whatever the record
     // already had, then the defaults.
-    render: normalizeRender(render ?? existing?.render),
+    render: normalizeRender(render ?? prior),
+    // `{ asked, failure, used, text, detail }` while it is drawn with other settings.
+    fallback,
     display: normalizeDisplay(display ?? existing?.display),
     // Whether Viking has edited the cell since its data was fetched; filled
     // by the load response, cleared by a refresh.

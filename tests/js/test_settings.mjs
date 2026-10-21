@@ -19,6 +19,7 @@ const {
   formatBytes, formatDuration, restartPhase, serverRows, RESTART_WAIT_S,
   RATIO_KEY, RATIO_LIMITS, parseRatio, formatRatio, correctionLogView,
   savedRatio, pullTitle, cellPullsView, PULLS_HELP,
+  EXPERT_RENDER_KEY, EXPERT_RENDER_HELP, expertRender, setExpertRender,
 } = await load('settings.js');
 
 const cases = [];
@@ -164,6 +165,23 @@ test('the ratio box takes a number within the limits, and refuses what is not on
   for (const bad of ['', '  ', 'four', null, undefined, 'NaN']) assert.equal(parseRatio(bad), null, String(bad));
   assert.equal(RATIO_LIMITS.fallback, 4);
   assert.equal(groupOf(RATIO_KEY).id, 'correction-log', 'the saved ratio has a group');
+});
+
+test('expert render mode is off unless this browser keeps it on, and is listed with what is kept', () => {
+  const store = new FakeStorage();
+  assert.equal(expertRender(store), false);
+  assert.equal(expertRender(null), false);
+  assert.equal(expertRender(new BlockedStorage()), false);
+  assert.equal(setExpertRender(store, true), true);
+  assert.equal(store.getItem(EXPERT_RENDER_KEY), '1');
+  assert.equal(expertRender(store), true);
+  assert.equal(setExpertRender(store, false), true);
+  assert.equal(store.getItem(EXPERT_RENDER_KEY), null, 'off is no entry at all');
+  assert.equal(setExpertRender(new BlockedStorage(), true), false);
+  assert.equal(groupOf(EXPERT_RENDER_KEY).id, 'expert-render');
+  // The hover says both settings.
+  assert.match(EXPERT_RENDER_HELP, /^On: render settings are applied verbatim/);
+  assert.match(EXPERT_RENDER_HELP, /Off \(the default\)/);
 });
 
 test('a ratio is written as the log shows it', () => {

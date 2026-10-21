@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
+from sbfsem.core.transforms import Transforms
 from sbfsem.geometry.mesh import Mesh
 from sbfsem.io.legacy_json import read_legacy_json
 from sbfsem.io.odata import ODataClient, ODataError, odata_utc, parse_datetime
@@ -142,6 +143,127 @@ def test_unstamped_data_is_never_stale(service):
     svc, neuron = service
     neuron.data_stamp = None
     assert not _ask(svc, FakeViking("2030-01-01T00:00:00Z", own_count=1)).stale
+
+
+class _Loads:
+    """``NeuronLoader`` as the service uses it: each load is c943 stamped ``stamp``,
+    noted with whether it went past the disk cache (``client.fresh()``)."""
+
+    def __init__(self, i943_path, viking):
+        self.path, self.viking = i943_path, viking
+        self.stamp = CACHED
+        self.calls: list[str] = []
+
+    def __call__(self, volume, client=None):
+        loads = self
+
+        class Loader:
+            def load(self, structure_id, *, include_synapses=False, transform="Standard",
+                     untagged_psd="assume"):
+                loads.calls.append("fresh" if loads.viking.fresh_now else "cached")
+                neuron = read_legacy_json(loads.path)
+                neuron.transform = Transforms.from_str(transform)
+                neuron.data_stamp = parse_datetime(loads.stamp)
+                return neuron
+
+        return Loader()
+
+
+class _Viking(FakeViking):
+    """FakeViking that says when a fetch goes past the disk cache, or answers nothing."""
+
+    def __init__(self, *args, down: bool = False, **kw):
+        super().__init__(*args, **kw)
+        self.fresh_now = False
+        self.down = down
+
+    def structure_freshness(self, ids, *, depth=0):
+        if self.down:
+            raise ODataError("Viking is down")
+        return super().structure_freshness(ids, depth=depth)
+
+    def get_last_annotations(self, structure_id, n=1):
+        if self.down:
+            raise ODataError("Viking is down")
+        return super().get_last_annotations(structure_id, n)
+
+    @contextlib.contextmanager
+    def fresh(self):
+        self.fresh_now = True
+        try:
+            yield
+        finally:
+            self.fresh_now = False
+
+
+def test_a_load_checks_the_copy_against_viking_and_fetches_a_newer_one(i943_path, monkeypatch):
+    """A load answered from the copy the server held, or from the disk cache,
+    drew a cell as it was when first fetched: Temporal c162392, being traced,
+    was drawn from its 1 annotation an hour after it had 153, and the build came
+    back empty (2026-10-21).  A load now asks Viking first, once per 30 s per copy."""
+    import sbfsem.service.facade as facade_mod
+
+    viking = _Viking(LIVE, own_count=190)
+    loads = _Loads(i943_path, viking)
+    monkeypatch.setattr(facade_mod, "NeuronLoader", loads)
+    svc = SbfsemService(offline=True)
+    svc.offline = False                      # Viking is the fake: asked, never reached
+    svc.client = lambda source: viking
+    load = lambda **kw: svc.load_neuron(943, "i", section_corrections="off",  # noqa: E731
+                                        live_registration=False, **kw)
+    try:
+        load()
+        assert loads.calls == ["cached"], "the disk cache's copy, current in Viking: kept"
+        assert viking.calls == [("batch", (943,), 0)]
+
+        load()
+        assert loads.calls == ["cached"] and len(viking.calls) == 1, "held, and asked under 30 s ago"
+
+        svc.FRESH_CHECK_S = 0.0
+        load()
+        assert loads.calls == ["cached"] and len(viking.calls) == 2, "asked again; still current"
+
+        # Annotations added in Viking: the held copy is fetched again past the cache.
+        viking.own_count = 191
+        loads.stamp = "2026-09-23T09:00:00Z"
+        detail = load()
+        assert loads.calls == ["cached", "fresh"]
+        assert detail.summary.data_stamp == odata_utc("2026-09-23T09:00:00Z")
+
+        # The disk cache's copy is older than Viking's: fetched again at once.
+        assert svc.unload_neuron(943, "i")
+        loads.stamp = CACHED
+        load()
+        assert loads.calls == ["cached", "fresh", "cached", "fresh"]
+
+        # An explicit refresh asks nothing first.
+        asked = len(viking.calls)
+        load(refresh=True)
+        assert loads.calls[-1] == "fresh" and len(viking.calls) == asked
+
+        # Viking not answering: the copy is used as it is.
+        viking.down = True
+        before = list(loads.calls)
+        load()
+        assert loads.calls == before
+    finally:
+        svc.close()
+
+
+def test_an_offline_service_never_asks(i943_path, monkeypatch):
+    import sbfsem.service.facade as facade_mod
+
+    viking = _Viking("2030-01-01T00:00:00Z", own_count=1)
+    loads = _Loads(i943_path, viking)
+    monkeypatch.setattr(facade_mod, "NeuronLoader", loads)
+    svc = SbfsemService(offline=True)
+    svc.client = lambda source: viking
+    try:
+        svc.load_neuron(943, "i", section_corrections="off", live_registration=False)
+        svc.load_neuron(943, "i", section_corrections="off", live_registration=False)
+        assert loads.calls == ["cached"] and viking.calls == []
+    finally:
+        svc.close()
 
 
 def test_structure_freshness_posts_chunks_and_reads_utc(tmp_path):

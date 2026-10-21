@@ -16,10 +16,19 @@
 //   it offers the least Face cap that builds the voxel as typed, Face cap 0, and
 //   the Fine voxel the cap holds.
 //
+// And, after Apply, for every technique: a selected cell whose build with these
+// very settings failed (built nothing, was refused, ran out of memory, broke).
+// Those are what expert render mode leaves failed; without it the app has built
+// the fixes in turn already (renderfallback.js), so one is marked only when none
+// of them built the cell either.
+//
 // Pure: no DOM, no fetch.  conflictpanel.js puts it on the page.
 
 import { FIELD_BY_KEY, CURVE_METHODS, normalizeRender } from './renderoptions.js';
 import { usable, overReasons, countText, mbText } from './renderestimate.js';
+import {
+  fallbacks, changedOptions, failureKeys, failureHeadline, failureReason, techniqueName,
+} from './renderfallback.js';
 
 /** The pathways that contour one whole-cell field, whose Fine voxel the server sizes. */
 export const FIELD_PATHWAYS = new Set(FIELD_BY_KEY.voxel2_um.show.pathway);
@@ -40,7 +49,7 @@ const close = (a, b) => Math.abs(Number(a) - Number(b)) < 1e-9;
 /** What turning each one off sets, and how it is said. */
 const OFF_WORDS = { joins: 'Join bodies off', averaging: 'smoothing off', both: 'Join bodies and smoothing off' };
 
-function curveConflicts(entries, options) {
+function curveConflicts(entries, options, { expert = false } = {}) {
   const over = entries.filter((x) => usable(x.estimate) && x.estimate.over?.length);
   if (!over.length) return null;
   const px = options.pixel_size_um;
@@ -90,7 +99,37 @@ function curveConflicts(entries, options) {
       : `${label('pixel_size_um')} ${um(px)} is too fine for ${over.length} of ${entries.length} cells`,
     reasons,
     suggestions,
-    note: 'Applied as set, each of them is built at the finest size that fits it, and a notice says which.',
+    note: expert
+      ? 'Expert render mode builds them as set, and the server refuses a size past its limits.'
+      : 'Applied as set, each of them is built at the finest size that fits it, and a notice says which.',
+  };
+}
+
+// -- after a build: every technique ------------------------------------------------------
+
+function failedConflicts(entries, options, { expert = false } = {}) {
+  const failed = entries.filter((x) => x.failure);
+  if (!failed.length) return null;
+  // The fixes are the first failed cell's; the reasons name every one.
+  const [first] = failed;
+  const suggestions = fallbacks(options, first.summary, first.failure).map((c) => ({
+    text: c.text, detail: c.detail, set: changedOptions(options, c.options),
+  }));
+  const one = failed.length === 1 && entries.length === 1;
+  return {
+    keys: failureKeys(first.failure, options),
+    headline: one
+      ? failureHeadline(first.failure, options, first.name)
+      : `${techniqueName(options)} failed for ${failed.length} of ${entries.length} cells`,
+    reasons: failed.map((x) => failureReason(x.name, x.failure, x.summary)),
+    suggestions,
+    // Whether the app tried the fixes already (`exhausted`), leaves them to the
+    // person (expert render mode), or was asked to build as set this once.
+    note: first.failure.exhausted
+      ? 'The app built each of these in turn, and none drew the cell either.'
+      : expert
+        ? 'Expert render mode (Settings) builds settings as set: pick a fix, and Apply builds it.'
+        : 'Built as set this once: pick a fix, or Apply and the app builds these in turn until one draws it.',
   };
 }
 
@@ -186,15 +225,21 @@ function fieldConflicts(entries, options) {
 }
 
 /**
- * The settings that will not build as set for these cells (`[{ name, estimate }]`,
- * the server's answers, `undefined` while one is out), or null when they will.
+ * The settings that will not build as set for these cells, or null when they will.
+ * Each entry is `{ name, estimate, failure, summary }`: the server's estimate
+ * (`undefined` while one is out), and when the cell's last build with these very
+ * settings failed, how (renderfallback.failureOf) and the cell's summary.  A
+ * failure is said before an estimate: it happened.  `expert`: expert render mode
+ * is on, which changes what Apply does and so what the note says.
  * `{ keys, headline, reasons, suggestions: [{ text, detail, set, best }], note }`:
  * `keys` are the controls to mark; a suggestion's `set` is the options it changes.
  */
-export function renderConflicts(entries, options) {
+export function renderConflicts(entries, options, { expert = false } = {}) {
   const o = normalizeRender(options);
-  const found = CURVE_METHODS.has(o.method) ? curveConflicts(entries, o)
-    : buildsField(o) ? fieldConflicts(entries, o) : null;
+  const withEstimates = entries.filter((x) => x.estimate);
+  const found = failedConflicts(entries, o, { expert })
+    || (CURVE_METHODS.has(o.method) ? curveConflicts(withEstimates, o, { expert })
+      : buildsField(o) ? fieldConflicts(withEstimates, o) : null);
   if (!found) return null;
   // A way that changes nothing is none, and two that end in the same settings are
   // one, said the first time.

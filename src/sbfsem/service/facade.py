@@ -1163,6 +1163,9 @@ class SbfsemService:
         cells fetches in parallel; only the table insert is serialized.
         ``refresh`` skips the disk cache for this fetch (the cache never
         expires on its own), which is what "update from Viking" means.
+        Without it, a copy already held or read from the disk cache is first
+        checked against Viking (:meth:`_viking_newer`, one short request) and
+        fetched again when Viking has newer annotations.
         ``live_registration`` draws the annotations where the volume's current
         section transforms put them (``sbfsem.io.registration``) rather than
         at their stored positions; ``section_corrections`` then adds Viking's
@@ -1189,23 +1192,38 @@ class SbfsemService:
         moves = normalize_moves((manual_moves or {}).get(tag))
         want_transform = Transforms.from_str(transform)
         with self._lock:
-            if not refresh and self._satisfies(key, want, live, include_synapses, want_transform):
+            held = (self._copies[key][tag] if not refresh
+                    and self._satisfies(key, want, live, include_synapses, want_transform) else None)
+        # A copy held since an earlier load, or one the disk cache keeps, can be
+        # older than the cell in Viking: Temporal c162392, being traced, was drawn
+        # from its first annotation an hour after it had 153 (2026-10-21).
+        fetch_fresh = refresh or (held is not None and self._viking_newer(held))
+        with self._lock:
+            if not fetch_fresh and self._satisfies(key, want, live, include_synapses, want_transform):
                 return self._held(key, tag, neuron_id, volume, moves)
             gate = self._loading.setdefault(key, threading.Lock())
         with gate:
             with self._lock:
-                if not refresh and self._satisfies(key, want, live, include_synapses, want_transform):
+                if not fetch_fresh and self._satisfies(key, want, live, include_synapses, want_transform):
                     return self._held(key, tag, neuron_id, volume, moves)
             client = self.client(volume)
             loader = NeuronLoader(volume, client=client)
-            bypass = client.fresh() if refresh else contextlib.nullcontext()
-            with bypass:
-                neuron = loader.load(
-                    int(neuron_id),
-                    include_synapses=include_synapses,
-                    transform=want_transform,
-                    untagged_psd=self.untagged_psd,
-                )
+
+            def fetch(fresh: bool) -> Neuron:
+                with client.fresh() if fresh else contextlib.nullcontext():
+                    return loader.load(
+                        int(neuron_id),
+                        include_synapses=include_synapses,
+                        transform=want_transform,
+                        untagged_psd=self.untagged_psd,
+                    )
+
+            neuron = fetch(fetch_fresh)
+            if not fetch_fresh and self._viking_newer(neuron):
+                neuron = fetch(True)
+                fetch_fresh = True
+            if fetch_fresh:
+                neuron.fresh_checked_at = time.monotonic()
             # What this copy was loaded with, for the next load to compare with.
             neuron.loaded_synapses = bool(include_synapses)
             if live:
@@ -1215,6 +1233,44 @@ class SbfsemService:
             with self._lock:
                 self._store(key, neuron, tag)
         return self._held(key, tag, neuron_id, volume, moves)
+
+    #: Seconds a copy's answer from Viking holds (:meth:`_viking_newer`): the
+    #: loads of one cell in a burst (a session restored, a Registration switched)
+    #: ask once.
+    FRESH_CHECK_S = 30.0
+
+    def _viking_newer(self, neuron: Neuron) -> bool:
+        """Whether Viking holds a newer version of this copy's own annotations.
+
+        One ``StructureFreshnessBatch`` request (depth 0: about 30 ms from the
+        server, 170 to 300 ms for a volume's first), compared as the freshness
+        route compares (:func:`_compare_freshness`), at most every
+        :attr:`FRESH_CHECK_S` per copy.  An offline service, unstamped data and
+        a question Viking does not answer are never newer: the copy is used,
+        and the page's own freshness check says what it can.
+        """
+        if self.offline or getattr(neuron, "data_stamp", None) is None:
+            return False
+        now = time.monotonic()
+        checked = getattr(neuron, "fresh_checked_at", None)
+        if checked is not None and now - checked < self.FRESH_CHECK_S:
+            return False
+        try:
+            own = self.client(neuron.source).structure_freshness([int(neuron.id)], depth=0)
+            answer = _compare_freshness(neuron, own.get(int(neuron.id)), None)
+        except ODataError as exc:
+            try:
+                answer = self._freshness_by_locations(neuron)
+            except ODataError:
+                log.info("c%s %s: no answer from Viking on whether the copy is current (%s); "
+                         "used as it is", neuron.id, neuron.source, exc)
+                return False
+        neuron.fresh_checked_at = now
+        if answer.surface_stale:
+            log.info("c%s %s: Viking has newer annotations than the copy held (%s, %s annotations; "
+                     "now %s, %s): fetched again", neuron.id, neuron.source, answer.loaded,
+                     answer.loaded_count, answer.live, answer.live_count)
+        return bool(answer.surface_stale)
 
     #: Copies made with manual moves held per cell at most (each is a whole
     #: node table): a person nudging annotations makes a new set at each step.

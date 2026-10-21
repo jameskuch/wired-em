@@ -1,6 +1,7 @@
 // The Settings tab: debug tools kept out of the way of the work.
 //
-// Three cards for this browser (which build the page is, clearing its cached
+// Expert render mode (whether a failed render is rebuilt with settings that work,
+// or left failed with its settings marked), three cards for this browser (which build the page is, clearing its cached
 // files, resetting what it saved), the Correction log (annotations Viking's
 // curve fit pulled toward a much wider linked one, in every loaded cell this
 // account may see: /api/correction-log), and one for the server (its state,
@@ -24,6 +25,11 @@ export const STORAGE_GROUPS = [
     id: 'session', label: 'Saved sessions',
     help: 'The cells, their renders and the view each tab brings back after a reload',
     keys: ['sbfsem.session.v1', 'sbfsem.restore.auto'], prefixes: ['sbfsem.session.v1.tab.'],
+  },
+  {
+    id: 'expert-render', label: 'Expert render mode',
+    help: 'Whether render settings are built exactly as set, even when a cell cannot be built with them',
+    keys: ['sbfsem:expert-render'],
   },
   {
     id: 'render', label: 'Render defaults',
@@ -219,6 +225,35 @@ export function serverRows(status) {
   ];
 }
 
+// -- expert render mode -----------------------------------------------------------
+
+/** Where expert render mode is kept in this browser ('1' on; anything else, or nothing, off). */
+export const EXPERT_RENDER_KEY = 'sbfsem:expert-render';
+
+/** The checkbox's hover help: what each setting does with a render that fails. */
+export const EXPERT_RENDER_HELP = 'On: render settings are applied verbatim, even when a cell cannot '
+  + 'be rendered with them. The cell is left without a surface, and the Render panel marks the '
+  + 'settings to change (black, red text) with ways to fix them, best first.\n\n'
+  + 'Off (the default): a render that fails is built again with settings that work (the '
+  + "technique's defaults, Voxel remesh, Hybrid, then Closed curve), the cell keeps the first that "
+  + 'draws it until its annotations change, and a notice says what changed.';
+
+/** Whether expert render mode is on in this browser (`store`: localStorage, or null: off). */
+export function expertRender(store) {
+  try { return store?.getItem(EXPERT_RENDER_KEY) === '1'; } catch { return false; }
+}
+
+/** Keep expert render mode on or off; false when this browser will not keep it. */
+export function setExpertRender(store, on) {
+  try {
+    if (on) store.setItem(EXPERT_RENDER_KEY, '1');
+    else store.removeItem(EXPERT_RENDER_KEY);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // -- the correction log ----------------------------------------------------------
 
 /** Where the Correction log's ratio is kept in this browser. */
@@ -365,6 +400,7 @@ export class SettingsPanel {
    * reloads must not be written back by the page on its way out).
    */
   /**
+   * `onExpertChange(on)`: expert render mode was switched (the render panel says it).
    * `annotations`: what the Correction log's rows do in the page:
    * `{ loaded(source, cellId), select(source, cellId, locationId), load(source, cellId),
    * viking(source), openInViking(source, cellId, locationId), volumeName(source) }`.
@@ -372,6 +408,7 @@ export class SettingsPanel {
    */
   constructor({
     root, api, assets, beforeReload = () => {}, stopSaving = () => {}, annotations = null, onRatioChange = null,
+    onExpertChange = null,
   }) {
     this.root = root;
     this.api = api;
@@ -380,6 +417,7 @@ export class SettingsPanel {
     this.stopSaving = stopSaving;
     this.annotations = annotations;
     this.onRatioChange = onRatioChange;
+    this.onExpertChange = onExpertChange;
     this.built = false;
   }
 
@@ -395,6 +433,8 @@ export class SettingsPanel {
     this.root.replaceChildren();
     const note = this._takeNote();
     if (note) this.root.append(el('div', { class: 'card settings-note', role: 'status', text: note }));
+
+    this._buildRendering();
 
     this.buildText = el('p', { class: 'settings-text' });
     this.root.append(el('section', { class: 'card' }, [
@@ -431,6 +471,36 @@ export class SettingsPanel {
 
     this.serverCard = el('section', { class: 'card settings-server' });
     this.root.append(this.serverCard);
+  }
+
+  _buildRendering() {
+    const store = browserStore('localStorage');
+    this.expertBox = el('input', {
+      id: 'expert-render', type: 'checkbox', checked: expertRender(store),
+      onchange: () => this._expertChanged(),
+    });
+    this.expertStatus = el('p', { class: 'settings-text muted', role: 'status' });
+    this.root.append(el('section', { class: 'card' }, [
+      el('h3', { text: 'Rendering' }),
+      el('label', { class: 'settings-check', 'data-help': EXPERT_RENDER_HELP }, [
+        this.expertBox, 'Enable expert render mode',
+      ]),
+      this.expertStatus,
+    ]));
+  }
+
+  _expertChanged() {
+    const on = this.expertBox.checked;
+    const kept = setExpertRender(browserStore('localStorage'), on);
+    this.expertStatus.textContent = kept ? ''
+      : 'This browser will not keep site data (a private window, or storage turned off): '
+        + 'the choice holds until the page is reloaded.';
+    this.onExpertChange?.(on);
+  }
+
+  /** Whether the checkbox is ticked: what this page uses even when the browser would not keep it. */
+  get expert() {
+    return this.expertBox ? this.expertBox.checked : expertRender(browserStore('localStorage'));
   }
 
   _buildLog() {

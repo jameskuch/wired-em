@@ -570,6 +570,12 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 10%, transparent);
 /* The Correction log: the whole row, its wide table scrolling inside the card. */
 .settings-panel .settings-wide { grid-column: 1 / -1; }
 .settings-actions label { align-self: center; font-size: 12px; }
+/* A checkbox and its words, side by side (expert render mode). */
+.settings-check {
+  display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
+  font-size: 13px; cursor: pointer;
+}
+.settings-check input { margin: 0; padding: 0; flex: none; }
 .row input.settings-ratio { flex: 0 0 5.5em; width: 5.5em; }
 .settings-actions .settings-unit { align-self: center; margin-right: 6px; }
 .settings-scroll { overflow-x: auto; }
@@ -690,6 +696,15 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 10%, transparent);
 .load-progress .load-name:empty { display: none; }
 .load-progress .load-stage { flex: none; }
 .render-notice strong { color: var(--warn); font-weight: 700; }
+/* Build as I set it: the one way back from what the notice says the app did. */
+.render-notice .notice-action {
+  display: block; margin-top: 6px; padding: 2px 10px;
+  font: inherit; font-size: 12px; cursor: pointer;
+  color: var(--ink); background: transparent;
+  border: 1px solid var(--warn); border-radius: var(--radius);
+}
+.render-notice .notice-action:hover { background: var(--warn); color: var(--panel); }
+.render-notice .notice-action[hidden] { display: none; }
 .render-notice .icon-btn {
   background: transparent; border: none; color: inherit;
   cursor: pointer; font-size: 13px; padding: 0 2px;
@@ -1990,6 +2005,12 @@ table.rep-matrix tbody tr:hover { background: none; }
   background: #f0b429; margin-left: 4px; vertical-align: middle;
 }
 .refresh-all { text-align: center; line-height: 1; }
+/* Drawn with other settings than asked (renderfallback.js); the title says why. */
+.fallback-mark {
+  margin-left: 5px; padding: 0 4px; vertical-align: 1px;
+  font-family: var(--mono); font-size: 9px; font-weight: 400; letter-spacing: .04em;
+  color: var(--muted); border: 1px solid var(--line); border-radius: 3px;
+}
 
 /* -- Material and gradient editors ------------------------------------------ */
 /* The panel's 12 px (a gradient stop's row has no size of its own), and a 1.2 line height,

@@ -1206,7 +1206,12 @@ shown without a word:
   `ValueError` too, from `build_mesh`, `mesh_object` and `mesh_for` alike.
 - `load_neuron` answers from the copy it already holds only if that copy was
   fetched with the synapses the call asks for and with the transform it names;
-  a cell handed to `add_neuron` (a file) is taken as it is.
+  a cell handed to `add_neuron` (a file) is taken as it is.  A copy it holds, or
+  one the disk cache gives it, is checked against Viking first
+  (`_viking_newer`: `StructureFreshnessBatch` at depth 0, compared as the
+  freshness route compares, at most every `FRESH_CHECK_S` = 30 s per copy) and
+  fetched again past the cache when Viking is newer; an offline service, unstamped
+  data and an unanswered question keep the copy.
 - `locate` answers from the copy named by the request (`requested_copy`), else
   the one loaded last.
 - A build process killed from outside (the kernel's out-of-memory killer) fails

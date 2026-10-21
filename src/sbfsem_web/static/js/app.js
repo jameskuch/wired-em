@@ -36,6 +36,9 @@ import {
   fineVoxelNotice, LONG_WAIT_S,
 } from './renderestimate.js';
 import { renderConflicts, buildsField, fieldNotes } from './renderconflicts.js';
+import {
+  FINEST_PIXEL, failureOf, fallbacks, failurePhrase, exhaustedNote, makeupText,
+} from './renderfallback.js';
 import { ConflictPanel } from './conflictpanel.js';
 
 import { Renderer3D } from './render3d.js';
@@ -53,7 +56,7 @@ import { setGradientLibrary } from './colormaps.js';
 import { ViewRecorder, supportedFormats } from './video.js';
 import { NetworkView, SYNAPSE_COLORS } from './network.js';
 import { ConnectivityView } from './connectivity.js';
-import { SettingsPanel, pageAssets, savedRatio } from './settings.js';
+import { SettingsPanel, pageAssets, savedRatio, expertRender } from './settings.js';
 import { fillLinkedNeuronsCard, sortableHead, sortRows } from './linkedneurons.js';
 import { stratificationChart, barChart } from './charts.js';
 import * as session from './session.js';
@@ -504,21 +507,30 @@ function fail(error) {
  * the viewport naming the cell, the technique it failed under, and why --
  * enough to know which parameter to walk back.
  */
-function showRenderError(record, options, reason, finestPixel = null) {
+function showRenderError(record, options, reason, { failure = null, exhausted = false } = {}) {
   // Every parameter of the technique that was in use (the schema knows which
   // those are), not only the three pathways' first ones.
   const knobs = knobSummary(options);
   if (options.clip_ipl !== undefined && options.clip_ipl !== null) {
     knobs.push(`clip ${options.clip_ipl} ${options.keep_above ? 'above' : 'below'}`);
   }
+  // What to do next depends on whose failure it was: the settings' (expert render
+  // mode left it failed, and the Render panel marks them), every fallback's too,
+  // or nobody's settings at all (the network, a restart).
+  let next;
+  if (exhausted) {
+    next = `${exhaustedNote(`c${record.id}`, failure, record.summary)}.`;
+  } else if (failure) {
+    next = 'the Render panel marks the settings to change, with ways to fix them'
+      + (failure.fits ? ` (Voxel size ${failure.fits} µm or coarser fits).` : '.');
+  } else {
+    next = 'nothing in its settings caused this: try again in a moment (Apply, or ↻ on its row).';
+  }
   $('render-error-title').textContent = 'Render failed.';
   $('render-error-text').textContent =
     `c${record.id} with ${techniqueLabel(options)}`
     + (knobs.length ? ` (${knobs.join(', ')})` : '')
-    + ` — ${reason}. The cell is not shown; `
-    + (finestPixel
-      ? `set Voxel size to ${finestPixel} µm or coarser in the Render panel and press Apply.`
-      : 'adjust the parameters, or press a Defaults button to get it back.');
+    + ` — ${reason}. The cell is not shown: ${next}`;
   const banner = $('render-error');
   banner.dataset.key = record.key;
   banner.hidden = false;
@@ -532,13 +544,22 @@ function showRenderError(record, options, reason, finestPixel = null) {
  * find in the Render panel -- but it is not an error, so it goes by itself.
  */
 let noticeTimer = 0;
-function showRenderNotice(headline, detail) {
+function showRenderNotice(headline, detail, { action = null, ms = 15000 } = {}) {
   const box = $('render-notice');
   $('render-notice-title').textContent = headline;
   $('render-notice-text').textContent = detail;
+  // One button at most, for undoing what the notice says the app did.
+  const button = $('render-notice-action');
+  button.hidden = !action;
+  button.textContent = action?.label ?? '';
+  button.onclick = action ? () => {
+    clearTimeout(noticeTimer);
+    box.hidden = true;
+    action.run();
+  } : null;
   box.hidden = false;
   clearTimeout(noticeTimer);
-  noticeTimer = setTimeout(() => { box.hidden = true; }, 15000);
+  noticeTimer = setTimeout(() => { box.hidden = true; }, ms);
 }
 
 /** A cell rendering successfully clears its own failure banner. */
@@ -699,6 +720,8 @@ async function boot() {
       volumeName: volumeLongName,
     },
     onRatioChange: () => renderNeuronList(),
+    // The render panel's note on settings that will not build says what Apply will do.
+    onExpertChange: () => updateMethodControls(),
   });
 
   try {
@@ -2127,30 +2150,36 @@ let conflictPanel = null;
 
 /**
  * Mark the render settings that will not build as set for the selected cells
- * and list what to change (renderconflicts.js), from the server's estimates:
- * the outline methods' Voxel size, and the Fine voxel and Face cap of a
- * whole-cell field.  An answer not yet in is asked for once typing stops, and
- * the panel is drawn again when it comes.  Returns the field notes for the
- * chip's hover (an automatic Fine voxel the Face cap holds coarser).
+ * and list what to change (renderconflicts.js): under any technique, a selected
+ * cell whose build with these very settings failed (addToScene's
+ * `renderFailure`); and from the server's estimates, the outline methods' Voxel
+ * size and the Fine voxel and Face cap of a whole-cell field.  An answer not yet
+ * in is asked for once typing stops, and the panel is drawn again when it comes.
+ * Returns the field notes for the chip's hover (an automatic Fine voxel the Face
+ * cap holds coarser).
  */
 function updateConflicts(targets, options) {
   if (!conflictPanel) return [];
   const o = normalizeRender(options);
-  if (!targets.length || !(CURVE_METHODS.has(o.method) || buildsField(o))) {
+  const signature = effectiveSignature(o);
+  const failures = targets.map((r) => (r.renderFailure?.signature === signature ? r.renderFailure : null));
+  const estimated = CURVE_METHODS.has(o.method) || buildsField(o);
+  if (!targets.length || !(estimated || failures.some(Boolean))) {
     conflictPanel.show(null);
     return [];
   }
-  const held = targets.map((r) => estimates.peek(r, o));
-  if (held.some((e) => e === undefined)) {
+  const held = targets.map((r) => (estimated ? estimates.peek(r, o) : null));
+  if (estimated && held.some((e) => e === undefined)) {
     const wanted = estimateFor(targets, o);
     estimates.soon('conflicts', targets, o, () => {
       if (estimateFor(selectedRecords(), readControls()) === wanted) updateMethodControls();
     });
   }
-  const entries = targets.map((r, i) => ({ name: `c${r.id}`, estimate: held[i] }))
-    .filter((x) => x.estimate);
-  conflictPanel.show(renderConflicts(entries, o));
-  return fieldNotes(entries, o);
+  const entries = targets.map((r, i) => ({
+    name: `c${r.id}`, estimate: held[i] || undefined, failure: failures[i], summary: r.summary,
+  })).filter((x) => x.estimate || x.failure);
+  conflictPanel.show(renderConflicts(entries, o, { expert: isExpert() }));
+  return fieldNotes(entries.filter((x) => x.estimate), o);
 }
 
 // The chip's next look at an interim answer.
@@ -2273,6 +2302,104 @@ async function fitPixelForPane(record, options) {
   const estimate = await estimates.settled(record, options);
   const fits = fittedPixel(estimate, options);
   return fits ? { pixel: fits, why: mainReason(estimate) } : null;
+}
+
+// -- settings that draw the cell ---------------------------------------------------
+// A cell its settings cannot build is built with the next settings that may draw
+// it (renderfallback.js), unless expert render mode is on (Settings).  The cell
+// keeps the first that does until its annotations change (state.upsertNeuron), a
+// notice names it with a button to build the cell as set after all, and the
+// cell's row is marked.
+
+// The cells drawn with other settings lately, for one notice that names them all.
+const fellBack = [];
+
+/**
+ * Build `record` with the settings after `asked`, which failed as `failure`
+ * says, one after another through `obtain` (addToScene's), and keep the first
+ * that draws the cell.  Answers `{ got }` for that one, `{}` when none drew it
+ * (the cell has `asked` back), or null once the draw is retired.  A failure that
+ * is not the settings' (the network went) gives `asked` back and is thrown.
+ */
+async function fallBack(record, asked, failure, obtain, current, progress) {
+  const what = failurePhrase(failure, asked);
+  for (const candidate of fallbacks(asked, record.summary, failure)) {
+    if (!current()) return null;
+    statusEl.textContent = `c${record.id}: ${what}; trying ${candidate.text}…`;
+    statusEl.className = 'status busy';
+    progress?.stage(`trying ${candidate.text}`);
+    setRenderOptions(record.key, candidate.options);
+    let got;
+    try {
+      got = await obtain(normalizeRender(record.render));
+    } catch (error) {
+      if (error?.aborted) return null;
+      if (failureOf({ error })) continue;
+      setRenderOptions(record.key, asked);
+      throw error;
+    }
+    if (!got) return null;
+    if (got.mesh.n_faces) {
+      record.fallback = {
+        asked, failure, used: got.options, text: candidate.text, detail: candidate.detail,
+      };
+      record.renderFailure = null;
+      noteFellBack(record);
+      // The panel describes the cell being looked at: what it is drawn with now.
+      if (state.selected === record.key) writeControls(got.options);
+      renderNeuronListWhenIdle();
+      return { got };
+    }
+  }
+  setRenderOptions(record.key, asked);
+  return {};
+}
+
+/** Why a cell is drawn with other settings, in a sentence. */
+function fallbackWhy(record) {
+  const { failure, asked } = record.fallback;
+  const makeup = failure.kind === 'empty' ? makeupText(record.summary) : '';
+  return `${failurePhrase(failure, asked)}${makeup ? ` (${makeup})` : ''}`;
+}
+
+/** Say which cells are drawn with other settings than asked, and offer them as set. */
+function noteFellBack(record) {
+  const now = Date.now();
+  for (let i = fellBack.length - 1; i >= 0; i -= 1) {
+    if (now - fellBack[i].at > COARSENED_KEEP_MS || fellBack[i].key === record.key) fellBack.splice(i, 1);
+  }
+  fellBack.push({ key: record.key, at: now });
+  const listed = fellBack.map((x) => state.neurons.get(x.key)).filter((r) => r?.fallback);
+  if (!listed.length) return;
+  const keeps = ' until its annotations change; expert render mode (Settings) builds settings as set.';
+  const [one] = listed;
+  showRenderNotice(
+    listed.length === 1 ? `c${one.id} is drawn with ${one.fallback.text}`
+      : `${listed.length} cells are drawn with other settings`,
+    listed.length === 1 ? `: ${fallbackWhy(one)}. The cell keeps these settings${keeps}`
+      : `: ${listed.map((r) => `c${r.id} with ${r.fallback.text} (${fallbackWhy(r)})`).join('; ')}. `
+        + `Each keeps its settings${keeps}`,
+    { ms: 30000, action: { label: 'Build as I set it', run: () => buildAsSet(listed) } });
+}
+
+/**
+ * "Build as I set it": the cells' own settings again, built as set this once,
+ * so a cell they cannot build is left failed and the Render panel marks them.
+ */
+async function buildAsSet(records) {
+  for (const record of records) {
+    if (!state.neurons.has(record.key) || !record.fallback) continue;
+    const { asked } = record.fallback;
+    record.fallback = null;
+    setRenderOptions(record.key, asked);
+    if (state.selected === record.key) writeControls(asked);
+    record.verbatimOnce = true;
+    renderer.removeMesh(record.key);
+    await addToScene(record, { frame: false });
+  }
+  renderNeuronListWhenIdle();
+  updateScopeNote();
+  persist();
 }
 
 // -- render settings -------------------------------------------------------
@@ -2528,10 +2655,13 @@ async function applyRenderTo(records, { fitPixel = false } = {}) {
   const changed = records.filter((r) => {
     const seeded = fitPixel ? curvePixelSeed(r, options) : null;
     if (seeded) fitted.set(r, seeded);
-    return setRenderOptions(r.key, {
+    const asked = setRenderOptions(r.key, {
       ...options, ...(seeded ? { pixel_size_um: seeded } : {}),
       color_by_strata: r.render.color_by_strata,
     });
+    // Settings asked for anew: what the cell fell back from is no longer what it asks.
+    if (asked) r.fallback = null;
+    return asked;
   });
   if (fitted.size) {
     const sizes = [...new Set(fitted.values())];
@@ -2579,10 +2709,16 @@ async function applyRenderTo(records, { fitPixel = false } = {}) {
 }
 
 // -- scene -----------------------------------------------------------------
-// The server's closed-curve size refusals name the finest pixel that fits
-// (closed_curve.build_curve_volume): too many voxels for the raster, or too
-// many voxel faces for the mesh made of it.
-const FINEST_PIXEL = /would need ([\d,]+) (voxels|voxel faces).*?the limit is ([\d,]+)\. The finest pixel that fits this structure is ([\d.]+) um/;
+
+/**
+ * Whether expert render mode is on (Settings): render settings are built
+ * exactly as set, and a cell they cannot build is left failed with the
+ * settings marked, instead of built with settings that work.
+ */
+function isExpert() {
+  if (settings) return settings.expert;
+  try { return expertRender(window.localStorage); } catch { return false; }
+}
 
 /**
  * Build (or fetch from this tab's cache) a cell's surface and put it, its
@@ -2592,16 +2728,23 @@ const FINEST_PIXEL = /would need ([\d,]+) (voxels|voxel faces).*?the limit is ([
  * `extrasEarly` asks for the extras' data once the server has taken the build, beside
  * it, rather than once the surface is drawn (`fetchExtrasEarly`); they are drawn with
  * the surface either way.
+ *
+ * A build that fails because of its settings (renderfallback.failureOf) is built
+ * again with the next settings that may draw the cell, and the cell keeps the
+ * first that does (`fallBack`), unless expert render mode is on or the cell is
+ * to be built as set once ("Build as I set it"): then it is left failed, and the
+ * Render panel marks its settings.
  */
 async function addToScene(record, {
-  frame = true, refit = true, progress = null, framing = null, extrasEarly = false,
+  frame = true, progress = null, framing = null, extrasEarly = false,
 } = {}) {
   // A batch that took its cells before one was unloaded (Apply to all, Copy to)
   // reaches that cell with nothing left to draw it into: its load generation is
   // 0 and so is the one it would compare with, so nothing below would stand down.
   if (!state.neurons.has(record.key)) return 'skipped';
+  const verbatim = isExpert() || !!record.verbatimOnce;
+  record.verbatimOnce = false;
   let options = normalizeRender(record.render);
-  let cacheKey = meshCacheKey(record, effectiveSignature(options));
   // The load this draw belongs to.  If the cell is loaded again meanwhile
   // (a Registration checkbox, Update from Viking), that load draws it, and
   // this draw stands down rather than land its old surface last.
@@ -2614,64 +2757,120 @@ async function addToScene(record, {
   const current = () => sameLoad() && draws.current(record.key, drawn);
   let early = null;
   let waiting = null;
-  try {
+  // Once the server has taken the build, which it runs in a process of its own:
+  // asked beside the estimate or the build's start, the outlines (0.5 s of the
+  // service's Python on c1178) held up a Hybrid's estimate from 0.17 to 1.05 s
+  // and its start from 0.15 to 1.2 s (production, 2026-10-20).  Not by a draw
+  // already retired: its requests would name the copy that replaced it.
+  const askExtras = () => {
+    if (extrasEarly && !early && current()) early = fetchExtrasEarly(record);
+  };
+
+  /**
+   * The surface for `asked` (this tab's cache, else the server) as
+   * `{ mesh, options, fetched }`, or null once this draw is retired.  Throws
+   * what the build threw.  `options` are what was built: an outline raster too
+   * fine for the cell is built at the finest size that fits it (the server's
+   * estimate), unless the cell is built as set.
+   */
+  const obtain = async (asked) => {
+    let opts = asked;
+    let cacheKey = meshCacheKey(record, effectiveSignature(opts));
     let mesh = meshCache.get(cacheKey);
-    if (!mesh && CURVE_METHODS.has(options.method)) {
+    if (!mesh && !verbatim && CURVE_METHODS.has(opts.method)) {
       // Held to the server's estimate before anything is built: a Voxel size too
       // fine for this cell is built at the finest that fits it, and a notice says so.
       progress?.stage('estimating the build');
-      if (await fitPixelFor(record, options, current)) {
-        if (!current()) return 'skipped';
-        options = normalizeRender(state.neurons.get(record.key).render);
-        cacheKey = meshCacheKey(record, effectiveSignature(options));
+      if (await fitPixelFor(record, opts, current)) {
+        if (!current()) return null;
+        opts = normalizeRender(state.neurons.get(record.key).render);
+        cacheKey = meshCacheKey(record, effectiveSignature(opts));
         mesh = meshCache.get(cacheKey);
       }
-      if (!current()) return 'skipped';
+      if (!current()) return null;
     }
-    // Once the server has taken the build, which it runs in a process of its own:
-    // asked beside the estimate or the build's start, the outlines (0.5 s of the
-    // service's Python on c1178) held up a Hybrid's estimate from 0.17 to 1.05 s
-    // and its start from 0.15 to 1.2 s (production, 2026-10-20).  Not by a draw
-    // already retired: its requests would name the copy that replaced it.
-    const askExtras = () => {
-      if (extrasEarly && !early && current()) early = fetchExtrasEarly(record);
-    };
-    let fetched = false;
-    if (!mesh) {
-      waiting = showWaitingPoints(record, current, framing);
-      progress?.stage('queued on the server');
-      mesh = await api.mesh(record.source, record.id, options, {
-        alive: current,
-        onSubmitted: askExtras,
-        onStatus: progress ? (job) => progress.stage(stageText(job)) : undefined,
-      });
-      fetched = true;
-      // The cell may have been unloaded while the server built this mesh --
-      // easy to hit when a long build has the single worker queued up.
-      // Adding the mesh now would strand a ghost in the scene with no row
-      // left to remove it (seen 2026-08-31: a Temporal cell's mesh survived
-      // its own ✕ and was mistaken for RC2's c1).  Or loaded again, and this
-      // mesh is of the copy before.  Either way it is neither drawn nor kept.
-      if (!current()) return 'skipped';
-      meshCache.set(cacheKey, mesh);
-      // The cell was loaded as other data since its earlier surfaces were built.
-      dropOtherCopies(meshCache, record);
+    if (mesh) return { mesh, options: opts, fetched: false };
+    waiting ??= showWaitingPoints(record, current, framing);
+    progress?.stage('queued on the server');
+    mesh = await api.mesh(record.source, record.id, opts, {
+      alive: current,
+      onSubmitted: askExtras,
+      onStatus: progress ? (job) => progress.stage(stageText(job)) : undefined,
+    });
+    // The cell may have been unloaded while the server built this mesh --
+    // easy to hit when a long build has the single worker queued up.
+    // Adding the mesh now would strand a ghost in the scene with no row
+    // left to remove it (seen 2026-08-31: a Temporal cell's mesh survived
+    // its own ✕ and was mistaken for RC2's c1).  Or loaded again, and this
+    // mesh is of the copy before.  Either way it is neither drawn nor kept.
+    if (!current()) return null;
+    meshCache.set(cacheKey, mesh);
+    // The cell was loaded as other data since its earlier surfaces were built.
+    dropOtherCopies(meshCache, record);
+    return { mesh, options: opts, fetched: true };
+  };
+
+  try {
+    let got = null;
+    let failure = null;
+    let thrown = null;
+    try {
+      got = await obtain(options);
+      if (!got) return 'skipped';
+      if (!got.mesh.n_faces) failure = failureOf({ empty: true });
+    } catch (error) {
+      if (error?.aborted) return 'skipped';
+      failure = failureOf({ error });
+      // Not the settings' (the network, a restart): said below, as it always was.
+      if (!failure) throw error;
+      thrown = error;
     }
+    let exhausted = false;
+    if (failure && !verbatim) {
+      const failed = got?.options ?? options;
+      const fell = await fallBack(record, failed, failure, obtain, current, progress);
+      if (!fell) return 'skipped';
+      if (fell.got) {
+        got = fell.got;
+        failure = null;
+        thrown = null;
+      } else {
+        exhausted = true;
+        options = failed;
+      }
+    }
+    if (failure) {
+      // What the Render panel marks while the controls hold these very settings.
+      record.renderFailure = {
+        ...failure, signature: effectiveSignature(got?.options ?? options), exhausted,
+      };
+      updateMethodControls();
+    }
+    if (thrown) {
+      fail(thrown);
+      showRenderError(record, options,
+        thrown instanceof ApiError ? thrown.detail : String(thrown.message || thrown),
+        { failure, exhausted });
+      return 'failed';
+    }
+    options = got.options;
+    const { mesh, fetched } = got;
     progress?.stage('drawing');
     if (!mesh.n_faces) {
-      // Closed curve smooths away anything one section thick or under
-      // about two pixels across; a disc-traced cell is rasterized from its
-      // discs, so only that is left to empty it.
+      // Disc techniques draw nothing from annotations no link joins; Closed curve
+      // smooths away anything narrower than about two voxels (renderfallback.js).
       statusEl.textContent =
         `c${record.id} produced no mesh with the "${options.method}" method`;
       statusEl.className = 'status error';
+      const makeup = makeupText(record.summary);
       showRenderError(record, options, 'the build produced an empty mesh'
-        + (options.method === 'closedcurve'
-          ? ' (everything in it is one section thick or narrower than about two pixels;'
-            + ' try a finer Voxel size)'
-          : ''));
+        + (makeup ? ` from ${makeup}` : '')
+        + (options.method === 'closedcurve' && !exhausted
+          ? ' (everything in it is one section thick or narrower than about two voxels)'
+          : ''), { failure, exhausted });
     } else {
       clearRenderError(record);
+      record.renderFailure = null;
     }
     // A Fine voxel that was typed and came out coarser (the whole-cell grid's
     // floor or one of its budgets): the mesh says which it used, and why.
@@ -2721,27 +2920,8 @@ async function addToScene(record, {
     // The user unloaded the cell mid-build, or a newer draw took over: their
     // own action, not an error.
     if (error?.aborted) return 'skipped';
-    const reason = error instanceof ApiError ? error.detail : String(error.message || error);
-    // An outline raster too fine for the structure is refitted once, to the
-    // finest pixel the server says fits, rather than leaving the cell blank
-    // until someone finds the Pixel size box (RC1 c410 at 0.05 um,
-    // 2026-10-01).
-    const tooFine = FINEST_PIXEL.exec(reason);
-    const fits = tooFine && Number(tooFine[4]);
-    if (refit && fits > options.pixel_size_um && fits <= 1
-        && CURVE_METHODS.has(options.method) && current()) {
-      // The backstop: the estimate let through a size the server then refused.
-      const before = options.pixel_size_um;
-      setRenderOptions(record.key, { ...record.render, pixel_size_um: fits });
-      noteCoarsened(record, before, fits,
-        `${tooFine[1]} ${tooFine[2]}, over the server's limit of ${tooFine[3]}`);
-      const result = await addToScene(record, { frame, refit: false, extrasEarly });
-      renderNeuronListWhenIdle();
-      updateScopeNote();
-      return result;
-    }
     fail(error);
-    showRenderError(record, options, reason, fits || null);
+    showRenderError(record, options, error instanceof ApiError ? error.detail : String(error.message || error));
     return 'failed';
   } finally {
     if (draws.current(record.key, drawn)) {
@@ -3986,6 +4166,15 @@ function neuronRow(record) {
     dot.className = 'stale-dot';
     dot.title = 'Edited in Viking since it was loaded';
     name.querySelector('b').append(dot);
+  }
+  // Drawn with other settings than asked, because those built nothing or failed.
+  if (record.fallback) {
+    const mark = document.createElement('span');
+    mark.className = 'fallback-mark';
+    mark.textContent = 'auto';
+    mark.title = `Drawn with ${record.fallback.text}: ${fallbackWhy(record)}. `
+      + 'It keeps these settings until its annotations change.';
+    name.querySelector('b').append(mark);
   }
   head.append(chevron, visible, swatch, name, vol, refresh, select, gap, remove);
   if (expanded) {

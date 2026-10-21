@@ -57,6 +57,31 @@ test('a re-fetch with select: false leaves an unticked cell unticked (Update, Re
   assert.equal(state.neurons.size, 2);
 });
 
+test('a cell drawn with other settings keeps them until its annotations change', () => {
+  reset();
+  const asked = { method: 'cylinder', pathway: 'voxel' };
+  const used = { method: 'closedcurve', pathway: 'original', pixel_size_um: 0.25 };
+  const first = S.upsertNeuron(detail(1, { n_nodes: 1 }));
+  S.setRenderOptions(first.key, used);
+  first.fallback = { asked: S.normalizeRender(asked), used, text: 'Closed curve volume' };
+  // Loaded again as the same data (a Registration switch): the fallback holds.
+  const same = S.upsertNeuron(detail(1, { n_nodes: 1 }), { select: false });
+  assert.equal(same.render.method, 'closedcurve');
+  assert.equal(same.fallback.text, 'Closed curve volume');
+  // Annotations added in Viking: the cell is built as asked again.
+  const grown = S.upsertNeuron(detail(1, { n_nodes: 153, data_stamp: '2026-10-21T17:22:28Z' }),
+    { select: false });
+  assert.equal(grown.render.method, 'cylinder');
+  assert.equal(grown.render.pathway, 'voxel');
+  assert.equal(grown.fallback, null);
+  // A render handed in (a session restored, an undo) is that render, and no fallback.
+  grown.fallback = { asked: S.normalizeRender(asked), used, text: 'x' };
+  const restored = S.upsertNeuron(detail(1, { n_nodes: 153, data_stamp: '2026-10-21T17:22:28Z' }),
+    { render: used, select: false });
+  assert.equal(restored.render.method, 'closedcurve');
+  assert.equal(restored.fallback, null);
+});
+
 test('a re-fetch with select: false keeps a ticked cell ticked', () => {
   reset();
   const a = S.upsertNeuron(detail(1));

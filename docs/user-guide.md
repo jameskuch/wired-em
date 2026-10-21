@@ -45,6 +45,14 @@ then says its own annotations, and so its surface, did not change. Click ↻
 to re-fetch that cell, or **Refresh all** to re-fetch every loaded cell —
 edited ones first. A refresh always goes to Viking, never to the cache.
 
+Since 2.26.0 a load asks Viking first, too. When the server already holds the
+cell (another tab or person loaded it earlier) or its disk cache has it, the
+server asks Viking whether the cell's own annotations changed since (one short
+request, about 30 ms; at most every 30 s for one copy) and fetches it again if
+they did. A cell being traced is drawn as it is now: on 2026-10-21 Temporal
+Monkey c162392 was drawn from its first annotation, held since the morning,
+when it had 153, and the render came back empty.
+
 ### Registration: where the annotations are drawn
 
 Viking draws each annotation by mapping its section coordinates through the
@@ -996,7 +1004,8 @@ without building:
   When the limit is the server's memory and **Join bodies** or the smoothing (Smooth
   discs, Smooth outlines) is on, each of which only adds memory, it is marked too, and
   the fix with it off names the finer size that then fits. Applied as set, each cell
-  is built at the finest size that fits it, as before, and a notice says which.
+  is built at the finest size that fits it, as before, and a notice says which (in
+  expert render mode, as set, which the server refuses).
 - **Voxel remesh, Convolution and Ultraliser: a typed Fine voxel the build would
   contour coarser.** The whole-cell grid's voxel is held to the raw triangles the
   **Face cap** allows (three for each one kept, at most 10 million), to the field
@@ -1018,6 +1027,53 @@ raw triangles; c430 has about 2,000 µm² of surface); Face cap 1,460,000 builds
 cap 0 too (all 4.4 million kept, about 2.3 GB, as nothing is decimated),
 and the finest any budget allows it is 0.030 µm. Inferior c1178 is built at 0.120 µm
 under the default cap and can go no finer than 0.042 µm, where it fills the 10 million.
+
+### When a render fails
+
+A render can fail because of its settings: it builds nothing (a disc technique on a
+cell whose annotations no link joins, or Closed curve on annotations narrower than
+about two voxels), the server refuses it (an outline raster too fine), the build runs
+out of the server's memory, or it breaks. Since 2.26.0 what happens next is the
+**expert render mode** checkbox's, in Settings (*Rendering*).
+
+**Off (the default): the app builds settings that work.** It builds the cell again
+with the next of these that may draw it, and the cell keeps the first that does:
+
+1. what mends that failure in the same technique: the Voxel size the server says
+   fits, a Voxel size twice as coarse or the default Fine voxel and Face cap after
+   running out of memory, a finer Voxel size (0.05 µm) when an outline method built
+   nothing;
+2. the technique's defaults (the ones you saved for it, else the recommended);
+3. Voxel remesh, the app's default;
+4. Hybrid, for a cell with traced outlines;
+5. Closed curve at 0.25 µm (1 µm for vessels), which draws every annotation, linked
+   or not, as its own disc or outline in its section, then at 0.05 µm.
+
+Disc techniques draw nothing from annotations no link joins, so 2 and 3 are skipped
+for a disc technique on such a cell (measured on 2026-10-21: one disc, or three
+unlinked, built 0 faces under every disc technique; Closed curve drew a disc of radius
+0.85 µm at 0.25 µm, and one of 0.26 µm only at 0.05 µm). A notice in the upper right
+names the settings used and why (*c62511 is drawn with Closed curve volume, Voxel
+0.05 µm: Voxel remesh orig built nothing (1 annotation, no links)*), and its **Build
+as I set it** builds the cell with its own settings once, which then fail and are
+marked as below. The cell's row shows `auto`, its hover saying the same, and the
+render panel shows what the cell is drawn with. The cell keeps these settings until
+its annotations change in Viking: loaded or refreshed with new data, it is built as
+asked again (and falls back again if that still fails). Applying settings to it asks
+anew. Only when nothing draws it does the banner say so: *no technique could build a
+surface from c62511 (1 annotation, no links); load it again (↻) once more of it is
+traced*. A failure that is not the settings' (the network, a restart) is never
+answered with other settings; the banner says to try again. Render compare builds its
+panes as set either way.
+
+**On: settings are built as set**, even when a cell cannot be built with them. The
+cell is left without a surface and the banner says so; while the render panel holds
+those settings for the selected cell, the controls to change are marked black with red
+text, under any technique, and the row at the top of the panel lists the same ways to
+fix it, best first: the technique (**Method**, **Pathway**) for a build that came back
+empty or broke, **Voxel** for an outline raster refused or out of memory, **Fine voxel**
+and **Face cap** for a whole-cell field out of memory. A fix puts its settings into the
+controls, and Apply builds them.
 How long the server takes to say so, on production: 2.7 to 3.1 s for a cell's first
 answer (c430, c1178), 0.7 to 0.9 s for each new Fine voxel or Face cap, and nothing for
 an answer already given; the marks appear when it comes. Render compare's options
@@ -3454,6 +3510,10 @@ looks wrong rather than for the work itself.
   is not ("This page was loaded as 2.7.1-…, and the server now serves 2.7.2-…"), reload;
   this is the first thing to look at when a fix seems not to have arrived. *Copy details*
   puts both builds, the browser and the window size on the clipboard for a bug report.
+- **Rendering**: *Enable expert render mode* builds render settings as set, even when a
+  cell cannot be built with them, and marks the settings to change; off (the default), a
+  render that fails is built again with settings that work, which the cell keeps (*When a
+  render fails*). Kept in this browser; its hover says both.
 - **Cached files**: *Clear cached files and reload* has the browser drop what it cached of
   the site (the page, its scripts and styles) and reloads. Your sessions, saved settings
   and sign-in stay, and the page comes back to this tab saying it was done.
