@@ -3187,6 +3187,25 @@ function refreshDownsample() {
 }
 
 /**
+ * A readout field written as groups, a space apart: its text is the same, but
+ * on a narrow view (the CSS's fold) it wraps between the groups before it
+ * breaks one, so "µm 34.78, 186.23, 104.40" stays on one line.
+ */
+function writeGroups(el, ...groups) {
+  el.replaceChildren(...groups.flatMap((text, i) => {
+    const span = document.createElement('span');
+    span.className = 'pick-group';
+    span.textContent = text;
+    return i ? [' ', span] : [span];
+  }));
+}
+
+/** The Location ID field: the ID, then the volume it is numbered in. */
+function writeLocationField(field, id, source) {
+  writeGroups(field, `Location ID ${id}`, `(${volumeLongName(source)})`);
+}
+
+/**
  * How far the section correction or the current transforms moved the annotation
  * under the readout, beside its Location ID: "shift 0.14 µm (+0.12, -0.08)".
  * `node` is the annotation (or null to hide the field).
@@ -3221,8 +3240,9 @@ async function showPick({ point, key, copied }) {
   // Structure and Location IDs are numbered per volume -- RC2's c74420 is a
   // ganglion cell, Inferior Monkey's is a child structure of c19698 -- so an
   // ID shown without its volume sent someone to look it up in the wrong one.
-  $('pick-text').textContent = `${record ? `${volumeLongName(record.source)} c${record.id}  ` : ''}`
-    + `µm ${point.x.toFixed(2)}, ${point.y.toFixed(2)}, ${point.z.toFixed(2)}`;
+  const at = `µm ${point.x.toFixed(2)}, ${point.y.toFixed(2)}, ${point.z.toFixed(2)}`;
+  if (record) writeGroups($('pick-text'), `${volumeLongName(record.source)} c${record.id}`, at);
+  else $('pick-text').textContent = at;
   $('pick-viking').textContent = `Viking ${vikingText(pick)}`;
   $('pick-location').textContent = 'Location ID …';
   if (copied) copyPickField('viking');   // the c key
@@ -3261,7 +3281,7 @@ async function showPick({ point, key, copied }) {
       pick.viking = vikingFromUm(vikingPoint(best.node, point), scale);
       $('pick-viking').textContent = `Viking ${vikingText(pick)}`;
     }
-    field.textContent = `Location ID ${best.node.id} (${volumeLongName(owner.source)})`;
+    writeLocationField(field, best.node.id, owner.source);
     field.title = `Annotation ${best.node.id} of c${owner.id} in ${volumeLongName(owner.source)}, `
       + `${best.d.toFixed(2)} µm from the picked point. `
       + 'Click: copy the ID for Viking → Annotation → Goto Location ID. '
@@ -3383,7 +3403,7 @@ async function gotoLocationId(text) {
   if (lastPick) {
     lastPick.locationId = id;
     lastPick.locationSource = source;
-    $('pick-location').textContent = `Location ID ${id} (${volumeLongName(source)})`;
+    writeLocationField($('pick-location'), id, source);
   }
   statusEl.replaceChildren(document.createTextNode(
     `Location ${id} is on c${hit.cell}${hit.loaded ? '' : ' (not loaded) '}`));
@@ -6069,7 +6089,7 @@ async function showAnnotationReadout(item) {
   showPickShift(node, record);
   const name = SLOT_NAMES[slotOfItem(item)] ?? 'selected';
   const field = $('pick-location');
-  field.textContent = `Location ID ${item.locationId} (${volumeLongName(record.source)})`;
+  writeLocationField(field, item.locationId, record.source);
   field.title = `The ${name} annotation, ${item.locationId} of c${record.id} in `
     + `${volumeLongName(record.source)}, section ${item.section}. `
     + 'Click: copy the ID for Viking → Annotation → Goto Location ID. '

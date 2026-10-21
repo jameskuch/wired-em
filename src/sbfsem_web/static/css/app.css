@@ -475,6 +475,18 @@ fieldset.groupbox legend {
     background: rgba(0,0,0,0.6);
   }
   .hint-toggle[aria-expanded="true"] + .hint { display: block; }
+  /* Folded, nothing sits beside the readout but the "?", so it needs no floor:
+     it takes the overlay's width and no more.  With the floor it took the
+     marker table's whole width (538 px for c1178 1328721) and ran 106 px past
+     a 480 px window (2026-10-20).  A field wider than the column wraps between
+     its groups (app.js writeGroups: the cell, then the µm; the Location ID,
+     then its volume) and inside one only when that is still too wide; the
+     marker table scrolls in its own box (overflow-x above), and the move
+     panel's two lines of numbers wrap in theirs. */
+  .readouts { min-width: 0; }
+  .picked #pick-text, .picked .pick-field, .picked .pick-shift { white-space: normal; text-align: start; }
+  .pick-group { display: inline-block; }
+  .mv-where, .mv-moved { white-space: normal; }
 }
 kbd {
   font-family: var(--mono); font-size: 11px; background: rgba(255,255,255,0.14);

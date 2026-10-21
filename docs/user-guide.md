@@ -2083,7 +2083,11 @@ The line at the top right of the render lists these drags and keys. When the
 render is too narrow for it to sit beside the pick readout (under about 785 px
 of render width: a window of about 1090 px with the cell list at its default
 width), the line folds into a **?** at the top right; click it to open the
-list under the readout, and again to close it.
+list under the readout, and again to close it. Folded, the pick readout keeps
+to the width left beside the **?** and the view cube: a field too long for it
+goes onto two lines (the cell, then its µm; the Location ID, then its volume),
+the marker table scrolls sideways inside its own box, and the move panel's
+lines wrap, so the page never scrolls sideways.
 
 **Wheel zoom is aimed by the mouse pointer** (as in Autodesk Fusion 360): the
 camera dollies along the ray under the pointer, so zooming in with the pointer

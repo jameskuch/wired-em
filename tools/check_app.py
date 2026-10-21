@@ -117,6 +117,11 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   readout took the view to the annotation and left it unmarked (2026-10-20): both select it now, drawn
   yellow, the readout naming it, and it stays selected once the cell has finished drawing; with the cell's
   annotations hidden it is drawn as a ring at its radius.
+* ``narrow`` -- an annotation selected on a narrow window (Inferior Monkey c1178, Location 1328721): at 480 and
+  768 px, light and dark, the page does not scroll sideways (106 and 124 px did in 2.23.0, 2026-10-20), the readout
+  keeps to its column, wrapping the cell and its µm and the Location ID and its volume onto lines of their own, the
+  marker table scrolls in its own box, and the move panel fits under it; at 1440 px the readout is unchanged, the
+  hint beside it, each field on one line and the table whole.
 """
 
 # ruff: noqa: UP031
@@ -2603,6 +2608,17 @@ SELECTED = """(() => { const r = window.sbfsem.renderer; const s = r.selection; 
              color: own?.children[0]?.material.color.getStyle() ?? null, yellow: r.markerColor('primary') }; })()"""
 
 
+def typed(c: Chrome, location_id: int, seconds: float = 30) -> bool:
+    """A Location ID typed into the readout (right-click its field), Enter: whether it is then selected."""
+    js(c, """document.getElementById('pick-location').dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); true""")
+    js(c, """(() => { const i = document.getElementById('pick-input'); i.value = '%d';
+        i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true; })()"""
+       % location_id)
+    return c.wait_for('window.sbfsem.renderer.selection && window.sbfsem.renderer.selection.locationId === %d'
+                      % location_id, seconds)
+
+
 def locate(c: Chrome, r: Report, ctx):
     r.start('locate: /open?location= and a typed Location ID select the annotation')
     boot(c, ctx.url)
@@ -2626,17 +2642,8 @@ def locate(c: Chrome, r: Report, ctx):
     field = js(c, "document.getElementById('pick-location').textContent")
     r.check('the readout names it, with its volume', f'Location ID {ids[0]} (' in field, field)
 
-    # Typed into the readout's Location ID (right-click it), Enter.
-    def typed(location_id: int):
-        js(c, """document.getElementById('pick-location').dispatchEvent(
-            new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); true""")
-        js(c, """(() => { const i = document.getElementById('pick-input'); i.value = '%d';
-            i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true; })()"""
-           % location_id)
-        return c.wait_for('window.sbfsem.renderer.selection && window.sbfsem.renderer.selection.locationId === %d'
-                          % location_id, 30)
-
-    got = typed(ids[1])
+    # Typed into the readout's Location ID, Enter.
+    got = typed(c, ids[1])
     sel = js(c, SELECTED)
     r.check('a typed Location ID selects that annotation, drawn yellow',
             got and sel['drawn'] and sel['color'] == sel['yellow'], sel)
@@ -2648,11 +2655,78 @@ def locate(c: Chrome, r: Report, ctx):
         .find((l) => l.textContent.trim() === 'Show annotations')?.querySelector('input');
       if (box && box.checked) box.click(); return true; })()""")
     c.wait_for(f'!window.sbfsem.renderer.discs.has({json.dumps(key)})', 10)
-    got = typed(ids[0])
+    got = typed(c, ids[0])
     sel = js(c, SELECTED)
     r.check('with the cell\'s annotations hidden it is drawn all the same',
             got and js(c, f'!window.sbfsem.renderer.discs.has({json.dumps(key)})') and sel['drawn'], sel)
 
+
+
+# -- narrow ------------------------------------------------------------------------
+
+#: The render view's overlay: how far the page scrolls sideways, the boxes in it, and the groups the
+#: readout's two long fields are written in (app.js writeGroups).
+OVERLAY = """(() => {
+  const box = (e) => { if (!e) return null; const b = e.getBoundingClientRect();
+    return { left: b.left, right: b.right, top: b.top, height: b.height, sw: e.scrollWidth, cw: e.clientWidth }; };
+  const groups = (id) => [...document.getElementById(id).querySelectorAll('.pick-group')].map(box);
+  const table = document.getElementById('marker-table');
+  const move = document.getElementById('move-panel');
+  return {
+    page: document.scrollingElement.scrollWidth - window.innerWidth,
+    overlay: box(document.querySelector('#view-render .viewport-overlay')),
+    readouts: box(document.querySelector('#view-render .readouts')),
+    table: table.hidden ? null : box(table), move: move.hidden ? null : box(move),
+    folded: getComputedStyle(document.getElementById('hint-toggle')).display !== 'none',
+    hint: box(document.getElementById('nav-hint')),
+    text: groups('pick-text'), location: groups('pick-location'),
+    past: [...document.querySelectorAll('body *')].filter((e) => e.getBoundingClientRect().right > window.innerWidth + 1
+      && !e.closest('.marker-table')).slice(0, 6).map((e) => `${e.tagName.toLowerCase()}#${e.id}.${e.className}`),
+  }; })()"""
+
+
+def narrow(c: Chrome, r: Report, ctx):
+    r.start('narrow: an annotation selected on a narrow window leaves the page without a sideways scroll')
+    boot(c, ctx.url)
+    _dismiss_offer(c)
+    set_control(c, 'pathway', 'original')
+    load(c, 1178, source='NeitzInferiorMonkey', mesh=False)
+    chosen = typed(c, 1328721, 60)
+    c.wait_for("!document.getElementById('marker-table').hidden && "
+               "document.getElementById('pick-location').querySelectorAll('.pick-group').length === 2", 30)
+    c.settle(3)
+    wide = js(c, OVERLAY)
+    one_line = all(len(g) == 2 and abs(g[0]['top'] - g[1]['top']) < 1 for g in (wide['text'], wide['location']))
+    r.check('at 1440 px the readout is the wide one: the hint beside it, each field on one line, the table whole',
+            chosen and wide['page'] <= 0 and not wide['folded'] and wide['hint']['left'] > wide['readouts']['right']
+            and one_line and wide['table'] and wide['table']['sw'] <= wide['table']['cw'], wide)
+    # 2.23.0 and before: 106 px at 480 (124 at 768), the readout column held open by the marker table's
+    # whole width and the readout's unbreakable fields.
+    for scheme in ('light', 'dark'):
+        for width in (480, 768):
+            c.emulate('mac', width, 900, scheme=scheme)
+            c.settle(3)
+            m = js(c, OVERLAY)
+            fits = (m['page'] <= 0 and m['folded'] and m['table'] is not None
+                    and m['readouts']['right'] <= m['overlay']['right'] + 0.5
+                    and m['table']['right'] <= m['readouts']['right'] + 0.5 and m['table']['sw'] > m['table']['cw'])
+            r.check(f'{width} px, {scheme}: no sideways scroll; the readout fits its column, the marker table scrolls '
+                    'in its own box', fits, m)
+    c.emulate('mac', 480, 900, scheme='dark')
+    c.settle(3)
+    m = js(c, OVERLAY)
+    split = all(len(g) == 2 and g[1]['top'] > g[0]['top'] + g[0]['height'] / 2
+                and abs(g[0]['height'] - g[1]['height']) < 1 for g in (m['text'], m['location']))
+    r.check('at 480 px the cell and its µm, and the Location ID and its volume, wrap onto two lines, each whole',
+            split, {'text': m['text'], 'location': m['location']})
+    js(c, "document.querySelector('.mk-row[data-slot=\"primary\"] .mk-move').click(); true")
+    opened = c.wait_for("!document.getElementById('move-panel').hidden", 10)
+    c.settle(3)
+    m = js(c, OVERLAY)
+    r.check('the move panel under it fits too, its lines wrapped in its box',
+            opened and m['page'] <= 0 and m['move'] is not None and m['move']['sw'] <= m['move']['cw'] + 1
+            and m['move']['right'] <= m['readouts']['right'] + 0.5, m)
+    js(c, "document.querySelector('#move-panel .mv-close').click(); true")
 
 
 # -- viewcube ---------------------------------------------------------------------------
@@ -3067,6 +3141,7 @@ SECTIONS = {
     'shiftpulls': shiftpulls,
     'visualizations': visualizations,
     'locate': locate,
+    'narrow': narrow,
     'viewcube': viewcube,
     'comparecube': comparecube,
     'comparereport': comparereport,
