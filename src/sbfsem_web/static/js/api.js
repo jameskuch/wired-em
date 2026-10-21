@@ -560,6 +560,9 @@ export const api = {
   // The Settings tab: this browser's cached files, and the server's tools (an admin's).
   clearBrowserCache: () =>
     request('/api/browser/clear-cache', { method: 'POST' }, 'clearing cached files…').then((r) => r.json()),
+  // The annotations Viking's curve fit pulled toward a much wider linked one, in every
+  // loaded cell this account may see (the Settings tab's Correction log).
+  correctionLog: (ratio) => getJSON(`/api/correction-log${q({ ratio })}`),
   adminWhoami: () => getJSON('/api/admin/whoami'),
   adminStatus: () => getJSON('/api/admin/status', 'server status…'),
   adminClearRenders: (disk) =>

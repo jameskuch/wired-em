@@ -77,6 +77,7 @@ __all__ = [
     "fetch_offsets",
     "fetch_structure_offsets",
     "service_stamp",
+    "stamp_version",
     "apply_offsets",
     "correct_neuron",
     "CorrectionsProvider",
@@ -469,6 +470,12 @@ CORRECT_STRUCTURES_REQUEST_SCHEMA: Schema = {
     3: ("structure_ids", "int64", True),
     4: ("include_children", "bool", False),
     5: ("correction", "int32?", False),
+    # 6: the curve fit's extent ratio, once [Viking-Server] deploys it (a
+    # neighbor more than this many times the node's XY extent is left out of
+    # the fit; Slack #ai 1792522897.715849, not assigned on 2026-10-20).  Then
+    # the ratio the Settings tab's Correction log is set to goes here too, and
+    # joins _structures_key; until then it sets only the log's own test
+    # (sbfsem.analysis.correction_checks).
 }
 CORRECT_STRUCTURES_RESPONSE_SCHEMA: Schema = {
     **VOLUME_GROUP_SCHEMA, 3: ("locations", _CORRECTED_LOCATION, True),
@@ -930,6 +937,7 @@ def _structures_key(client: CorrectionsClient, cset: CorrectionSet, neuron, mode
     # v2: trusted by PLACEMENT_LIMIT_NM, not by empty X/Y columns.  v3: and by
     # the service's own stamp (service_stamp), not the set's build time alone.
     # v4: that stamp is the service version, which a restart does not move.
+    # The curve fit's extent ratio joins it once it is sent (request field 6).
     return (f"corrections:{client.url}/{cset.volume_name}/{cset.stos_group}@{built}"
             f"/structures-v4:{mode}@{service}/c{int(neuron.id)}/{stamp}/{len(neuron.nodes)}")
 
@@ -958,6 +966,16 @@ def service_stamp(client: CorrectionsClient) -> str:
     return done.isoformat() if done else ""
 
 
+def stamp_version(stamp: str | None) -> str:
+    """The service version a :func:`service_stamp` names (``"v1.2.0"`` -> ``"1.2.0"``).
+
+    ``""`` for a stamp that is a rebuild time (a service older than 1.1.0) or
+    nothing (``""``, ``"unknown"``).
+    """
+    text = str(stamp or "")
+    return text[1:] if text[:1] == "v" and text[1:2].isdigit() else ""
+
+
 def fetch_structure_offsets(neuron, client: CorrectionsClient, cset: CorrectionSet,
                             mode: str = "curvefit", *, cache=None, allow_fetch: bool = True,
                             timeout: float | None = None,
@@ -975,10 +993,12 @@ def fetch_structure_offsets(neuron, client: CorrectionsClient, cset: CorrectionS
     """
     nodes = neuron.nodes
     key = _structures_key(client, cset, neuron, mode, service or "unknown")
+    # The version the answer is keyed on, for the cell's status and the correction log.
+    extras = {"mode": mode, "service_version": stamp_version(service)}
     cached = cache.get(key) if cache is not None else None
     if cached is not None and len(cached.get("ID", [])) == len(nodes):
         return CellCorrection(cset, pd.DataFrame(cached), client.url, cached=True,
-                              extras={"mode": mode})
+                              extras=extras)
     if not allow_fetch:
         raise CorrectionsUnavailable(
             f"c{neuron.id}: no {mode} offsets on disk for {cset.volume_name} {cset.stos_group}")
@@ -1008,7 +1028,7 @@ def fetch_structure_offsets(neuron, client: CorrectionsClient, cset: CorrectionS
     })
     if cache is not None:
         cache.set(key, {c: offsets[c].tolist() for c in offsets.columns})
-    return CellCorrection(cset, offsets, client.url, extras={"mode": mode})
+    return CellCorrection(cset, offsets, client.url, extras=extras)
 
 
 def correct_neuron(neuron, client: CorrectionsClient | None = None, *,

@@ -204,7 +204,8 @@ lab's volumes and `curvefit` for the others; off in a bare `SbfsemService`. A lo
 setting is loaded again with it. The summary's `section_correction` says
 whether it was asked for (`requested`), in which `mode`, whether it was
 `applied` and, if not, why (`note`), the set (`volume_name`, `stos_group`,
-`built_utc`), and what moved: `n_annotations`; `n_found`, on a published
+`built_utc`), the corrections service's `service_version` the answer was keyed on
+(`curvefit`, `all`; since 2.22.0), and what moved: `n_annotations`; `n_found`, on a published
 section (`neighbor`) or answered for by the service (`curvefit`, `all`);
 `n_trusted`, where the field has support (`neighbor`) or applied (not a line
 whose section X/Y are empty); `n_moved`; and `median_um`/`p95_um`/`max_um`. In the
@@ -303,6 +304,7 @@ journal with who asked (`src/sbfsem_web/api/admin.py`).
 
 | Method | Path | What |
 |---|---|---|
+| GET | `/api/correction-log?ratio=4` | the Correction log (since 2.22.0; anyone signed in, a Viking user only for the volumes they may open, as `GET /api/neurons`): every loaded copy of a cell under a section correction, by `source`, `neuron_id` and `copy_tag`, with its `mode`, `service_version` and `stos_group`. A copy under the curve fit (`curvefit`, `all`) is `checked`, with `n_annotations`, `n_moved`, `n_next_to_wider` (moved annotations with a linked one at least `ratio` times as wide) and `pulls`: the annotations the correction moved toward their widest linked annotation, at least `ratio` (1 to 50, default 4) times as wide, by a move over `max(2 r, 1 µm)` whose cosine with the line to it is over 0.8. Each pull has `location_id`, `z`, `r_um`, `dx_um`, `dy_um`, `move_um`, `neighbor_id`, `neighbor_r_um`, `ratio` (`null` for a zero-width annotation), `distance_um` (at the registered positions), `frac` (the move's projection on that line over its length; about 0.5 is Viking's curve-fit bug) and `cos`, and `moved_with` (chain neighbors that moved the same way by within a quarter of its move). Copies under `off` are not listed; under `neighbor`, or not applied, they are listed unchecked with a `note`. `ratio` sets this log only (`ratio_sent_to_viking: false`); `default_ratio`, `min_ratio` and `max_ratio` are answered too. `sbfsem.analysis.correction_checks` |
 | POST | `/api/browser/clear-cache` | answers with `Clear-Site-Data: "cache"`: the browser that asked drops what it cached of the site, and keeps its storage and cookies |
 | GET | `/api/admin/whoami` | `user`, `admin` (whether this caller may use the routes below), `login`, `admins_named`, `admin_setting`; open to anyone signed in |
 | GET | `/api/admin/status` | `version`, `assets`, `instance`, `started_at`, `uptime_s`, `pid`, `supervised` (started by systemd), `service_memory_bytes` (the unit's cgroup, on Linux), `memory` (the service's memory report: cells, copies, annotations, surfaces held), `disk_cache` (`files`, `bytes`, `budget_bytes`), `pool` (`build_processes`, `pool_running`, `pool_recycles`, `recycle_mb`), `builds` (as in `/api/health`) |

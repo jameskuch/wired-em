@@ -3398,6 +3398,22 @@ looks wrong rather than for the work itself.
   *Reset the ticked items and reload*: it is removed from every tab of the site. Resetting
   saved sessions means the next load starts with no cells. This is the cure for a setting
   saved in the browser that keeps coming back wrong.
+- **Correction log** lists the annotations Viking's section correction (Curve fit, or
+  Field + fit) moved toward a much wider annotation linked to them, in every cell loaded on
+  the server that you may see. Viking's curve fit (service 1.2.0) takes a soma's or a large
+  outline's center as a point of the process, so a thin process leaving a soma is pulled
+  about halfway to the soma's center: Inferior Monkey c1178's 1328721 (radius 0.74 µm)
+  moved 10.6 µm toward the soma disc 1557441, 0.5 of the way. Each row gives the
+  volume, cell, mode and service version, the annotation's Location ID and section, its
+  radius and how far it moved, the wider annotation and its radius, how many times wider,
+  how far along the line between them it moved (*Of the way*: near 0.5 is this bug), and
+  the annotations on its chain that moved with it. A Location ID selects that annotation in
+  the 3D view (a cell this tab has not loaded goes to the Structure ID box instead, with its
+  volume), and ↗ shows it in Viking. *Wider by at least* (default 4×, kept in this browser)
+  sets which pulls are listed; it does not change Viking's correction, which takes no such
+  setting yet. A pull is listed when the move points at the wider annotation and is longer
+  than the annotation's diameter (and than 1 µm). Cells under the residual field alone
+  are listed as not checked. The server's log names the pulls at 4× as each cell is loaded.
 - **This server** is shown in full to an admin (the server lists them in
   `SBFSEM_ADMIN_USERS`; on a local checkout everyone is one): the version, how long it
   has been up, its memory, the cells and surfaces it holds, its disk cache, its build

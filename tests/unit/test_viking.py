@@ -1057,6 +1057,21 @@ def test_the_shared_list_of_loaded_cells_is_gated_too(signed_in, monkeypatch):
     assert [(n["id"], n["source"]) for n in listed] == [(476, "RC1")]
 
 
+def test_the_correction_log_lists_only_the_volumes_the_viewer_may_open(signed_in, monkeypatch):
+    """``GET /api/correction-log`` lists every loaded cell and names no volume, so the
+    route filters it as ``GET /api/neurons`` does."""
+    from sbfsem.service.dto import CorrectionLogCellDTO
+
+    client, app, _ = signed_in
+    held = [CorrectionLogCellDTO(source="RC1", neuron_id=476, copy_tag="curvefit.1", mode="curvefit",
+                                 checked=True),
+            CorrectionLogCellDTO(source="NeitzInferiorMonkey", neuron_id=1178, copy_tag="all.1",
+                                 mode="all", checked=True)]
+    monkeypatch.setattr(app.state.service, "correction_log", lambda ratio: held)
+    listed = client.get("/api/correction-log").json()["cells"]
+    assert [(c["neuron_id"], c["source"]) for c in listed] == [(476, "RC1")]
+
+
 def test_a_gated_body_request_can_still_be_read_by_the_route(signed_in):
     """Reading the body in the guard must not consume it for the endpoint."""
     client, _, _ = signed_in

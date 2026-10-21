@@ -161,6 +161,9 @@ class FakeService:
         # ``fail_code``.
         self.locations: list[dict] = []
         self.fit: dict[int, tuple[float, float]] = {}
+        # A Location's own (dx, dy) nm, in place of its mode's fit (the curve
+        # fit's pull toward a soma, for the correction log).
+        self.moves: dict[int, tuple[float, float]] = {}
         self.structure_requests: list[dict] = []
         self.fail_structures: bool | set[int] = False
         self.fail_code = "UNKNOWN"
@@ -237,12 +240,14 @@ class FakeService:
             if request["stos_group"] != "Grid16":
                 context.abort(grpc.StatusCode.NOT_FOUND, "no correction set")
             mode = 3 if request["correction"] is None else request["correction"]
-            dx, dy = self.fit.get(mode, (0.0, 0.0))
+            fit = self.fit.get(mode, (0.0, 0.0))
             wanted = set(request["structure_ids"])
-            return {**{k: request[k] for k in ("volume_name", "stos_group")}, "locations": [
-                {**loc, "x": loc["x"] + dx, "y": loc["y"] + dy, "dx": dx, "dy": dy}
-                for loc in self.locations
-                if loc["structure_id"] in wanted or request["include_children"]]}
+            out = []
+            for loc in self.locations:
+                if loc["structure_id"] in wanted or request["include_children"]:
+                    dx, dy = self.moves.get(loc["location_id"], fit)
+                    out.append({**loc, "x": loc["x"] + dx, "y": loc["y"] + dy, "dx": dx, "dy": dy})
+            return {**{k: request[k] for k in ("volume_name", "stos_group")}, "locations": out}
 
         def rebuild_status(request, context):
             return {"in_progress": False, "last_completed_utc": {"seconds": self.rebuilt},
@@ -799,6 +804,63 @@ def test_a_web_load_takes_the_mode_and_reloads_for_another(web):
     assert again is fitted and again.section_correction["mode"] == "curvefit"
     svc.load_neuron(1178, "i", include_synapses=False, section_corrections="curvefit")
     assert svc.neuron(1178, "i") is again
+
+
+def test_a_curve_fit_load_logs_a_thin_process_pulled_toward_a_wider_one(web, caplog):
+    """The correction log, from a load through the service.  c1178's 690259 (r 0.25 um)
+    is linked to 40440 (r 1.70 um, 6.7x) in the cassette; Field + fit moved it 0.43 of
+    the way there on 2026-10-20.  Here it moves halfway, and its other neighbor
+    690258 with it; a Field load is not checked."""
+    import logging
+
+    fake, svc = web
+    svc.load_neuron(1178, "i", include_synapses=False, section_corrections="off")
+    nodes = svc.neuron(1178, "i").nodes.drop_duplicates("ID").set_index("ID")
+    sx, sy = map(float, svc.neuron(1178, "i").volume_scale[:2])
+    fake.locations = [{"location_id": int(i), "structure_id": 1178, "z": int(r.Z),
+                       "x": r.VolumeX * sx, "y": r.VolumeY * sy} for i, r in nodes.iterrows()]
+    fake.fit = {2: (0.0, 0.0), 3: (0.0, 0.0)}
+    half = 0.5 * np.array([(nodes.at[40440, a] - nodes.at[690259, a]) * s
+                           for a, s in (("VolumeX", sx), ("VolumeY", sy))])
+    assert np.hypot(*half) > 1000.0           # over 1 um, and over the annotation's diameter
+    fake.moves = {690259: tuple(half), 690258: tuple(half * 1.02)}
+
+    with caplog.at_level(logging.INFO, logger="sbfsem.service.facade"):
+        svc.load_neuron(1178, "i", include_synapses=False, section_corrections="all")
+    assert "pulled 1 annotation(s) toward a linked one 4x wider or more" in caplog.text
+    assert "690259" in caplog.text
+    svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
+
+    cells = {c.copy_tag: c for c in svc.correction_log()}
+    fitted = cells["all.0"]
+    assert fitted.checked and fitted.mode == "all"
+    assert [p.location_id for p in fitted.pulls] == [690259]
+    pull = fitted.pulls[0]
+    assert pull.neighbor_id == 40440 and pull.moved_with == [690258]
+    assert pull.ratio == pytest.approx(6.7, abs=0.05)
+    assert pull.frac == pytest.approx(0.5, abs=1e-3) and pull.cos == pytest.approx(1.0, abs=1e-6)
+    assert fitted.service_version is None     # the fake service has no version
+    assert [p.location_id for p in svc.correction_log(7.0)[0].pulls] == []
+    assert not cells["neighbor.0"].checked
+    assert "off.0" not in cells                # not corrected: nothing to log
+
+
+def test_the_service_version_is_kept_with_a_curve_fit_correction(structures, tmp_path):
+    fake, url = structures
+    fake.version = "1.2.0"
+    provider = corr.CorrectionsProvider(url, cache=DiskCache(tmp_path))
+    try:
+        neuron = make_structure_neuron()
+        provider.correct(neuron, "curvefit")
+        assert neuron.section_correction["service_version"] == "1.2.0"
+        again = make_structure_neuron()       # answered from disk, keyed on the same version
+        provider.correct(again, "curvefit")
+        assert again.section_correction["cached"] and again.section_correction["service_version"] == "1.2.0"
+    finally:
+        provider.close()
+    assert corr.stamp_version("v1.2.0") == "1.2.0"
+    assert corr.stamp_version("2026-10-20T05:00:00+00:00") == ""
+    assert corr.stamp_version("unknown") == corr.stamp_version(None) == ""
 
 
 def test_a_lab_can_have_its_own_default_mode(web):

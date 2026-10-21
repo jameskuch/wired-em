@@ -86,6 +86,12 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   (systemd did not start it); clearing surfaces in memory says what it cleared; "Clear cached files and
   reload" sends Clear-Site-Data and comes back to the tab with its note; a reset removes the ticked items,
   the session the page saved after the list was made included, and leaves the rest.
+* ``correctionlog`` -- the Settings tab's Correction log (2026-10-20): with Inferior Monkey c1178 loaded under
+  Field + fit, it lists the annotations Viking's curve fit pulled toward a much wider linked one (1328721 toward
+  1557441, 13x, about halfway) with the volume, mode and service version; the ratio box narrows the list, is
+  kept in the browser and refuses what is not a number; a Location ID selects its annotation in the 3D view,
+  drawn yellow; Show in Viking answers on a Mac that Viking runs on Windows; the card scrolls its table rather
+  than the page at 480 px.
 * ``viewcube`` -- the view cube in the corner (viewcube.js), with a real mouse: a double-click on a
   face turns the view to that face's toolbar viewpoint exactly, on an edge to the 45 degree view and on a
   corner to the view between three faces; a single click turns nothing; looking at a face, the triangles
@@ -2353,6 +2359,81 @@ def settings(c: Chrome, r: Report, ctx):
     js(c, "sessionStorage.removeItem('__keep')")
 
 
+LOG_ROWS = """[...document.querySelectorAll('#correction-log tbody tr[data-location]')].map((tr) => ({
+    id: Number(tr.dataset.location), cells: [...tr.children].map((td) => td.textContent) }))"""
+
+
+def correctionlog(c: Chrome, r: Report, ctx):
+    r.start('correctionlog: annotations the curve fit pulled toward a much wider one, in Settings')
+    boot(c, ctx.url)
+    _dismiss_offer(c)
+    # The cheapest surface: the log reads the annotations, not the render.
+    set_control(c, 'pathway', 'original')
+    js(c, "localStorage.removeItem('sbfsem:correction-log-ratio')")
+    key = load(c, 1178, source='NeitzInferiorMonkey', mesh=False)
+    copy = js(c, f'{STATE}.neurons.get({json.dumps(key)}).summary.copy_tag || ""')
+    js(c, "document.querySelector('[data-view=settings]').click()")
+    listed = c.wait_for("[...document.querySelectorAll('#correction-log tbody tr[data-location]')]"
+                        ".some((tr) => tr.dataset.location === '1328721')", 60)
+    rows = js(c, LOG_ROWS)
+    first = next((row for row in rows if row['id'] == 1328721), None)
+    r.check('c1178 under Field + fit lists 1328721, pulled toward 1557441 (13x) about halfway, with its volume, '
+            'mode and the service version',
+            bool(listed and first and first['cells'][0] == 'Inferior Monkey' and first['cells'][1] == 'c1178'
+                 and first['cells'][2] == 'Field + fit' and first['cells'][3] not in ('', '—')
+                 and first['cells'][8] == '1557441' and first['cells'][10] == '13×'
+                 and 0.4 < float(first['cells'][11]) < 0.6 and '1328723' in first['cells'][12]),
+            {'copy': copy, 'rows': rows})
+    r.check('and the other pulls at 4x (2028495 toward 2028493)', any(row['id'] == 2028495 for row in rows),
+            [row['id'] for row in rows])
+
+    def ratio(text: str) -> None:
+        js(c, """(() => { const i = document.getElementById('correction-log-ratio'); i.value = %s;
+            i.dispatchEvent(new Event('change', { bubbles: true })); })()""" % json.dumps(text))
+        c.settle(1)
+
+    ratio('20')
+    narrowed = c.wait_for("!document.querySelector('#correction-log tbody tr[data-location]') && "
+                          "/None pulled/.test(document.querySelector('#correction-log tbody')?.textContent || '')", 15)
+    kept = js(c, "localStorage.getItem('sbfsem:correction-log-ratio')")
+    r.check('a ratio of 20 lists none of c1178\'s pulls (13x at most), and is kept in the browser',
+            narrowed and kept == '20', {'kept': kept, 'rows': js(c, LOG_ROWS)})
+    ratio('wide')
+    said = js(c, """({ value: document.getElementById('correction-log-ratio').value,
+        status: document.querySelector('#correction-log p[role=status]').textContent })""")
+    r.check('a ratio that is not a number is refused and the last one holds',
+            said['value'] == '20' and said['status'].startswith('Not a number'), said)
+    ratio('4')
+    c.wait_for(f"[...document.querySelectorAll('#correction-log tbody tr[data-location]')].length >= 2", 15)
+
+    js(c, """[...document.querySelectorAll('#correction-log tr[data-location="1328721"] button.settings-id')]
+        .find((b) => b.textContent === '1328721').click()""")
+    got = c.wait_for("document.querySelector('.tab.active').dataset.view === 'render' && "
+                     "window.sbfsem.renderer.selection?.locationId === 1328721", 30)
+    sel = js(c, SELECTED)
+    r.check('its Location ID selects the annotation in the 3D view, drawn yellow',
+            got and sel and sel['kind'] == 'annotation' and sel['drawn'] and sel['color'] == sel['yellow'], sel)
+
+    js(c, "document.querySelector('[data-view=settings]').click()")
+    c.wait_for("!!document.querySelector('#correction-log button.settings-viking')", 15)
+    js(c, "document.querySelector('#correction-log tr[data-location=\"1328721\"] button.settings-viking').click()")
+    status = c.wait_for("/only be run on Windows/.test(document.getElementById('status').textContent)", 5)
+    r.check('Show in Viking is offered, and on a Mac says Viking runs on Windows', status,
+            js(c, "document.getElementById('status').textContent"))
+
+    c.emulate('mac', 480, 900)
+    c.settle(2)
+    fit = js(c, """(() => { const card = document.getElementById('correction-log');
+        const scroll = card.querySelector('.settings-scroll');
+        return { page: document.scrollingElement.scrollWidth - window.innerWidth,
+                 card: Math.round(card.getBoundingClientRect().right - window.innerWidth),
+                 table: scroll ? scroll.scrollWidth > scroll.clientWidth : null }; })()""")
+    r.check('at 480 px the table scrolls inside its card, not the page',
+            fit['page'] <= 0 and fit['card'] <= 0 and fit['table'] is True, fit)
+    c.emulate('mac', 1440, 900)
+    js(c, "localStorage.removeItem('sbfsem:correction-log-ratio')")
+
+
 def visualizations(c: Chrome, r: Report, ctx):
     """The Visualizations menu (2026-10-19): the open row's Look dropdown, the right-click submenu
     with its "apply to all cells" follow-up, Save, and the manager's file and delete."""
@@ -2904,6 +2985,7 @@ SECTIONS = {
     'comparetoolbar': comparetoolbar,
     'helpmovie': helpmovie,
     'settings': settings,
+    'correctionlog': correctionlog,
     'visualizations': visualizations,
     'locate': locate,
     'viewcube': viewcube,

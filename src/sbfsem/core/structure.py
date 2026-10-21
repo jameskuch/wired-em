@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import networkx as nx
 import numpy as np
@@ -49,6 +50,9 @@ from .types import (
     postsynapse_kind,
 )
 from .volumes import Volumes
+
+if TYPE_CHECKING:
+    from ..analysis.correction_checks import PullScan
 
 __all__ = ["Structure", "Neuron", "SynapseNotFoundError"]
 
@@ -115,6 +119,10 @@ class Structure:
         #: What the web service asked for and got (requested, applied, why
         #: not); set by ``SbfsemService`` on load.
         self.correction_status: dict | None = None
+        #: The annotations the correction's curve fit pulled toward a much
+        #: wider linked one (:func:`sbfsem.analysis.correction_checks.scan_neuron`,
+        #: a ``PullScan``); set by ``SbfsemService`` for the modes with a fit.
+        self.correction_pulls: PullScan | None = None
         #: The volume's current section transforms, when they were applied
         #: (:func:`sbfsem.io.registration.apply_registration`): where they
         #: were read and how far the annotations moved from their stored

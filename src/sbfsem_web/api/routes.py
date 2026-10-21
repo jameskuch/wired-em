@@ -31,6 +31,9 @@ from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter
 from pydantic_core import PydanticSerializationError
 from starlette.concurrency import run_in_threadpool
 
+from sbfsem.analysis.correction_checks import DEFAULT_RATIO as PULL_DEFAULT_RATIO
+from sbfsem.analysis.correction_checks import MAX_RATIO as PULL_MAX_RATIO
+from sbfsem.analysis.correction_checks import MIN_RATIO as PULL_MIN_RATIO
 from sbfsem.core.volumes import validate_source
 from sbfsem.io.corrections import correction_mode
 from sbfsem.io.odata import ODataError
@@ -40,6 +43,7 @@ from sbfsem.service.dto import (
     AnnotatorsDTO,
     ClosedCurveDTO,
     ConnectivityDTO,
+    CorrectionLogDTO,
     DendriteDiameterDTO,
     DeviationMapDTO,
     EdgeDTO,
@@ -489,6 +493,28 @@ def loaded_neurons(request: Request):
     if session is None or not request.app.state.viking.config.gate_volumes:
         return summaries
     return [s for s in summaries if session.may_read(s.source)]
+
+
+@router.get("/correction-log", response_model=CorrectionLogDTO)
+def correction_log(request: Request,
+                   ratio: float = Query(PULL_DEFAULT_RATIO, ge=PULL_MIN_RATIO, le=PULL_MAX_RATIO,
+                                        description="How many times wider the linked annotation "
+                                                    "must be")):
+    """The annotations Viking's section correction pulled toward a much wider
+    linked one, in every cell loaded on this server under the curve fit
+    (``curvefit``, ``all``); see :mod:`sbfsem.analysis.correction_checks`.
+    Names no volume, so the router's guard lets it through: as ``GET
+    /neurons``, a Viking user is shown only the volumes they may open.
+
+    ``ratio`` sets this log's test only; the corrections service does not take
+    one yet (``ratio_sent_to_viking``).
+    """
+    cells = service(request).correction_log(ratio)
+    session = getattr(request.state, "viking_session", None)
+    if session is not None and request.app.state.viking.config.gate_volumes:
+        cells = [c for c in cells if session.may_read(c.source)]
+    return CorrectionLogDTO(ratio=ratio, default_ratio=PULL_DEFAULT_RATIO, min_ratio=PULL_MIN_RATIO,
+                            max_ratio=PULL_MAX_RATIO, ratio_sent_to_viking=False, cells=cells)
 
 
 def _null_is_false(value):

@@ -679,6 +679,22 @@ async function boot() {
     // A reload the tab asks for brings the session back without asking, as a redeploy's does.
     beforeReload: () => { session.saveNow(state, renderer, uiFlags()); session.restoreNextLoad(); },
     stopSaving: () => session.stopSaving(),
+    // The Correction log's rows: an annotation of a cell this tab has is selected in the
+    // 3D view; one of a cell it has not goes to the Structure ID box, with its volume.
+    annotations: {
+      loaded: (source, id) => state.neurons.has(keyOf(source, id)),
+      select: async (source, id, locationId) => {
+        const record = state.neurons.get(keyOf(source, id));
+        if (!record) return false;
+        activateView('render');
+        return selectLocation(record, locationId);
+      },
+      load: (source, id) => { activateView('render'); pickStructure(source, id); },
+      viking: (source) => Boolean(state.volumes.find((v) => v.name === source)?.viking_name),
+      openInViking: (source, id, locationId) =>
+        openLocationInViking(state.neurons.get(keyOf(source, id)) || { source, id }, locationId),
+      volumeName: volumeLongName,
+    },
   });
 
   try {

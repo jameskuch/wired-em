@@ -17,6 +17,7 @@ const load = (name) => import(pathToFileURL(path.join(jsDir, name)).href);
 const {
   STORAGE_GROUPS, groupOf, inventory, resetGroups, pageAssets, buildCheck,
   formatBytes, formatDuration, restartPhase, serverRows, RESTART_WAIT_S,
+  RATIO_KEY, RATIO_LIMITS, parseRatio, formatRatio, correctionLogView,
 } = await load('settings.js');
 
 const cases = [];
@@ -148,6 +149,70 @@ test('the server card reads the status the server sends', () => {
   assert.equal(local.get('Surfaces on disk'), 'no disk cache');
   assert.match(local.get('Build processes'), /none: builds run in the server process/);
   assert.match(local.get('Instance'), /not run by systemd/);
+});
+
+// -- the Correction log ------------------------------------------------------
+
+test('the ratio box takes a number within the limits, and refuses what is not one', () => {
+  assert.equal(parseRatio('4'), 4);
+  assert.equal(parseRatio(' 2.5 '), 2.5);
+  assert.equal(parseRatio('6×'), 6);
+  assert.equal(parseRatio('0.2'), RATIO_LIMITS.min);
+  assert.equal(parseRatio('500'), RATIO_LIMITS.max);
+  assert.equal(parseRatio('3', { min: 1, max: 2 }), 2);
+  for (const bad of ['', '  ', 'four', null, undefined, 'NaN']) assert.equal(parseRatio(bad), null, String(bad));
+  assert.equal(RATIO_LIMITS.fallback, 4);
+  assert.equal(groupOf(RATIO_KEY).id, 'correction-log', 'the saved ratio has a group');
+});
+
+test('a ratio is written as the log shows it', () => {
+  assert.equal(formatRatio(13.42), '13×');
+  assert.equal(formatRatio(4.35), '4.3×');
+  assert.equal(formatRatio(4), '4×');
+  assert.equal(formatRatio(null), '∞');
+});
+
+const LOG = {
+  ratio: 4, default_ratio: 4, min_ratio: 1, max_ratio: 50, ratio_sent_to_viking: false,
+  cells: [
+    { source: 'NeitzInferiorMonkey', neuron_id: 1178, copy_tag: 'curvefit.1', mode: 'curvefit', checked: true,
+      note: '', service_version: '1.2.0', stos_group: 'Grid16', n_annotations: 2436, n_moved: 2179,
+      n_next_to_wider: 12, pulls: [
+        { location_id: 1328721, z: 1160, r_um: 0.737, dx_um: -10.6, dy_um: 0.5, move_um: 10.645,
+          neighbor_id: 1557441, neighbor_r_um: 9.887, ratio: 13.42, distance_um: 21.5, frac: 0.495, cos: 1.0,
+          moved_with: [1328723] },
+      ] },
+    { source: 'RC1', neuron_id: 476, copy_tag: 'all.1', mode: 'all', checked: true, note: '',
+      service_version: null, n_annotations: 10, n_moved: 9, n_next_to_wider: 1, pulls: [] },
+    { source: 'RC1', neuron_id: 943, copy_tag: 'neighbor.1', mode: 'neighbor', checked: false,
+      note: 'Not checked: this mode has no curve fit', n_annotations: 0, n_moved: 0, n_next_to_wider: 0, pulls: [] },
+  ],
+};
+
+test('the log view names each cell with its volume and mode, and keeps the unchecked apart', () => {
+  const view = correctionLogView(LOG, { volumeName: (s) => ({ NeitzInferiorMonkey: 'Inferior Monkey' })[s] || s });
+  assert.equal(view.ratio, 4);
+  assert.equal(view.checked.length, 2);
+  const [c1178, c476] = view.checked;
+  assert.deepEqual([c1178.volume, c1178.cellId, c1178.mode, c1178.service, c1178.copy],
+    ['Inferior Monkey', 1178, 'Curve fit', '1.2.0', 'curvefit.1']);
+  assert.match(c1178.summary, /^1 of the 12 moved annotations next to one 4× as wide or wider was pulled toward it$/);
+  const [row] = c1178.rows;
+  assert.deepEqual([row.locationId, row.z, row.r, row.move, row.neighborId, row.neighborR, row.ratio, row.frac],
+    [1328721, '1160', '0.74', '10.64', 1557441, '9.89', '13×', '0.49']);
+  assert.deepEqual(row.movedWith, [1328723]);
+  assert.match(row.title, /0\.49 of the way there/);
+  assert.equal(c476.mode, 'Field + fit');
+  assert.equal(c476.service, '');
+  assert.equal(c476.rows.length, 0);
+  assert.match(c476.summary, /^None pulled: 1 moved annotation next to one 4× as wide or wider/);
+  assert.deepEqual(view.unchecked.map((c) => [c.cellId, c.mode, c.note]),
+    [[943, 'Residual field', 'Not checked: this mode has no curve fit']]);
+});
+
+test('an empty or missing log is drawn as nothing to show', () => {
+  assert.deepEqual(correctionLogView({ ratio: 6, cells: [] }), { ratio: 6, checked: [], unchecked: [] });
+  assert.deepEqual(correctionLogView(null), { ratio: 4, checked: [], unchecked: [] });
 });
 
 let failed = 0;

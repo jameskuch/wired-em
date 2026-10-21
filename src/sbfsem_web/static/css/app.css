@@ -555,6 +555,24 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 10%, transparent);
 .settings-table input[type="checkbox"] { margin: 2px 0 0; }
 .settings-panel button.danger { color: var(--danger); }
 .settings-panel button.danger:disabled { color: var(--muted); }
+/* The Correction log: the whole row, its wide table scrolling inside the card. */
+.settings-panel .settings-wide { grid-column: 1 / -1; }
+.settings-actions label { align-self: center; font-size: 12px; }
+.row input.settings-ratio { flex: 0 0 5.5em; width: 5.5em; }
+.settings-actions .settings-unit { align-self: center; margin-right: 6px; }
+.settings-scroll { overflow-x: auto; }
+.settings-log-table th, .settings-log-table td { white-space: nowrap; overflow-wrap: normal; }
+.settings-log-table td.muted { white-space: normal; }
+.settings-log-table .settings-log-sum td { border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.settings-log-table button.settings-id,
+.settings-log-table button.settings-viking {
+  font: inherit; font-family: var(--mono); background: none; border: none; padding: 0 3px;
+  border-radius: 3px; color: var(--accent); cursor: pointer; line-height: inherit;
+}
+.settings-log-table button.settings-id { text-decoration: underline dotted; text-underline-offset: 2px; }
+.settings-log-table button.settings-viking { font-weight: 700; }
+.settings-log-table button.settings-id:hover,
+.settings-log-table button.settings-viking:hover { background: var(--hover); }
 .card .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 /* A metric with a definition behind it: dotted, and the cursor says so. */
 .card td.help { cursor: help; text-decoration: underline dotted; text-decoration-color: var(--muted); text-underline-offset: 2px; }

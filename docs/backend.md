@@ -124,6 +124,27 @@ along each link at the current positions, which is what
 summary as `/api/neurons/{source}/{id}/shift-summary`; the `nodes` table
 carries each annotation's two moves (`shift_um`, `live_shift_um`).
 
+`sbfsem.analysis.correction_checks` (2.22.0) finds the annotations Viking's
+curve fit pulled toward a much wider linked annotation. Service 1.2.0 takes a
+soma's or a large outline's centroid as a control point of the process, so a
+thin process leaving it moves about halfway to its center (InferiorMonkey
+c1178's 1328721, r 0.74 um, 10.6 um toward 1557441, r 9.9 um, 0.495 of the way):
+
+```python
+from sbfsem.analysis.correction_checks import scan_neuron
+
+scan = scan_neuron(c)              # a cell loaded with curvefit or all
+scan.at(4.0)                       # Pulls toward a neighbor at least 4x as wide
+scan.n_next_to_wider(4.0)          # moved annotations next to one that wide
+```
+
+A pull is an annotation whose widest linked one is at least the ratio as wide,
+whose correction move points at it (cosine over 0.8, at the registered
+positions) and is longer than `max(2 r, 1 um)`; `frac` is how far along the
+line it went, and `moved_with` the chain neighbors that moved with it.
+`SbfsemService` scans every cell it corrects with a fit (milliseconds: 3 ms on
+c1178), logs the pulls at 4x, and serves them as `/api/correction-log`.
+
 ## The data model
 
 `Neuron.nodes`, `.edges` and `.synapses` are pandas DataFrames.

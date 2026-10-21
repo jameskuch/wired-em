@@ -39,6 +39,7 @@ from .. import progress
 from ..analysis import dendrite as dendrite_analysis
 from ..analysis import synapse as synapse_analysis
 from ..analysis.boundary import IPLBoundaries, load_ipl_boundaries
+from ..analysis.correction_checks import DEFAULT_RATIO, FIT_MODES, PullScan, scan_neuron
 from ..analysis.stats import Stats
 from ..analysis.stratification import ipl_depth, synapse_stratification
 from ..core.moves import ManualMove, moved_copy, moves_token, normalize_moves
@@ -117,6 +118,8 @@ from .dto import (
     ConnectivityEdgeDTO,
     ConnectivityMatrixDTO,
     ConnectivityNodeDTO,
+    CorrectionLogCellDTO,
+    CorrectionPullDTO,
     DendriteDiameterDTO,
     DeviationAnnotationsDTO,
     DeviationBiasDTO,
@@ -1411,7 +1414,34 @@ class SbfsemService:
         status = {"requested": True, "applied": True, "mode": mode, **summary}
         if note:
             status["note"] = f"The service is not answering; offsets kept from before ({note})"
+        if mode in FIT_MODES:
+            neuron.correction_pulls = self._scan_pulls(neuron, mode)
         return status
+
+    @staticmethod
+    def _scan_pulls(neuron: Neuron, mode: str) -> PullScan | None:
+        """The annotations the curve fit pulled toward a much wider linked one
+        (:mod:`sbfsem.analysis.correction_checks`), logged at the default ratio.
+
+        Milliseconds on a cell of thousands of annotations.  A failure here is
+        logged and leaves the cell as corrected: the log is a check, not part
+        of the load.
+        """
+        started = time.perf_counter()
+        try:
+            found = scan_neuron(neuron)
+        except Exception:
+            log.exception("c%s %s: correction log check failed", neuron.id,
+                          neuron.volume.display_name)
+            return None
+        pulls = found.at(DEFAULT_RATIO)
+        if pulls:
+            log.info("c%s %s: section correction %s pulled %d annotation(s) toward a linked one "
+                     "%gx wider or more (%.0f ms): %s", neuron.id, neuron.volume.viking_name, mode,
+                     len(pulls), DEFAULT_RATIO, 1000 * (time.perf_counter() - started),
+                     ", ".join(f"{p.location_id} {p.move_um:.2f} um toward {p.neighbor_id}"
+                               for p in pulls[:8]))
+        return found
 
     def freshness(self, neuron_id: int, source) -> FreshnessDTO:
         """Has Viking edited this cell since the loaded data was fetched?
@@ -1800,6 +1830,11 @@ class SbfsemService:
             neuron.correction_status = {
                 "requested": True, "applied": True, "mode": "neighbor",
                 **(neuron.section_correction or {}), "note": "As saved in the file"}
+        saved = getattr(neuron, "correction_status", None) or {}
+        if (saved.get("applied") and saved.get("mode") in FIT_MODES
+                and getattr(neuron, "correction_pulls", None) is None):
+            # The file keeps the moves, so the correction log can test them as at a load.
+            neuron.correction_pulls = self._scan_pulls(neuron, str(saved["mode"]))
         if getattr(neuron, "live_registration", None) and not getattr(
                 neuron, "registration_status", None):
             neuron.registration_status = {
@@ -3889,6 +3924,45 @@ class SbfsemService:
                 for p in result.problems
             ],
         )
+
+    def correction_log(self, ratio: float = DEFAULT_RATIO) -> list[CorrectionLogCellDTO]:
+        """Every loaded copy of a cell under a section correction, with the
+        annotations its curve fit pulled toward a linked one at least ``ratio``
+        times as wide (:mod:`sbfsem.analysis.correction_checks`), by volume,
+        cell and copy.
+
+        The copies loaded with manual moves are left out: a person's moves come
+        after the correction, which their base copy shows.  Every volume is
+        listed; the web layer leaves out those the viewer may not open.
+        """
+        with self._lock:
+            held = [(key, tag, neuron) for key, copies in self._copies.items()
+                    for tag, neuron in copies.items() if ".m" not in tag]
+        out = []
+        for key, tag, neuron in held:
+            status = getattr(neuron, "correction_status", None) or {}
+            if not status.get("requested"):
+                continue
+            found: PullScan | None = getattr(neuron, "correction_pulls", None)
+            mode = str(status.get("mode") or "neighbor")
+            corrected = neuron.section_correction or {}
+            cell = CorrectionLogCellDTO(
+                source=key.source, neuron_id=key.neuron_id, copy_tag=tag, mode=mode,
+                checked=found is not None, service_version=corrected.get("service_version") or None,
+                stos_group=corrected.get("stos_group"))
+            if not status.get("applied"):
+                cell.note = str(status.get("note") or "Not applied")
+            elif mode not in FIT_MODES:
+                cell.note = "Not checked: this mode has no curve fit"
+            elif found is None:
+                cell.note = "Not checked: the check failed (the server log says why)"
+            if found is not None:
+                cell.n_annotations, cell.n_moved = found.n_annotations, found.n_moved
+                cell.n_next_to_wider = found.n_next_to_wider(ratio)
+                cell.pulls = [CorrectionPullDTO(**p.as_dict()) for p in found.at(ratio)]
+            out.append(cell)
+        out.sort(key=lambda c: (c.source, c.neuron_id, c.copy_tag))
+        return out
 
     def shift_summary(self, neuron_id: int, source, pair: str = "correction") -> ShiftSummaryDTO:
         """How far the section correction and the current transforms moved a cell, and

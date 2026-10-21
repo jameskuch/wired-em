@@ -1,12 +1,16 @@
 // The Settings tab: debug tools kept out of the way of the work.
 //
 // Three cards for this browser (which build the page is, clearing its cached
-// files, resetting what it saved) and one for the server (its state, clearing
-// its cached renders, replacing its build processes, restarting it), which only
-// an admin is offered: the server decides, through /api/admin/whoami.
+// files, resetting what it saved), the Correction log (annotations Viking's
+// curve fit pulled toward a much wider linked one, in every loaded cell this
+// account may see: /api/correction-log), and one for the server (its state,
+// clearing its cached renders, replacing its build processes, restarting it),
+// which only an admin is offered: the server decides, through /api/admin/whoami.
 //
 // The rules are pure and exported, so node can test them (tests/js/test_settings.mjs);
 // SettingsPanel is the view, and touches the page only when it is shown.
+
+import { MODE_LABELS } from './regstatus.js';
 
 /**
  * Everything this site keeps in the browser, by what it is for.  `keys` are
@@ -36,6 +40,11 @@ export const STORAGE_GROUPS = [
     id: 'visualizations', label: 'Saved visualizations',
     help: 'The looks you saved from a cell (its Visualizations list); save them to a file first to keep them',
     keys: ['sbfsem.visualizations.v1'],
+  },
+  {
+    id: 'correction-log', label: 'Correction log ratio',
+    help: 'How many times wider a linked annotation must be for the Correction log to list a pull toward it',
+    keys: ['sbfsem:correction-log-ratio'],
   },
   { id: 'connectivity', label: 'Connectivity query', help: 'The last query on the Connectivity tab', keys: ['sbfsem.connectivity.query'] },
   {
@@ -205,6 +214,77 @@ export function serverRows(status) {
   ];
 }
 
+// -- the correction log ----------------------------------------------------------
+
+/** Where the Correction log's ratio is kept in this browser. */
+export const RATIO_KEY = 'sbfsem:correction-log-ratio';
+/** The server's limits, until it has said its own (/api/correction-log answers them). */
+export const RATIO_LIMITS = Object.freeze({ min: 1, max: 50, fallback: 4 });
+
+/**
+ * The ratio typed in the box, as a number within the limits; `null` when the
+ * text is not a number at all (the box then says so and the last good value holds).
+ */
+export function parseRatio(text, { min = RATIO_LIMITS.min, max = RATIO_LIMITS.max } = {}) {
+  const value = Number(String(text ?? '').trim().replace(/[×x]$/i, ''));
+  if (String(text ?? '').trim() === '' || !Number.isFinite(value)) return null;
+  return Math.min(max, Math.max(min, value));
+}
+
+/** A ratio as the log writes it: 13.4×, 4×, ∞ for a zero-width annotation. */
+export function formatRatio(ratio) {
+  if (ratio == null || !Number.isFinite(ratio)) return '∞';
+  return `${ratio >= 10 ? ratio.toFixed(0) : String(Number(ratio.toFixed(1)))}×`;
+}
+
+const um = (value, digits = 2) => (Number.isFinite(value) ? value.toFixed(digits) : '—');
+
+/**
+ * The log as the card draws it: one entry per checked cell, in the server's
+ * order, with its heading and its rows' texts, and the cells that were not
+ * checked, apart.  `volumeName(source)` names a volume as the page does.
+ */
+export function correctionLogView(log, { volumeName = (s) => s } = {}) {
+  const ratio = log?.ratio ?? RATIO_LIMITS.fallback;
+  const checked = [];
+  const unchecked = [];
+  for (const cell of log?.cells || []) {
+    const mode = MODE_LABELS[cell.mode] || cell.mode;
+    const base = { source: cell.source, cellId: cell.neuron_id, copy: cell.copy_tag, mode,
+      volume: volumeName(cell.source), service: cell.service_version || '' };
+    if (!cell.checked) {
+      unchecked.push({ ...base, note: cell.note || 'Not checked' });
+      continue;
+    }
+    const n = cell.pulls.length;
+    const near = cell.n_next_to_wider;
+    checked.push({
+      ...base,
+      summary: n
+        ? `${n} of the ${near} moved annotation${near === 1 ? '' : 's'} next to one ${formatRatio(ratio)} as wide or wider `
+          + `${n === 1 ? 'was' : 'were'} pulled toward it`
+        : `None pulled: ${near} moved annotation${near === 1 ? '' : 's'} next to one ${formatRatio(ratio)} as wide or wider, `
+          + `none moved toward it by more than its diameter`,
+      rows: cell.pulls.map((p) => ({
+        locationId: p.location_id,
+        z: String(p.z),
+        r: um(p.r_um),
+        move: um(p.move_um),
+        neighborId: p.neighbor_id,
+        neighborR: um(p.neighbor_r_um),
+        ratio: formatRatio(p.ratio),
+        frac: um(p.frac),
+        distance: um(p.distance_um),
+        movedWith: [...(p.moved_with || [])],
+        title: `Location ${p.location_id} (r ${um(p.r_um)} µm, section ${p.z}) moved ${um(p.move_um)} µm, `
+          + `cos ${um(p.cos)} toward ${p.neighbor_id} (r ${um(p.neighbor_r_um)} µm, ${um(p.distance_um)} µm away): `
+          + `${um(p.frac)} of the way there`,
+      })),
+    });
+  }
+  return { ratio, checked, unchecked };
+}
+
 // -- the view ----------------------------------------------------------------
 
 function el(tag, props = {}, children = []) {
@@ -241,19 +321,26 @@ export class SettingsPanel {
    * `stopSaving()`: no more session writes from this page (a reset that
    * reloads must not be written back by the page on its way out).
    */
-  constructor({ root, api, assets, beforeReload = () => {}, stopSaving = () => {} }) {
+  /**
+   * `annotations`: what the Correction log's rows do in the page:
+   * `{ loaded(source, cellId), select(source, cellId, locationId), load(source, cellId),
+   * viking(source), openInViking(source, cellId, locationId), volumeName(source) }`.
+   */
+  constructor({ root, api, assets, beforeReload = () => {}, stopSaving = () => {}, annotations = null }) {
     this.root = root;
     this.api = api;
     this.assets = assets;
     this.beforeReload = beforeReload;
     this.stopSaving = stopSaving;
+    this.annotations = annotations;
     this.built = false;
   }
 
   /** Called when the tab is shown: every card is read again. */
   async show() {
     if (!this.built) this._build();
-    await Promise.all([this._refreshBuild(), this._refreshStorage(), this._refreshServer()]);
+    await Promise.all([this._refreshBuild(), this._refreshStorage(), this._refreshLog(),
+      this._refreshServer()]);
   }
 
   _build() {
@@ -293,8 +380,154 @@ export class SettingsPanel {
       el('div', { class: 'row settings-actions' }, [this.resetButton]),
     ]));
 
+    this._buildLog();
+
     this.serverCard = el('section', { class: 'card settings-server' });
     this.root.append(this.serverCard);
+  }
+
+  _buildLog() {
+    const saved = parseRatio(browserStore('localStorage')?.getItem(RATIO_KEY) ?? '');
+    this.ratio = saved ?? RATIO_LIMITS.fallback;
+    this.ratioInput = el('input', {
+      id: 'correction-log-ratio', type: 'number', inputmode: 'decimal', step: '0.5',
+      min: RATIO_LIMITS.min, max: RATIO_LIMITS.max, value: this.ratio, class: 'settings-ratio',
+      'aria-describedby': 'correction-log-ratio-help',
+      onchange: () => this._ratioChanged(),
+      onkeydown: (event) => { if (event.key === 'Enter') this._ratioChanged(); },
+    });
+    this.logStatus = el('p', { class: 'settings-text muted', role: 'status' });
+    this.logBody = el('div', { class: 'settings-log' });
+    this.root.append(el('section', { class: 'card settings-wide', id: 'correction-log' }, [
+      el('h3', { text: 'Correction log' }),
+      el('p', { class: 'settings-text', text: 'Annotations Viking’s section correction (Curve fit, or Field + fit) '
+        + 'moved toward a much wider annotation linked to them, in the cells loaded on this server that you may see. '
+        + 'Viking’s curve fit takes a soma’s or a large outline’s center as a point of the process, so a thin process '
+        + 'leaving it is pulled about halfway to that center: “of the way” near 0.5 is that bug. '
+        + 'A row selects its annotation in the 3D view; ↗ shows it in Viking.' }),
+      el('div', { class: 'row settings-actions' }, [
+        el('label', { for: 'correction-log-ratio', text: 'Wider by at least' }),
+        this.ratioInput,
+        el('span', { class: 'settings-unit', text: '×' }),
+        el('button', { type: 'button', text: 'Refresh', onclick: () => this._refreshLog() }),
+      ]),
+      el('p', { class: 'settings-text muted', id: 'correction-log-ratio-help', text: 'This ratio sets only what this '
+        + 'log lists. It does not change Viking’s correction: the corrections service does not take one yet. '
+        + `Default ${RATIO_LIMITS.fallback}×; kept in this browser.` }),
+      this.logStatus,
+      this.logBody,
+    ]));
+  }
+
+  _ratioChanged() {
+    const limits = this.limits || RATIO_LIMITS;
+    const value = parseRatio(this.ratioInput.value, limits);
+    if (value == null) {
+      // A number box empties itself of text it cannot read, so there is nothing to quote.
+      this.logStatus.textContent = `Not a number: type a ratio from ${limits.min}× to ${limits.max}×; `
+        + `the log stays at ${formatRatio(this.ratio)}.`;
+      this.ratioInput.value = this.ratio;
+      return;
+    }
+    this.ratio = value;
+    this.ratioInput.value = value;
+    try { browserStore('localStorage')?.setItem(RATIO_KEY, String(value)); } catch { /* not kept: fine */ }
+    this._refreshLog();
+  }
+
+  async _refreshLog() {
+    if (!this.logBody) return;
+    let log;
+    try {
+      log = await this.api.correctionLog(this.ratio);
+    } catch (error) {
+      this.logStatus.textContent = `No answer: ${error.message}`;
+      return;
+    }
+    this.limits = { min: log.min_ratio, max: log.max_ratio };
+    const page = this.annotations || {};
+    const view = correctionLogView(log, { volumeName: page.volumeName || ((s) => s) });
+    const pulled = view.checked.reduce((sum, c) => sum + c.rows.length, 0);
+    this.logStatus.textContent = view.checked.length
+      ? `${pulled} pull${pulled === 1 ? '' : 's'} toward an annotation ${formatRatio(view.ratio)} as wide or wider, `
+        + `in ${view.checked.length} loaded cell${view.checked.length === 1 ? '' : 's'} with a curve fit.`
+      : 'No cell loaded on this server has a curve-fit correction (Curve fit, or Field + fit).';
+    const blocks = [];
+    if (view.checked.length) {
+      const head = el('tr', {}, ['Volume', 'Cell', 'Mode', 'Service', 'Location', 'Z', 'r µm', 'Moved µm',
+        'Toward', 'Its r µm', 'Ratio', 'Of the way', 'Moved with', ''].map((t) => el('th', { text: t })));
+      const body = el('tbody');
+      for (const cell of view.checked) {
+        const where = [el('td', { text: cell.volume }), el('td', { text: `c${cell.cellId}` }),
+          el('td', { text: cell.mode, title: `Copy ${cell.copy}` }),
+          el('td', { class: 'num', text: cell.service || '—', title: 'The corrections service’s version' })];
+        if (!cell.rows.length) {
+          body.append(el('tr', { class: 'settings-log-none' }, [...where,
+            el('td', { colspan: 10, class: 'muted', text: cell.summary })]));
+          continue;
+        }
+        cell.rows.forEach((row, i) => {
+          body.append(el('tr', { title: row.title, 'data-location': row.locationId },
+            [...(i === 0 ? where : where.map(() => el('td'))),
+              el('td', {}, [this._idButton(cell, row.locationId)]),
+              el('td', { class: 'num', text: row.z }),
+              el('td', { class: 'num', text: row.r }),
+              el('td', { class: 'num', text: row.move }),
+              el('td', {}, [this._idButton(cell, row.neighborId)]),
+              el('td', { class: 'num', text: row.neighborR }),
+              el('td', { class: 'num', text: row.ratio }),
+              el('td', { class: 'num', text: row.frac }),
+              el('td', {}, row.movedWith.length ? row.movedWith.map((id) => this._idButton(cell, id)) : [el('span', { class: 'muted', text: '—' })]),
+              el('td', {}, [this._vikingButton(cell, row.locationId)])]));
+        });
+        body.append(el('tr', { class: 'settings-log-sum' }, [el('td', { colspan: 14, class: 'muted', text: cell.summary })]));
+      }
+      blocks.push(el('div', { class: 'settings-scroll' }, [
+        el('table', { class: 'settings-table settings-log-table' }, [el('thead', {}, [head]), body])]));
+    }
+    if (view.unchecked.length) {
+      blocks.push(el('p', { class: 'settings-text muted', text: 'Not checked: ' + view.unchecked.map((c) =>
+        `c${c.cellId} (${c.volume}, ${c.mode}): ${c.note}`).join('; ') + '.' }));
+    }
+    this.logBody.replaceChildren(...blocks);
+  }
+
+  /** A Location ID that selects its annotation, or offers to load its cell when this tab has not. */
+  _idButton(cell, locationId) {
+    const page = this.annotations;
+    const loaded = page?.loaded?.(cell.source, cell.cellId);
+    const button = el('button', {
+      type: 'button', class: 'settings-id', text: String(locationId),
+      title: loaded
+        ? `Select ${locationId}, an annotation of c${cell.cellId} in ${cell.volume}, in the 3D view`
+        : `c${cell.cellId} (${cell.volume}) is not loaded in this tab: put it in the Structure ID box to load it`,
+      onclick: async () => {
+        if (!page) return;
+        if (!page.loaded(cell.source, cell.cellId)) {
+          page.load(cell.source, cell.cellId);
+          return;
+        }
+        const ok = await page.select(cell.source, cell.cellId, locationId);
+        if (!ok) this.logStatus.textContent = `c${cell.cellId} (${cell.volume}) has no annotation ${locationId} in this tab’s copy.`;
+      },
+    });
+    button.dataset.cell = String(cell.cellId);
+    button.dataset.source = cell.source;
+    return button;
+  }
+
+  /** Show in Viking, for a volume Viking serves. */
+  _vikingButton(cell, locationId) {
+    const page = this.annotations;
+    if (!page?.viking?.(cell.source)) return el('span');
+    const button = el('button', {
+      type: 'button', class: 'settings-viking', text: '↗',
+      title: `Show in Viking: annotation ${locationId} of c${cell.cellId}, in ${cell.volume} `
+        + '(the first open of a session may ask which Viking)',
+      'aria-label': `Show annotation ${locationId} in Viking`,
+      onclick: () => page.openInViking(cell.source, cell.cellId, locationId),
+    });
+    return button;
   }
 
   /** Whether the last reload was one this tab asked for, with a note to show. */

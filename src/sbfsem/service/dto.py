@@ -82,6 +82,9 @@ class SectionCorrectionDTO(BaseModel):
     built_utc: datetime | None = None
     annotation_watermark: datetime | None = None
     service: str | None = None
+    #: The corrections service's version the answer was keyed on (``curvefit``
+    #: and ``all``; ``""`` when the service did not say).
+    service_version: str | None = None
     cached: bool = False
     #: Annotations sampled (the cell's and its child structures'), sections
     #: they are on, those on a published section, those the field supports
@@ -926,6 +929,70 @@ class ShiftSummaryDTO(BaseModel):
     pairs: dict[str, ShiftPairStatsDTO]
     links: ShiftLinksDTO
     coherent_sections: list[CoherentSectionDTO] = Field(default_factory=list)
+
+
+class CorrectionPullDTO(BaseModel):
+    """One annotation the section correction pulled toward a much wider linked one.
+
+    See :mod:`sbfsem.analysis.correction_checks`; lengths in um, positions
+    before the correction.  ``ratio`` is ``None`` for a zero-width annotation.
+    ``frac`` is how far along the line to the neighbor the move took it
+    (about 0.5 is Viking's curve-fit bug).
+    """
+
+    location_id: int
+    z: int
+    r_um: float
+    dx_um: float
+    dy_um: float
+    move_um: float
+    neighbor_id: int
+    neighbor_r_um: float
+    ratio: float | None = None
+    distance_um: float
+    frac: float
+    cos: float
+    #: Chain neighbors that moved the same way by about as much (Location IDs).
+    moved_with: list[int] = Field(default_factory=list)
+
+
+class CorrectionLogCellDTO(BaseModel):
+    """One loaded copy of a cell in the correction log.
+
+    ``checked`` is false for a copy the log does not test: loaded without the
+    curve fit (``off``, ``neighbor``) or whose correction was not applied
+    (``note`` says why).  ``n_next_to_wider`` counts the moved annotations
+    with a linked one at least ``ratio`` times as wide; ``pulls`` are those the
+    correction moved toward it.
+    """
+
+    source: str
+    neuron_id: int
+    copy_tag: str
+    mode: str
+    checked: bool = False
+    note: str = ""
+    service_version: str | None = None
+    stos_group: str | None = None
+    n_annotations: int = 0
+    n_moved: int = 0
+    n_next_to_wider: int = 0
+    pulls: list[CorrectionPullDTO] = Field(default_factory=list)
+
+
+class CorrectionLogDTO(BaseModel):
+    """``GET /api/correction-log``: every loaded cell the viewer may see, and its pulls.
+
+    ``ratio`` is the one asked for; it sets this log's test only
+    (``ratio_sent_to_viking`` false) until the corrections service takes it.
+    """
+
+    ratio: float
+    default_ratio: float
+    min_ratio: float
+    max_ratio: float
+    ratio_sent_to_viking: bool = False
+    cells: list[CorrectionLogCellDTO] = Field(default_factory=list)
 
 
 class NetworkDTO(BaseModel):
