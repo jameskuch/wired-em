@@ -20,6 +20,7 @@ const {
   RATIO_KEY, RATIO_LIMITS, parseRatio, formatRatio, correctionLogView,
   savedRatio, pullTitle, cellPullsView, PULLS_HELP,
   EXPERT_RENDER_KEY, EXPERT_RENDER_HELP, expertRender, setExpertRender,
+  STALE_RELOAD_KEY, fromBrowserCache, staleStart,
 } = await load('settings.js');
 
 const cases = [];
@@ -106,6 +107,28 @@ test('the build check says same, differs (what to do) or unknown', () => {
   assert.match(stale.text, /clear cached files/);
   assert.equal(buildCheck('x', null).state, 'unknown');
   assert.equal(buildCheck('', server).state, 'unknown');
+});
+
+test('a page shown from the browser\'s copy, of a build the server no longer serves, reloads once', () => {
+  // 2026-10-22: a restored tab ran 2.27's code the day after 2.28.0 shipped, and never offered a reload.
+  const server = { version: '2.30.0', assets: '2.30.0-e7fabe41297f', instance: 'b' };
+  const old = '2.27.0-1234abcd5678';
+  assert.equal(staleStart({ page: old, server, fromCache: true }), 'reload');
+  assert.equal(staleStart({ page: old, server, fromCache: true, tried: '2.29.0-71214eb7b968' }), 'reload',
+    'reloaded for an earlier build: this one is new');
+  assert.equal(staleStart({ page: old, server, fromCache: true, tried: server.assets }), 'banner',
+    'the reload came back old too: say so, never reload again');
+  assert.equal(staleStart({ page: old, server, fromCache: false }), null,
+    'a page the server just sent (a dev server whose files changed, a deploy installing)');
+  assert.equal(staleStart({ page: server.assets, server, fromCache: true }), null);
+  assert.equal(staleStart({ page: '', server, fromCache: true }), null);
+  assert.equal(staleStart({ page: old, server: null, fromCache: true }), null);
+  assert.equal(fromBrowserCache({ type: 'navigate', transferSize: 0 }), true, 'a restored tab: no bytes came');
+  assert.equal(fromBrowserCache({ type: 'back_forward', transferSize: 812 }), true);
+  assert.equal(fromBrowserCache({ type: 'navigate', transferSize: 31544 }), false);
+  assert.equal(fromBrowserCache({ type: 'reload', transferSize: 31544 }), false);
+  assert.equal(fromBrowserCache(undefined), false);
+  assert.equal(STALE_RELOAD_KEY, 'sbfsem:stale-reload');
 });
 
 test('sizes and durations read in the units people use', () => {

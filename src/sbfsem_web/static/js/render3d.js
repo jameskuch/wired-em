@@ -596,13 +596,25 @@ export class Renderer3D {
     if (!this.framed && !this.bounds.isEmpty()) this.resetView();
   }
 
-  _updateOrtho() {
+  /**
+   * The orthographic frustum, sized to the shown cells' bounds.  `keepScale`
+   * (a cell shown, hidden, loaded or let go) keeps the microns per pixel of an
+   * orthographic view on screen by moving its zoom with the size: the view used
+   * to follow the bounds, so hiding the large one of two cells zoomed in 8x about
+   * the pair's center and threw the other off screen, and showing it again zoomed
+   * back out (c943 beside c21768: 0.318 -> 0.040 um a pixel, 2026-10-22).  A
+   * perspective view keeps following them, so turning Orthographic on frames.
+   */
+  _updateOrtho({ keepScale = false } = {}) {
     const { clientWidth: w, clientHeight: h } = this.container;
     if (!w || !h) return;
     const size = this.bounds.isEmpty()
       ? 10
       : this.bounds.getSize(new THREE.Vector3()).length() * 0.6;
     const aspect = w / h;
+    if (keepScale && this.camera === this.orthographic && this.orthographic.top > 0) {
+      this.orthographic.zoom *= size / this.orthographic.top;
+    }
     this.orthographic.left = -size * aspect;
     this.orthographic.right = size * aspect;
     this.orthographic.top = size;
@@ -2748,7 +2760,7 @@ export class Renderer3D {
     this.axes.scale.set(scale, scale, this.flipZ ? -scale : scale);
     const min = this.bounds.min;
     this.axes.position.set(min.x, min.y, min.z);
-    this._updateOrtho();
+    this._updateOrtho({ keepScale: true });
   }
 
   /**
@@ -2823,6 +2835,9 @@ export class Renderer3D {
     this._spin.pitch = 0;
     cam.up.copy(UP);
     this._syncControlsUp();
+    // And the orthographic zoom: a wheel zoom outlived Reset view there (10 steps in,
+    // 0.034 um a pixel before and after it, where framing is 0.318; 2026-10-22).
+    this.orthographic.zoom = 1;
     this._setPlanes(cam, Math.max(distance / 2000, 1e-4), distance * 8 + radius * 20);
     cam.updateProjectionMatrix();
     this._updateOrtho();

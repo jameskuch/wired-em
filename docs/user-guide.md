@@ -191,7 +191,11 @@ each one.
 
 The bottom of the 3D view is a **fixed toolbar of view actions** — Axes,
 View cube, Orthographic, Undo/Redo, Reset view, the named viewpoints, Snapshot
-and Video — that never rearranges. Everything else lives in two expandable
+and Video — that never rearranges. In **Orthographic**, showing or hiding a cell
+keeps the scale and where everything else is drawn (since 2.30.1: the scale used to
+follow the shown cells' extent, so hiding the larger of two cells zoomed in 8x about
+the pair and threw the other off screen), and **Reset view** takes back a zoom
+there as well (it used to keep it). Everything else lives in two expandable
 panels opened from its left edge:
 
 - **Render options** — opened by the ▲ arrow next to the technique picker.
@@ -2650,6 +2654,17 @@ and the panel settings come back either way.
 A tab you cleared (*Clear all cells*, or the last cell removed) comes back
 empty: no banner, and nobody else's cells.
 
+**After a new version is deployed**, an open page shows a banner within 20 s
+(*A new version … has been deployed*) with **Reload now**, and the reload restores
+your session without asking. A page the browser showed from its own copy (a tab it
+reopened at start-up, or Back) used to run that copy's older code with no banner at
+all: the restored tab of 2026-10-22 had no GraphApp the day after it shipped. Since
+2.30.1 such a page asks the server which version it serves and, when it is a newer
+one, reloads itself once before drawing anything; if the reload still comes back old
+(a cache between you and the server), the banner says so, and **Clear cached files and reload**
+on the Settings tab is the way out. The Settings tab also shows the page's build
+beside the server's.
+
 With no saved session in the browser at all, as on a first visit, the banner
 lists the cells already open on the server instead, which anyone using it may
 have loaded: **Show them** or **Start empty**. They are never brought in without
@@ -2742,7 +2757,10 @@ yellow one, as a triple click does in the 3D render) and a z-slice's. The right-
 were; **Open in Viking** for an annotation; **Deselect**. The 3D render's own right
 click has **Open in GraphApp**, which goes to GraphApp with that cell alone; any cell
 can be shown again from the list while there, and **3D render** gives back the
-visibility from before. The GraphApp button itself keeps what is shown.
+visibility from before. The GraphApp button itself keeps what is shown. When the view
+showed only the other cells, so that the cell alone would be off screen, Open in
+GraphApp frames it as Reset view would (since 2.30.1; Hold in Display keeps the view
+as it is); a view that shows any of it is left where it is.
 
 The differences from MATLAB's GraphApp are in DEVIATIONS.md (5.16).
 

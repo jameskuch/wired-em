@@ -985,6 +985,55 @@ def graphapp(c: Chrome, r: Report, ctx):
     r.check('and 3D render gives back what was shown before', shown() == ([[ctx.cell, True], [ctx.second, True]]),
             shown())
 
+    # Orthographic: a cell shown or hidden keeps the scale and where the others are; it used to
+    # follow the shown cells' bounds, so hiding one zoomed in about the pair and threw the other
+    # off screen (c943 beside c21768: 8x, 2026-10-22).  Reset view takes a wheel zoom back.
+    view = f"""(() => {{ const R = {R}; const h = R.container.clientHeight;
+        const b = new (R.bounds.constructor)().setFromObject(R.meshes.get({json.dumps(first)}));
+        const p = b.getCenter(R.camera.position.clone()).project(R.camera);
+        return {{ umpp: (R.camera.top - R.camera.bottom) / R.camera.zoom / h,
+          at: [Math.round((p.x + 1) / 2 * R.container.clientWidth), Math.round((1 - p.y) / 2 * h)] }}; }})()"""
+    js(c, f'{R}.setOrthographic(true); {R}.resetView()')
+    c.settle(2)
+    framed = js(c, view)
+    js(c, f"{row(second, '.vis')}.click()")
+    c.settle(2)
+    alone = js(c, view)
+    js(c, f"{row(second, '.vis')}.click()")
+    c.settle(2)
+    r.check('orthographic: hiding a cell keeps the scale and where the other is drawn',
+            abs(alone['umpp'] / framed['umpp'] - 1) < 1e-6 and alone['at'] == framed['at'], (framed, alone))
+    js(c, f'(() => {{ for (let i = 0; i < 10; i += 1) {R}._zoom(0.8); {R}.resetView(); }})()')
+    c.settle(2)
+    reset = js(c, view)
+    r.check('orthographic: Reset view takes a zoom back', abs(reset['umpp'] / framed['umpp'] - 1) < 1e-6,
+            (framed, reset))
+    js(c, f'{R}.setOrthographic(false); {R}.resetView()')
+    c.settle(30)
+
+    # Open in GraphApp on a cell the view does not show frames it, as Reset view would; one in view stays.
+    camera = f'(() => {{ const s = {R}.cameraState(); return [...s.position, ...s.target, s.zoom]; }})()'
+    before = js(c, camera)
+    r.check('Open in GraphApp on a cell in view', menu_item(c, second, 'Open in GraphApp'))
+    c.settle(2)
+    after = js(c, camera)
+    # The controls' own update moves it by 1e-13 um; a framing moves it by the cell's size.
+    r.check('keeps the camera where it was', max(abs(a - b) for a, b in zip(after, before, strict=True)) < 1e-6,
+            (before, after))
+    js(c, "document.querySelector('.tab[data-view=\"render\"]:not([data-look])').click()")
+    c.settle(2)
+    js(c, f"""(() => {{ const R = {R}; R.camera.position.set(9e5, 9e5, 9e5);
+        R.controls.target.set(9e5 + 1, 9e5, 9e5); R.controls.update(); }})()""")
+    c.settle(1)
+    blind = js(c, f'{R}.seesAnything()')
+    r.check('Open in GraphApp on a cell the view does not show', menu_item(c, second, 'Open in GraphApp'))
+    c.settle(2)
+    r.check('frames it: GraphApp shows the cell, not an empty view',
+            blind is False and js(c, f'{R}.look') == 'graph' and js(c, f'{R}.seesAnything()') is True,
+            (blind, js(c, f'{R}.seesAnything()')))
+    js(c, "document.querySelector('.tab[data-view=\"render\"]:not([data-look])').click()")
+    c.settle(2)
+
     # The switch itself: a flip of two layers.
     took = js(c, f"""(() => {{ const R = {R}; const g = document.querySelector('.tab[data-look="graph"]');
         const d = document.querySelector('.tab[data-view="render"]:not([data-look])'); const t = [];

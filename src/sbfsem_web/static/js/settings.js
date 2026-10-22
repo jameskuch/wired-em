@@ -81,6 +81,11 @@ export const STORAGE_GROUPS = [
   },
   { id: 'tab', label: 'This tab’s id', help: 'Names the tab’s own saved session; kept', keys: ['sbfsem.tab'], keep: true },
   { id: 'note', label: 'Settings note', help: 'What this tab did just before its last reload; kept', keys: ['sbfsem.settings.note'], keep: true },
+  {
+    id: 'stale-reload', label: 'Old page reload',
+    help: 'The server build this tab reloaded itself for, after the browser showed an older page from its cache, so it reloads once and not again; kept',
+    keys: ['sbfsem:stale-reload'], keep: true,
+  },
 ];
 
 const OTHER = { id: 'other', label: 'Other', help: 'Saved by this site under names this list does not know' };
@@ -170,6 +175,41 @@ export function buildCheck(page, server) {
     text: `This page was loaded as ${page}, and the server now serves ${server.assets}. `
       + 'Reload; if it stays the old build, clear cached files below.',
   };
+}
+
+/** Where this browser keeps which build a stale page reloaded itself for (sessionStorage). */
+export const STALE_RELOAD_KEY = 'sbfsem:stale-reload';
+
+/**
+ * Whether the page was shown from the browser's own copy rather than asked of the
+ * server: a tab the browser restored, or Back.  `nav` is the page's
+ * PerformanceNavigationTiming.  A copy is used as it is, even one the server
+ * marked to be checked first (`no-cache`), and nothing came over the network
+ * for it: no bytes.
+ */
+export function fromBrowserCache(nav) {
+  if (!nav) return false;
+  return nav.transferSize === 0 || nav.type === 'back_forward';
+}
+
+/**
+ * What a page does on starting when it may be a build the server no longer
+ * serves (2026-10-22).  `page`: its own build (pageAssets); `server`: the
+ * server's /api/build answer; `fromCache`: fromBrowserCache; `tried`: the
+ * server build it already reloaded itself for, in this tab.
+ *
+ * A browser that shows a page from its own copy runs that copy's code, and the
+ * redeploy watch only compares the server's answers with each other, so such a
+ * page never offered a reload: the GraphApp tab of 2.28.0 was missing from a
+ * restored tab the day after.  It reloads itself once ('reload'), and if that
+ * still comes back old (a cache between it and the server) says so ('banner').
+ * A page the server just sent is left alone (null): its build can differ from
+ * /api/build's only on a dev server whose files changed after it started, or
+ * while a deploy is installing, which the watch then sees as a restart.
+ */
+export function staleStart({ page, server, fromCache, tried = null }) {
+  if (!page || !server?.assets || page === server.assets || !fromCache) return null;
+  return tried === server.assets ? 'banner' : 'reload';
 }
 
 export function formatBytes(n) {

@@ -56,7 +56,9 @@ import { setGradientLibrary, colormapSample, colormapNames } from './colormaps.j
 import { ViewRecorder, supportedFormats } from './video.js';
 import { NetworkView, SYNAPSE_COLORS } from './network.js';
 import { ConnectivityView } from './connectivity.js';
-import { SettingsPanel, pageAssets, savedRatio, expertRender } from './settings.js';
+import {
+  SettingsPanel, pageAssets, savedRatio, expertRender, STALE_RELOAD_KEY, fromBrowserCache, staleStart,
+} from './settings.js';
 import { fillLinkedNeuronsCard, sortableHead, sortRows } from './linkedneurons.js';
 import { stratificationChart, barChart, STRATA_TICK_PCT } from './charts.js';
 import {
@@ -577,6 +579,9 @@ function clearRenderError(record) {
 
 // -- boot ------------------------------------------------------------------
 async function boot() {
+  // A page the browser showed from its own copy, of a build the server has since
+  // replaced, reloads itself before anything is drawn.
+  if (await reloadIfStale()) return;
   // The render controls are built first, from the schema; the browser's
   // startup default (or DEFAULT_RENDER) is the one source of truth for what a
   // fresh browser starts with (a restored session overwrites this below).
@@ -1152,6 +1157,43 @@ async function restoreSession(saved) {
 // seconds at a time.
 const BUILD_POLL_MS = 20000;
 let knownBuild = null;
+// The page reloaded itself for the server's build and still came back old (reloadIfStale).
+let staleAfterReload = false;
+
+/**
+ * A page the browser showed from its own copy (a tab it restored, Back) runs
+ * that copy's code, and the watch below compares the server's answers only with
+ * each other, so a page that STARTED old never offered a reload: a restored tab
+ * had no GraphApp the day after 2.28.0 (2026-10-22).  Such a page asks the
+ * server which build it serves and reloads itself once when it is another
+ * (settings.staleStart); if the reload comes back old too, the banner says so.
+ * A page the server just sent asks nothing.  True while it is reloading.
+ */
+async function reloadIfStale() {
+  if (!fromBrowserCache(performance.getEntriesByType?.('navigation')?.[0])) return false;
+  let server;
+  try {
+    server = await api.build();
+  } catch {
+    return false;     // the watch takes over once the server answers
+  }
+  let tried = null;
+  try { tried = sessionStorage.getItem(STALE_RELOAD_KEY); } catch { /* blocked */ }
+  const what = staleStart({ page: pageAssets(import.meta.url), server, fromCache: true, tried });
+  if (what === 'reload') {
+    try {
+      sessionStorage.setItem(STALE_RELOAD_KEY, server.assets);
+    } catch {
+      // Nowhere to note the reload, so nothing would stop a second: say it instead.
+      staleAfterReload = true;
+      return false;
+    }
+    window.location.reload();
+    return true;
+  }
+  staleAfterReload = what === 'banner';
+  return false;
+}
 
 async function watchForRedeploy() {
   // A first answer that fails (the server mid-restart, a dropped link) must not
@@ -1160,6 +1202,13 @@ async function watchForRedeploy() {
   try {
     knownBuild = await api.build();
     updateMethodControls();
+    const page = pageAssets(import.meta.url);
+    if (staleAfterReload && page && page !== knownBuild.assets) {
+      $('update-text').textContent = `This page is an older version (${page}) than the server's `
+        + `(${knownBuild.assets}), and reloading did not replace it. Reload; if it stays, clear cached `
+        + 'files in Settings.';
+      $('update-banner').hidden = false;
+    }
   } catch (error) {
     console.warn('build check unavailable:', error);
   }
@@ -7532,6 +7581,9 @@ async function openInGraphApp(record) {
   selectNeuron(record.key);
   if (state.view !== 'render') activateView('render');
   await setGraphLook(true, { isolateKey: record.key });
+  // The cell alone in a view that held only the others shows nothing: framed, as Reset
+  // view would, unless Held (Temporal c5885 beside c16137, 2026-10-22).
+  if (!display?.holdLimits && renderer.seesAnything() === false) renderer.resetView();
 }
 
 /** The tab row: "3D render" or "GraphApp" lit by the look, the other tabs by the view. */
