@@ -306,8 +306,8 @@ Type a box in microns and press **Crop**: the scene is clipped to it live
 (six clipping planes, so it is instant and reversible), which is how you cut
 a slab out of a dense field of processes. **Read** fills the boxes from the
 current scene, **Clear** removes the crop, and **Hold** stops a cell loaded
-into an empty viewer from re-framing the camera you have set (the crop itself
-stays until Clear either way). A box left blank in **Crop** is the scene's own
+or built from re-framing the camera you have set, a first load's framing and the
+framing of a view that shows no cell alike (the crop itself stays until Clear either way). A box left blank in **Crop** is the scene's own
 extent on that side, and a box left blank in **Set view** keeps the current
 azimuth, elevation or distance.
 
@@ -1618,6 +1618,13 @@ its surface) and frames the whole scene when it ends. You can turn, pan and zoom
 the cells come in; once you have, the end of the load leaves the view where you put it, and
 **Reset view** (or `m`) frames everything.
 
+Since 2.26.1 any surface that lands in a view showing no cell frames it too, as Reset view
+would: a load into a list that already holds a row, a fix applied to a cell whose first build
+failed, a restored view that looks at none of its cells. Before, only a load into an empty list
+framed, and a cell could be built, in the scene and out of sight until Reset view (Temporal
+c162392, 2026-10-21). A view that shows any part of a cell (its surface, skeleton, rings or
+dots) is never moved, nor one Held in Display.
+
 **Stop**, at the right of the strip, ends the load at once: no further cells
 start, and every cell of the load that is not drawn yet — still fetching its
 annotations, or queued or building on the server — is dropped from the list
@@ -2182,7 +2189,7 @@ The MATLAB `RenderApp` keyboard navigation is preserved alongside it:
 | `g` | with an annotation selected: move it by hand ([Moving an annotation by hand](#moving-an-annotation-by-hand)); in move mode `←` `→` move it, `1`–`7` choose the axis, `Enter` applies, `Esc` is done |
 | `q` `e` | roll about the view axis, 15° (shift, or `Q` `E`: 90°) |
 | `z` / `Z` | zoom in / out |
-| `m` | reset the view |
+| `m` | reset the view (since 2.26.1 wherever the focus is, not only after a click in the render; not while typing in a box or with a dropdown focused) |
 | `[` `]` `PageUp` `PageDown` `Home` `End` | step the Position shift slice, while it is on |
 | `f` | full screen on or off (see below) |
 | `c` | copy the picked point as “X Y Z downsample” for Viking's Goto Location |

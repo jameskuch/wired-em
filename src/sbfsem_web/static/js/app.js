@@ -1099,6 +1099,9 @@ async function restoreSession(saved) {
     if (viewUntouched(placed ?? framing?.camera)) {
       if (!renderer.restoreCamera(saved.camera)) renderer.resetView();
     }
+    // A saved view near the cells can still look at none of them (one saved
+    // while its only cell had failed to build): framed, unless Held.
+    if (!display?.holdLimits && renderer.seesAnything() === false) renderer.resetView();
     // The 2D box was set from the saved view when the restore began; the
     // camera is decided now, so the box can be judged against it.
     display?.syncTwoD();
@@ -2909,6 +2912,20 @@ async function addToScene(record, {
     // After refreshExtras, so the freshly built synapse and skeleton objects
     // inherit the neuron's visibility rather than defaulting to shown.
     renderer.setStyle(record.key, { visible: record.visible });
+    // A surface landing in a view that shows nothing of any cell frames it, as
+    // Reset view would: a fresh page's camera at the origin, a load into a list
+    // that already held a row (only a first load framed), a cell whose first build
+    // came back empty and was then built (Temporal c162392, 2026-10-21: built, in
+    // the scene, out of sight until Reset view).  A view that shows anything stays
+    // where it is, so does one Held (Display), and a restore decides its own.
+    if (mesh.n_faces && record.visible && !restoring && !display?.holdLimits
+        && renderer.seesAnything() === false) {
+      renderer.resetView();
+      if (framing) {
+        framing.done = true;
+        framing.camera = renderer.cameraState();
+      }
+    }
     // Directly, not via requestAnimationFrame: rAF never fires in a hidden
     // document, so a neuron loaded in a background tab would never be framed.
     // Suppressed when re-rendering an existing neuron or restoring a session,
@@ -6396,6 +6413,18 @@ function exportOptions(record) {
 
 document.addEventListener('pointerdown', (event) => {
   if (!event.target.closest('#ctx-menu')) hideContextMenu();
+});
+// `m` resets the view wherever the focus is, not only once the canvas has been
+// clicked (it said nothing after a load, with the focus on Load: 2026-10-21).  Not
+// from a box being typed in, a dropdown (which takes letters to pick an entry), or
+// with a modifier; the canvas takes its own keys.
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'm' || event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
+  if (state.view !== 'render' || !renderer || event.defaultPrevented) return;
+  const target = event.target;
+  if (target === renderer.webgl?.domElement || isTypingTarget(target)) return;
+  if (target?.closest?.('select, [role="listbox"], [role="combobox"], [role="menu"], dialog')) return;
+  renderer.handleKey(event);
 });
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;

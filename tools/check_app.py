@@ -34,6 +34,9 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
 * ``sheets`` -- Undo of a context sheet reaches the session stored in the browser.
 * ``volume`` -- switching volume takes the first volume's boundary sheets off the scene.
 * ``hold`` -- Hold in the Display panel keeps a load from reframing the scene.
+* ``blind`` -- a surface landing in a view that shows no cell frames it (a load into a list that
+  already held a row did not, 2026-10-21); a view that shows a cell, or one Held, stays; ``m``
+  resets the view with the focus on the Load button, not only after a click in the canvas.
 * ``orbit`` -- a plain drag turns the view while cells come in: during a Restore of a session saved in
   Orthographic view (a fresh page's camera sat on its own target at the origin until the last cell was in,
   so the cells zoomed and panned but would not turn, 2026-10-20) and during a first load; the end of
@@ -715,6 +718,74 @@ def hold(c: Chrome, r: Report, ctx):
     c.wait_for('window.sbfsem.renderer.meshes.size === 1', 240)
     c.settle(3)
     r.check('and neither does the cell\'s arrival', not moved(before, camera()), (before, camera()))
+
+
+# -- blind ------------------------------------------------------------------------------------
+
+def blind(c: Chrome, r: Report, ctx):
+    r.start('blind: a surface landing in a view that shows no cell frames it')
+    sees = 'window.sbfsem.renderer.seesAnything()'
+    camera = 'window.sbfsem.renderer.camera.position.toArray()'
+    away = """(() => { const R = window.sbfsem.renderer; R.camera.position.set(9e5, 9e5, 9e5);
+        R.controls.target.set(9e5 + 1, 9e5, 9e5); R.controls.update(); })()"""
+
+    def moved(a, b) -> bool:
+        return max(abs(x - y) for x, y in zip(a, b, strict=True)) > 1e-3
+
+    boot(c, ctx.url)
+    load(c, ctx.cell)
+    c.settle(2)
+    r.check('a first load frames the scene', js(c, sees) is True)
+    js(c, away)
+    c.settle(1)
+    r.check('looking away, the view shows nothing', js(c, sees) is False)
+    second = load(c, ctx.second)
+    c.settle(2)
+    r.check('a load into a list that already held a row frames a view that showed nothing',
+            js(c, sees) is True, js(c, camera))
+
+    # A view that shows a cell stays where it is: the second cell unloaded and loaded again.
+    js(c, f"{row(second, '.unload')}.click()")
+    c.wait_for(f'!{STATE}.neurons.has({json.dumps(second)})', 20)
+    js(c, """(() => { const R = window.sbfsem.renderer;
+        R.camera.position.lerp(R.controls.target, 0.3); R.controls.update(); })()""")
+    c.settle(1)
+    before = js(c, camera)
+    load(c, ctx.second)
+    c.settle(2)
+    r.check('a view that shows a cell is not moved by a load', not moved(before, js(c, camera)),
+            (before, js(c, camera)))
+
+    # Held (Display): a view that shows nothing stays so.
+    js(c, """(() => { document.getElementById('toggle-display').click();
+        const box = document.getElementById('lim-hold'); box.checked = true;
+        box.dispatchEvent(new Event('change', { bubbles: true })); })()""")
+    js(c, f"{row(second, '.unload')}.click()")
+    c.wait_for(f'!{STATE}.neurons.has({json.dumps(second)})', 20)
+    js(c, away)
+    c.settle(1)
+    load(c, ctx.second)
+    c.settle(2)
+    r.check('Hold keeps even a view that shows nothing', js(c, sees) is False)
+    js(c, """(() => { const box = document.getElementById('lim-hold'); box.checked = false;
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+        document.getElementById('toggle-display').click(); })()""")
+    c.settle(1)
+
+    # m, with the focus on the Load button rather than in the canvas, a real key.
+    js(c, "document.querySelector('#load-form button[type=submit]').focus()")
+    c.key('m')
+    c.settle(2)
+    r.check('m resets the view with the focus on Load', js(c, sees) is True)
+    # Not while typing: the ID box takes the letter.
+    js(c, away)
+    js(c, "(() => { const b = document.getElementById('neuron-id'); b.value = ''; b.focus(); })()")
+    c.key('m')
+    c.settle(1)
+    r.check('m typed into the ID box is a letter, not a reset',
+            js(c, sees) is False and js(c, "document.getElementById('neuron-id').value") == 'm',
+            js(c, "document.getElementById('neuron-id').value"))
+    js(c, "document.getElementById('neuron-id').value = ''")
 
 
 # -- orbit ------------------------------------------------------------------------------------
@@ -3221,6 +3292,7 @@ SECTIONS = {
     'notice': notice, 'waiting': waiting, 'draws': draws, 'undo': undo, 'idle': idle,
     'picker': picker, 'save': save, 'analysis': analysis, 'strata': strata, 'twod': twod, 'sheets': sheets, 'volume': volume,
     'hold': hold,
+    'blind': blind,
     'orbit': orbit,
     'keys': keys,
     'viking': viking,

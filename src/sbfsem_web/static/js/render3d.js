@@ -2605,6 +2605,37 @@ export class Renderer3D {
     this._updateOrtho();
   }
 
+  /**
+   * Whether the camera shows any part of a shown cell -- its surface, skeleton,
+   * annotation rings, lines or points -- judged by their boxes against the view
+   * frustum.  Null when the view has no size to judge by (a hidden tab).  A fresh
+   * page's camera sits at the origin, nowhere near a Viking volume's cells; a load
+   * into a list that already held a row did not frame them, and the cell was in the
+   * scene, built and out of sight, until Reset view (Temporal c162392, 2026-10-21).
+   */
+  seesAnything() {
+    const { clientWidth: w, clientHeight: h } = this.container;
+    if (!w || !h) return null;
+    const cam = this.camera;
+    cam.updateMatrixWorld();
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(
+      new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse));
+    const box = new THREE.Box3();
+    for (const map of [this.meshes, this.skeletons, this.discs, this.annoWires, this.lines, this.points]) {
+      for (const object of map.values()) {
+        if (!object.visible) continue;
+        box.setFromObject(object);
+        if (!box.isEmpty() && frustum.intersectsBox(box)) return true;
+      }
+    }
+    return false;
+  }
+
+  /** A key the canvas would take, pressed with the focus elsewhere on the page (`m`). */
+  handleKey(event) {
+    this._key(event);
+  }
+
   resetView() {
     // A view cube turn under way would carry on over the reset.
     this._settleFlight();
