@@ -778,6 +778,23 @@ test('a view moved while the cells came in is told from the one the load put up'
   assert.equal(sameCamera(put, undefined), false);
 });
 
+test('an orthographic view is the same at the same scale, whatever its zoom', () => {
+  // Restore puts a saved Orthographic view up before its cells are in: the frustum is the empty
+  // scene's 10 um, and each cell that lands grows it (89 um for c943 and c21768) with the zoom
+  // following, so the microns on screen stay.  Compared by zoom, that read as a view the person
+  // had moved, and the restore's end left it 8.9x zoomed in (2026-10-22).
+  const put = {
+    position: [111.6, 56.1, 154.3], target: [96.0, 76.5, 139.4], up: [0, 0, 1],
+    zoom: 10 / 88.92, orthographic: true, halfHeightUm: 88.92,
+  };
+  assert.equal(sameCamera(put, { ...put, zoom: 1, halfHeightUm: 88.92 * (1 + 1e-12) }), true);
+  assert.equal(sameCamera(put, { ...put, zoom: 1.1, halfHeightUm: 88.92 / 1.1 }), false, 'a wheel notch');
+  // A state saved before the scale was kept is compared by its zoom, as before.
+  const older = { ...put, halfHeightUm: undefined };
+  assert.equal(sameCamera(older, { ...older }), true);
+  assert.equal(sameCamera(older, { ...put, zoom: 1 }), false);
+});
+
 let failed = 0;
 for (const [name, fn] of cases) {
   try {

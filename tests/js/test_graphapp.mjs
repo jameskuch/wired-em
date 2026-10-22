@@ -60,6 +60,53 @@ test('the color a lone cell takes is told apart from every selection marker', ()
   }
 });
 
+// OKLab (Ottosson 2020): a distance there is how different two colors look.
+const linear = (v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+const oklab = (h) => {
+  const [r, gg, b] = rgb(h).map((v) => linear(v / 255));
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * gg + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * gg + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * gg + 0.6299787005 * b);
+  return [0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s];
+};
+const okDistance = (a, b) => Math.hypot(...oklab(a).map((v, i) => v - oklab(b)[i]));
+
+test('no cell takes a selection marker\'s color: the blue below, the yellow, the red above', () => {
+  // The blue, hue 205, stayed in the palette (third) after it stopped being the first, and the
+  // user still saw the blue marker's color on a cell (2026-10-22): 0.031 from it in OKLab, the
+  // yellow 55 0.045 from the yellow, the red 350 0.088 from the red.  The green the first cell
+  // takes is 0.148 from the nearest, the yellow.
+  const markers = { yellow: '#ffe14d', blue: '#8fd0ff', red: '#ff5c5c' };
+  for (let i = 0; i < g.GRAPH_HUES.length; i += 1) {
+    const c = g.graphColors(i);
+    for (const [name, m] of Object.entries(markers)) {
+      assert.ok(okDistance(c.annotation, m) >= 0.12, `hue ${c.hue} ${c.annotation} vs the ${name} marker`);
+    }
+    assert.ok(!(c.hue >= 180 && c.hue <= 250), `hue ${c.hue} is a blue`);
+  }
+  // render3d.js `_yellowish` and `_reddish`, which turn the markers cyan, pink or orange on a cell
+  // of their own color, read three.js's HSL of linear RGB: none of the palette is either.
+  for (let i = 0; i < g.GRAPH_HUES.length; i += 1) {
+    const [r, gg, b] = rgb(g.graphColors(i).annotation).map((v) => linear(v / 255));
+    const max = Math.max(r, gg, b);
+    const min = Math.min(r, gg, b);
+    const s = (max - min) / (1 - Math.abs(max + min - 1));
+    let h = max === r ? ((gg - b) / (max - min)) % 6 : max === gg ? (b - r) / (max - min) + 2 : (r - gg) / (max - min) + 4;
+    h = ((h * 60 + 360) % 360) / 360;
+    assert.ok(!(s > 0.35 && h > 0.09 && h < 0.2), `hue ${g.GRAPH_HUES[i]} reads as yellow`);
+    assert.ok(!(s > 0.35 && (h < 0.05 || h > 0.93)), `hue ${g.GRAPH_HUES[i]} reads as red`);
+  }
+  // The four cells most often shown together are told apart from each other.
+  for (let i = 0; i < 4; i += 1) {
+    for (let j = 0; j < i; j += 1) {
+      const d = okDistance(g.graphColors(i).annotation, g.graphColors(j).annotation);
+      assert.ok(d >= 0.13, `cells ${j} and ${i}: ${d.toFixed(3)}`);
+    }
+  }
+});
+
 test('unfinished: one link, not terminal, not off-edge; a repeated link counts once', () => {
   const nodes = [
     { id: 1 }, { id: 2 }, { id: 3 }, { id: 4, terminal: true }, { id: 5, off_edge: true }, { id: 6 },

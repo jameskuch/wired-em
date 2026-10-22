@@ -516,6 +516,11 @@ export function paneCountMessage(before, after) {
  * The controls recompute the camera every frame, so positions are compared to a
  * millionth of the camera's distance from its target (half a nanometer at
  * 500 µm), far under the smallest move a hand makes, and never with `==`.
+ * Two orthographic views that both say how many microns they show
+ * (`halfHeightUm`) are compared by that, not by their zoom: the zoom moves with
+ * the frustum as each cell lands (`_updateOrtho`'s keepScale) while the scale on
+ * screen stays, and comparing zooms took every Orthographic restore for a view
+ * the person had moved.
  */
 export function sameCamera(a, b) {
   if (!a || !b) return !a && !b;
@@ -524,11 +529,12 @@ export function sameCamera(a, b) {
     && p.every((v, i) => Math.abs(v - q[i]) <= tol);
   const span = Math.hypot(...a.position.map((v, i) => v - a.target[i]));
   const tol = Math.max(span, 1) * 1e-6;
-  const zoomA = a.zoom ?? 1;
-  const zoomB = b.zoom ?? 1;
+  const scaled = Number.isFinite(a.halfHeightUm) && Number.isFinite(b.halfHeightUm);
+  const scaleA = scaled ? a.halfHeightUm : a.zoom ?? 1;
+  const scaleB = scaled ? b.halfHeightUm : b.zoom ?? 1;
   return near(a.position, b.position, tol) && near(a.target, b.target, tol)
     && near(a.up ?? [0, 0, 1], b.up ?? [0, 0, 1], 1e-6)
-    && Math.abs(zoomA - zoomB) <= Math.max(Math.abs(zoomA), 1) * 1e-6;
+    && Math.abs(scaleA - scaleB) <= Math.max(Math.abs(scaleA), 1) * 1e-6;
 }
 
 // -- a flared status message against the busy tracker --------------------------

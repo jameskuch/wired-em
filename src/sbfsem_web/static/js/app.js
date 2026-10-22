@@ -333,6 +333,8 @@ function historySnapshot() {
       target: r5(snap.camera.target),
       up: r5(snap.camera.up),
       zoom: +snap.camera.zoom.toFixed(5),
+      ...(Number.isFinite(snap.camera.halfHeightUm)
+        ? { halfHeightUm: +snap.camera.halfHeightUm.toFixed(5) } : {}),
     };
   }
   return snap;
@@ -1504,7 +1506,11 @@ function bindEvents() {
   window.addEventListener('beforeunload', () => session.saveNow(state, renderer, uiFlags()));
 
   for (const tab of document.querySelectorAll('.tab')) {
-    tab.addEventListener('click', async () => {
+    tab.addEventListener('click', async (event) => {
+      // A tab clicked with the pointer does not keep the focus: the browser drew its own
+      // ring round it later, at a key press or a return from another window, and only
+      // then (2026-10-22).  Enter or Space (detail 0) keeps it, for the keyboard ring.
+      if (event.detail > 0) tab.blur();
       activateView(tab.dataset.view);
       // "3D render" and "GraphApp" are one view in two looks.
       if (tab.dataset.view === 'render') await setGraphLook(tab.dataset.look === 'graph');

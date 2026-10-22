@@ -195,7 +195,10 @@ and Video — that never rearranges. In **Orthographic**, showing or hiding a ce
 keeps the scale and where everything else is drawn (since 2.30.1: the scale used to
 follow the shown cells' extent, so hiding the larger of two cells zoomed in 8x about
 the pair and threw the other off screen), and **Reset view** takes back a zoom
-there as well (it used to keep it). Everything else lives in two expandable
+there as well (it used to keep it). Restore and Undo put an
+Orthographic view back at the scale it was saved at (since 2.32.1: a Restore came
+back zoomed in by however much the cells' extent outgrew the empty scene's, 8.9x for
+c943 beside c21768). Everything else lives in two expandable
 panels opened from its left edge:
 
 - **Render options** — opened by the ▲ arrow next to the technique picker.
@@ -2741,9 +2744,15 @@ SBFSEM-tools' GraphApp drew a neuron: on black, with no surface, each cell's
 skeleton in a near-white, a dot at every annotation and the annotations' rings
 (each in its own section plane) in a pastel of the same hue. Each cell takes the
 next hue of GraphApp's own palette, and the list's dot shows it; the 3D render's
-colors are left alone. The first hue, the one a lone cell takes, is green, apart
-from the yellow, red and blue of the selection markers (since 2.30.0; it was a blue
-the blue marker could not be told from). The rings are lines, as thin as anything
+colors are left alone. No cell takes a selection marker's color: the palette
+(green, peach, magenta, lavender, pink, mint, violet, lime, then again) has no
+blue, yellow or red, and the markers stay the yellow, red and blue they are
+everywhere else (since 2.32.1; until then a blue, a yellow and a red were among its
+ten, the blue as near the blue marker as two shades of one color, and a cell drawn
+yellow in the 3D render turned GraphApp's yellow marker cyan). The first hue, the
+one a lone cell takes, is green. The two buttons look and behave as every other tab
+does: the accent outline under the pointer, only the look shown filled. The rings
+are lines, as thin as anything
 drawn: one pixel at any zoom, and still one from the side, where each is a short
 line at its section. Switching either way takes a frame: each cell's GraphApp
 drawing is made in the background once its 3D render is drawn, and the 3D render

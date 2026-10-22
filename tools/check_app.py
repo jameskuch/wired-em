@@ -862,6 +862,51 @@ def graphapp(c: Chrome, r: Report, ctx):
             and js(c, "document.querySelector('.tab.active').textContent") == 'GraphApp')
     r.check('on black', js(c, f'{R}.scene.background.getHex()') == 0)
     r.check('the camera is where it was', js(c, f'JSON.stringify({R}.cameraState())') == before)
+
+    # The tabs, the pair's two too, read one way (2026-10-22): the pair's frame took the shown
+    # look's fill, so both of its tabs read as chosen; a clicked tab kept the focus, and the
+    # browser drew its white ring round it at a later key press or return to the window.
+    def tab_box(selector: str) -> list[float]:
+        return js(c, f"""(() => {{ const b = document.querySelector('{selector}').getBoundingClientRect();
+            return [b.left + b.width / 2, b.top + b.height / 2]; }})()""")
+
+    def tab_look(selector: str) -> dict:
+        return js(c, f"""(() => {{ const s = getComputedStyle(document.querySelector('{selector}'));
+            return {{ bg: s.backgroundColor, edge: s.borderTopColor }}; }})()""")
+    graph_tab, render_tab = '.tab[data-look=\"graph\"]', '.tab[data-view=\"render\"]:not([data-look])'
+    js(c, f"document.querySelector('{render_tab}').click()")
+    c.settle(1)
+    x, y = tab_box(graph_tab)
+    c.click(x, y)
+    c.settle(2)
+    r.check('a tab clicked with the mouse lets the focus go', js(c, 'document.activeElement === document.body'),
+            js(c, 'document.activeElement.outerHTML.slice(0, 80)'))
+    clear = 'rgba(0, 0, 0, 0)'
+    pair = js(c, "getComputedStyle(document.querySelector('.tab-pair')).backgroundColor")
+    lit_tab, other = tab_look(graph_tab), tab_look(render_tab)
+    r.check('only the look shown is filled: not its partner, nor the pair\'s frame',
+            lit_tab['bg'] != clear and other['bg'] == clear and pair == clear, (lit_tab, other, pair))
+    x, y = tab_box(render_tab)
+    c.move(x, y)
+    c.settle(2)
+    accent = js(c, "(() => { const p = document.createElement('i'); p.style.color = 'var(--accent)';"
+                   " document.body.append(p); const v = getComputedStyle(p).color; p.remove(); return v; })()")
+    hovered = tab_look(render_tab)['edge']
+    x, y = tab_box('.tab[data-view=\"network\"]')
+    c.move(x, y)
+    c.settle(2)
+    r.check('the pair\'s tab under the pointer takes the accent outline, as every other tab does',
+            hovered == accent and tab_look('.tab[data-view=\"network\"]')['edge'] == accent, (hovered, accent))
+    c.move(x, y + 300)
+    # The markers in GraphApp judge a cell by its GraphApp color: yellow on a cell drawn yellow in
+    # the 3D render, where the 3D render turns it cyan.
+    tints = js(c, f"""(() => {{ const R = {R}; const k = {json.dumps(first)};
+        const m = R._meshPart(k, 'surface').material; const was = m.color.getHex(); m.color.set('#ffe14d');
+        const graph = R._tint('primary', k).getHexString(); R.setLook('render');
+        const render = R._tint('primary', k).getHexString(); R.setLook('graph'); m.color.setHex(was);
+        return {{ graph, render }}; }})()""")
+    r.check('GraphApp keeps the yellow marker on a cell yellow only in the 3D render',
+            tints == {'graph': 'ffe14d', 'render': '38e1ff'}, tints)
     r.check('GraphApp\'s controls shown, the 3D render\'s technique and Display panel stepped aside',
             js(c, "!document.getElementById('graph-tools').hidden")
             and js(c, "document.getElementById('toggle-display').offsetParent === null")
@@ -1311,6 +1356,15 @@ def orbit(c: Chrome, r: Report, ctx):
     time.sleep(1.0)
     saved = js(c, view)
     r.check('the session is saved in Orthographic view', saved and saved['orthographic'], saved)
+    # The microns the view's upper half shows.  Restore put the zoom back while the scene was
+    # empty (a 10 µm frustum), the cell's bounds then grew it, and the view came back zoomed
+    # in by their ratio (8.9x for c943 beside c21768, 2026-10-22); positions alone never told.
+    half = ('(() => { const c = window.sbfsem.renderer.camera;'
+            ' return c.isOrthographicCamera ? (c.top - c.bottom) / 2 / c.zoom : null; })()')
+    scale = js(c, half)
+
+    def same_scale(now) -> bool:
+        return now is not None and abs(now / scale - 1) < 1e-6
     stored = "(() => { try { return JSON.parse(localStorage.getItem('sbfsem.session.v1')).camera; } catch (e) { return null; } })()"
     for touch in (True, False):
         boot(c, ctx.url, keep=True)
@@ -1323,6 +1377,8 @@ def orbit(c: Chrome, r: Report, ctx):
         during = js(c, view)
         r.check(f"{'' if touch else 'again: '}while the restore waits on its build, the saved view is up",
                 apart(during, saved) < 1e-3, (during, saved))
+        now = js(c, half)
+        r.check(f"{'' if touch else 'again: '}at the saved scale", same_scale(now), f'{now} µm of {scale}')
         if touch:
             turned, expected = drag()
             r.check('a plain drag turns it', abs(turned - expected) < 3,
@@ -1337,6 +1393,9 @@ def orbit(c: Chrome, r: Report, ctx):
                     apart(end, mine) < 0.5 and apart(end, saved) > 1, f'{apart(end, mine):.3f} µm from it')
         else:
             r.check('untouched, the restore ends on the saved view', apart(end, saved) < 1e-3, (end, saved))
+        now = js(c, half)
+        r.check(f"{'' if touch else 'again: '}and at the saved scale when the cell is in", same_scale(now),
+                f'{now} µm of {scale}')
 
     # A first load: the waiting points frame the view early, a drag turns it, and the load's
     # framing at its end does not throw the turn away.

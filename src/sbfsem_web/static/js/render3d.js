@@ -644,7 +644,9 @@ export class Renderer3D {
     this.webgl.setSize(w, h);
     this.perspective.aspect = w / h;
     this.perspective.updateProjectionMatrix();
-    this._updateOrtho();
+    // The scale too: bounds that changed while the container had no size (cells that came
+    // in behind another tab) reach the frustum only now.
+    this._updateOrtho({ keepScale: true });
     // A scene built while the container had no size — a background tab, a
     // hidden pane — was framed against a meaningless aspect ratio, so frame it
     // again the first time real dimensions arrive.
@@ -4254,9 +4256,12 @@ export class Renderer3D {
     return this._highlightColor(key);
   }
 
+  /** The color a cell is seen in: its GraphApp color in GraphApp, its surface's in the 3D render. */
   _hueOf(key) {
-    const solid = key ? this._meshPart(key, 'surface') : null;
     const hsl = { h: 0, s: 0, l: 0 };
+    const graph = this.look === 'graph' && key ? this.graphs.get(key)?.userData.colors?.annotation : null;
+    if (graph) return new THREE.Color(graph).getHSL(hsl);
+    const solid = key ? this._meshPart(key, 'surface') : null;
     solid?.material?.color?.getHSL(hsl);
     return hsl;
   }
@@ -4687,15 +4692,22 @@ export class Renderer3D {
    * sitting at the origin looking at the origin is the three.js default, not a
    * viewpoint, and saving it produces a session that restores to an empty
    * viewport with the meshes loaded just off screen.
+   *
+   * An orthographic view also carries `halfHeightUm`, how many microns its
+   * upper half shows.  Its `zoom` is relative to a frustum sized from the shown
+   * cells' bounds (`_updateOrtho`), so a zoom put back before those cells are
+   * in, or among other cells, shows another scale.
    */
   cameraState() {
     if (this.camera.position.distanceTo(this.controls.target) < 1e-6) return null;
+    const orthographic = this.camera.isOrthographicCamera === true;
     return {
       position: this.camera.position.toArray(),
       target: this.controls.target.toArray(),
       up: this.camera.up.toArray(),
       zoom: this.camera.zoom,
-      orthographic: this.camera.isOrthographicCamera === true,
+      orthographic,
+      ...(orthographic ? { halfHeightUm: this.camera.top / this.camera.zoom } : {}),
     };
   }
 
@@ -4729,7 +4741,18 @@ export class Renderer3D {
       this.camera.up.fromArray(saved.up);
       this._syncControlsUp();
     }
-    if (Number.isFinite(saved.zoom) && saved.zoom > 0) this.camera.zoom = saved.zoom;
+    // An orthographic view's scale in microns, where it was saved with one: its zoom alone
+    // was relative to the cells then shown, and a restore puts it back before any is in.
+    // From the empty scene's frustum (10 um) to the cells' (89 um), Restore came back
+    // 8.9x zoomed in, and by another factor whichever cell landed first (c943 beside
+    // c21768, 2026-10-22).  `_updateOrtho`'s keepScale then holds it as they land.
+    const halfHeight = saved.halfHeightUm;
+    if (this.camera.isOrthographicCamera && Number.isFinite(halfHeight) && halfHeight > 0
+        && this.camera.top > 0) {
+      this.camera.zoom = this.camera.top / halfHeight;
+    } else if (Number.isFinite(saved.zoom) && saved.zoom > 0) {
+      this.camera.zoom = saved.zoom;
+    }
     // Near/far were sized for whatever was framed last; re-derive them or a
     // restored close-up clips through the neuron.
     const distance = position.distanceTo(target);
