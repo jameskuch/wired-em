@@ -311,7 +311,11 @@ Type a box in microns and press **Crop**: the scene is clipped to it live
 a slab out of a dense field of processes. **Read** fills the boxes from the
 current scene, **Clear** removes the crop, and **Hold** stops a cell loaded
 or built from re-framing the camera you have set, a first load's framing and the
-framing of a view that shows no cell alike (the crop itself stays until Clear either way). A box left blank in **Crop** is the scene's own
+framing of a view that shows no cell alike (the crop itself stays until Clear either way).
+Hold lasts only as long as the page: it is off whenever the page loads, and Undo and Redo
+carry it, but a saved session, a Restore and a workspace leave it as the page has it (since
+2.30.2). Saved with the session, a Hold ticked once came back on every later visit and left
+each new cell off screen until Reset view (Temporal c162392, 2026-10-22). A box left blank in **Crop** is the scene's own
 extent on that side, and a box left blank in **Set view** keeps the current
 azimuth, elevation or distance.
 
@@ -1627,7 +1631,9 @@ would: a load into a list that already holds a row, a fix applied to a cell whos
 failed, a restored view that looks at none of its cells. Before, only a load into an empty list
 framed, and a cell could be built, in the scene and out of sight until Reset view (Temporal
 c162392, 2026-10-21). A view that shows any part of a cell (its surface, skeleton, rings or
-dots) is never moved, nor one Held in Display.
+dots) is never moved, nor one Held in Display. Since 2.30.2 a build that makes no surface frames
+what it does draw the same way: a cell whose rings, nodes or skeleton are shown, built empty into
+a view that shows no cell, is framed on them.
 
 **Stop**, at the right of the strip, ends the load at once: no further cells
 start, and every cell of the load that is not drawn yet — still fetching its

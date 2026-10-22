@@ -36,7 +36,10 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   strip with reduced motion.
 * ``sheets`` -- Undo of a context sheet reaches the session stored in the browser.
 * ``volume`` -- switching volume takes the first volume's boundary sheets off the scene.
-* ``hold`` -- Hold in the Display panel keeps a load from reframing the scene.
+* ``hold`` -- Hold in the Display panel keeps a load from reframing the scene, and is the page's alone:
+  the session stored in the browser leaves it out, a reload starts with it off before and after Restore,
+  and a session stored with it ticked (as builds before 2.30.2 stored one) restores with it off, so a
+  cell loaded into a view that shows nothing is framed (Temporal c162392, 2026-10-22).
 * ``graphapp`` -- GraphApp, the 3D view's second look: drawn in the background, switched both ways in
   a frame with the camera and the shown cells kept, black, the 3D render's controls out of the way,
   the cell list's GraphApp colors and sections, the controls, one click selecting an annotation at its
@@ -44,7 +47,9 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   click, and Open in GraphApp from the 3D render's, each giving visibility back.
 * ``blind`` -- a surface landing in a view that shows no cell frames it (a load into a list that
   already held a row did not, 2026-10-21); a view that shows a cell, or one Held, stays; ``m``
-  resets the view with the focus on the Load button, not only after a click in the canvas.
+  resets the view with the focus on the Load button, not only after a click in the canvas; a build
+  answered empty (every fallback too) draws the cell as its rings and frames them in a view that showed
+  nothing, beside two cells with surfaces, unless Held.
 * ``orbit`` -- a plain drag turns the view while cells come in: during a Restore of a session saved in
   Orthographic view (a fresh page's camera sat on its own target at the origin until the last cell was in,
   so the cells zoomed and panned but would not turn, 2026-10-20) and during a first load; the end of
@@ -750,6 +755,17 @@ def volume(c: Chrome, r: Report, ctx):
 
 # -- hold -------------------------------------------------------------------------------------
 
+# Run before the app on the document after `__plantHold` is set, once: the stored session is
+# rewritten with Hold ticked, as every build before 2.30.2 stored a session whose page had it ticked.
+PLANT_HOLD = """try { if (sessionStorage.getItem('__plantHold')) {
+  sessionStorage.removeItem('__plantHold'); window.__planted = 0;
+  const keys = []; for (let i = 0; i < localStorage.length; i += 1) keys.push(localStorage.key(i));
+  for (const k of keys.filter((k) => k && k.startsWith('sbfsem.session.v1'))) {
+    const s = JSON.parse(localStorage.getItem(k)); if (!s || !s.ui || !s.ui.display) continue;
+    s.ui.display.hold_limits = true; localStorage.setItem(k, JSON.stringify(s)); window.__planted += 1;
+  } } } catch (e) {}"""
+
+
 def hold(c: Chrome, r: Report, ctx):
     r.start('hold: a load leaves a framing the user chose')
 
@@ -784,6 +800,44 @@ def hold(c: Chrome, r: Report, ctx):
     c.wait_for('window.sbfsem.renderer.meshes.size === 1', 240)
     c.settle(3)
     r.check('and neither does the cell\'s arrival', not moved(before, camera()), (before, camera()))
+
+    # Hold is the page's, not the session's (2.30.2).  Saved with the session, a Hold ticked once came
+    # back on every later load and left each new cell off screen until Reset view (Temporal c162392,
+    # 2026-10-22).
+    box = "document.getElementById('lim-hold').checked"
+    sees = 'window.sbfsem.renderer.seesAnything()'
+    stored = ("(() => { try { const d = JSON.parse(localStorage.getItem('sbfsem.session.v1')).ui.display;"
+              " return 'hold_limits' in d ? d.hold_limits : 'left out'; } catch (e) { return String(e); } })()")
+    second = load(c, ctx.second)            # a load under Hold saves the session with it ticked
+    time.sleep(1.0)
+    r.check('the session stored in the browser leaves Hold out', js(c, stored) == 'left out', js(c, stored))
+    boot(c, ctx.url, keep=True)
+    c.wait_for("!document.getElementById('restore-banner').hidden", 30)
+    r.check('after a reload Hold is off, before Restore', js(c, box) is False)
+    js(c, "document.getElementById('restore-yes').click()")
+    c.wait_for('window.sbfsem.renderer.meshes.size === 2', 240)
+    c.settle(3)
+    r.check('and after it', js(c, box) is False)
+
+    # A session stored by a build before 2.30.2 with Hold ticked, as the report's browser held it.
+    c.emulate('mac')
+    js(c, "sessionStorage.setItem('__keep', '1'); sessionStorage.setItem('__plantHold', '1')")
+    c.goto(ctx.url.rstrip('/') + '/', extra_script=CLEAR + PLANT_HOLD)
+    js(c, HELPERS)
+    c.wait_for("!document.getElementById('restore-banner').hidden", 30)
+    r.check('a session stored with Hold ticked', (js(c, 'window.__planted') or 0) > 0, js(c, 'window.__planted'))
+    js(c, "document.getElementById('restore-yes').click()")
+    c.wait_for('window.sbfsem.renderer.meshes.size === 2', 240)
+    c.settle(3)
+    r.check('is restored with Hold off', js(c, box) is False)
+    js(c, f"{row(second, '.unload')}.click()")
+    c.wait_for(f'!{STATE}.neurons.has({json.dumps(second)})', 20)
+    js(c, """(() => { const R = window.sbfsem.renderer; R.camera.position.set(9e5, 9e5, 9e5);
+        R.controls.target.set(9e5 + 1, 9e5, 9e5); R.controls.update(); })()""")
+    c.settle(1)
+    load(c, ctx.second)
+    c.settle(2)
+    r.check('so a cell loaded into a view that shows nothing is framed', js(c, sees) is True)
 
 
 # -- graphapp ---------------------------------------------------------------------------------
@@ -1109,6 +1163,59 @@ def blind(c: Chrome, r: Report, ctx):
             js(c, sees) is False and js(c, "document.getElementById('neuron-id').value") == 'm',
             js(c, "document.getElementById('neuron-id').value"))
     js(c, "document.getElementById('neuron-id').value = ''")
+
+    # A build that makes no surface (2.30.2): a cell drawn only as its rings, built empty into a view
+    # that shows no cell, is framed on them; only a build with faces framed, and the rings stayed out
+    # of sight.  The third cell (never built in this page, so the tab has no surface of it) has every
+    # build answered empty here, each fallback's too, so the server builds nothing; it takes its rings
+    # from the first cell's display.
+    def rings(key: str) -> str:
+        return f'window.sbfsem.renderer.discs.has({json.dumps(key)})'
+
+    def ring_view(key: str) -> str:
+        return """(() => { const R = window.sbfsem.renderer; const o = R.discs.get(%s); if (!o) return null;
+            R.camera.updateMatrixWorld(); o.updateMatrixWorld(true);
+            const b = new (R.bounds.constructor)().setFromObject(o); if (b.isEmpty()) return null;
+            const corners = [];
+            for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
+              const p = R.camera.position.clone().set(x, y, z).project(R.camera); corners.push([p.x, p.y, p.z]); }
+            return corners.every(([x, y, z]) => Math.abs(x) <= 1 && Math.abs(y) <= 1 && Math.abs(z) < 1); })()""" \
+            % json.dumps(key)
+    js(c, """(() => { for (const r of %s.neurons.values()) r.display = { ...r.display, showDiscs: true };
+        const api = window.sbfsem.api; if (!api.__beforeEmpty) api.__beforeEmpty = api.mesh;
+        window.__empty = new Set([%d]);
+        api.mesh = async (source, id, opts, extra) => (window.__empty.has(id)
+          ? { n_faces: 0, n_vertices: 0, vertices: new Float32Array(0), faces: new Uint32Array(0) }
+          : api.__beforeEmpty(source, id, opts, extra)); })()""" % (STATE, ctx.third))
+
+    def load_empty(previous: str | None) -> str:
+        if previous:
+            js(c, f"{row(previous, '.unload')}.click()")
+            c.wait_for(f'!{STATE}.neurons.has({json.dumps(previous)})', 20)
+        # A load takes its display from the open or selected cell: the first, with its rings on.
+        js(c, f'{STATE}.selected = [...{STATE}.neurons.keys()][0]')
+        js(c, away)
+        c.settle(1)
+        key = load(c, ctx.third, mesh=False)
+        c.wait_for(rings(key), 60)
+        c.settle(2)
+        return key
+
+    third = load_empty(None)
+    r.check('a build answered empty draws no surface, only the cell\'s rings',
+            js(c, rings(third)) and not js(c, f'window.sbfsem.renderer.meshes.has({json.dumps(third)})'),
+            js(c, 'window.sbfsem.api.__calls.filter((x) => x.id === %d).length' % ctx.third))
+    r.check('and frames a view that showed nothing', js(c, sees) is True)
+    r.check('on the cell: its rings are in view', js(c, ring_view(third)) is True, js(c, ring_view(third)))
+    js(c, """(() => { document.getElementById('toggle-display').click();
+        const box = document.getElementById('lim-hold'); box.checked = true;
+        box.dispatchEvent(new Event('change', { bubbles: true })); })()""")
+    load_empty(third)
+    r.check('Hold keeps a view that shows nothing when a build is empty too', js(c, sees) is False)
+    js(c, """(() => { const box = document.getElementById('lim-hold'); box.checked = false;
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+        document.getElementById('toggle-display').click();
+        window.__empty.clear(); window.sbfsem.api.mesh = window.sbfsem.api.__beforeEmpty; })()""")
 
 
 # -- orbit ------------------------------------------------------------------------------------

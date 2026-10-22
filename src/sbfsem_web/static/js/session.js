@@ -101,7 +101,27 @@ function claimTab(id) {
 
 const tabKey = () => `${TAB_PREFIX}${tabId()}`;
 
-/** Serialize live state into a plain object. */
+// What one page keeps, its undo history included, and never stores: Display's
+// Hold (`hold_limits`).  Saved with the session, a Hold ticked once came back on
+// every later load and left each new cell off screen, with nothing on the page to
+// say why (Temporal c162392, 2026-10-22).  A saved view needs no Hold: a restore
+// puts its camera back either way.
+const PAGE_ONLY_DISPLAY = ['hold_limits'];
+
+/**
+ * `snap` without what only the page that set it keeps: what this browser stores,
+ * what a workspace document carries, and what a restore of either reads (one
+ * stored before 2.30.2 can still name Hold).  `snap` itself is not changed.
+ */
+export function withoutPageState(snap) {
+  const display = snap?.ui?.display;
+  if (!display || typeof display !== 'object' || !PAGE_ONLY_DISPLAY.some((k) => k in display)) return snap;
+  const kept = { ...display };
+  for (const key of PAGE_ONLY_DISPLAY) delete kept[key];
+  return { ...snap, ui: { ...snap.ui, display: kept } };
+}
+
+/** Serialize live state into a plain object (Hold included: the undo history is the page's). */
 export function snapshot(state, renderer, ui = {}) {
   return {
     schema: SCHEMA,
@@ -149,7 +169,7 @@ export function takeRestoreNextLoad() {
 }
 
 function write(store, state, renderer, ui) {
-  const snap = snapshot(state, renderer, ui);
+  const snap = withoutPageState(snapshot(state, renderer, ui));
   if (pending) {
     const have = new Set(snap.neurons.map((n) => `${n.source}:${n.id}`));
     snap.neurons.push(...pending.filter((n) => !have.has(`${n.source}:${n.id}`)));
@@ -201,7 +221,8 @@ function parse(raw) {
     // none, because it half-restores and looks like a bug.
     if (!data || data.schema !== SCHEMA) return null;
     if (!Array.isArray(data.neurons)) return null;
-    return data;
+    // A session stored before Hold stayed with its page still names it.
+    return withoutPageState(data);
   } catch (error) {
     console.warn('discarding unreadable session:', error);
     return null;

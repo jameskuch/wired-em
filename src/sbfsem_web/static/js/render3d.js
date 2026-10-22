@@ -1929,6 +1929,31 @@ export class Renderer3D {
     return true;
   }
 
+  /**
+   * Point the camera at a cell's shown layers (those `seesAnything` judges) and
+   * whatever surfaces are already in the scene, as `framePoints` does for a cloud.
+   * A cell whose build made no surface is drawn as its rings, nodes or skeleton,
+   * and next to another cell's surface its rings are not in the scene's bounds: Reset
+   * view framed the other cell and left this one out of sight.  False, moving
+   * nothing, when the cell shows nothing.
+   */
+  frameCell(key) {
+    const box = new THREE.Box3();
+    for (const map of [this.meshes, this.skeletons, this.discs, this.annoWires, this.lines, this.points,
+      this.graphs]) {
+      const object = map.get(key);
+      if (!object || !object.visible || object.parent?.visible === false) continue;
+      object.updateMatrixWorld(true);
+      box.union(new THREE.Box3().setFromObject(object));
+    }
+    if (box.isEmpty()) return false;
+    const kept = this.bounds.clone();
+    this.bounds.union(box);
+    this.resetView();
+    this.bounds.copy(kept);
+    return true;
+  }
+
   /** Skeleton color and opacity, independent of the cell's mesh. */
   setSkeletonStyle(key, { color, opacity } = {}) {
     const object = this.skeletons.get(key);

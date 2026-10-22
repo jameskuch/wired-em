@@ -2995,10 +2995,14 @@ async function addToScene(record, {
     // came back empty and was then built (Temporal c162392, 2026-10-21: built, in
     // the scene, out of sight until Reset view).  A view that shows anything stays
     // where it is, so does one Held (Display), and a restore decides its own.
-    if (mesh.n_faces && record.visible && !restoring && !display?.holdLimits
-        && renderer.seesAnything() === false) {
-      renderer.resetView();
-      if (framing) {
+    // A build that made no surface frames what it left shown (the cell's rings,
+    // nodes or skeleton) with the scene, and nothing when it left nothing: built
+    // empty, a cell loaded beside another stayed off screen with only those drawn,
+    // and Reset view's bounds leave rings out beside a surface.
+    if (record.visible && !restoring && !display?.holdLimits && renderer.seesAnything() === false) {
+      if (mesh.n_faces) renderer.resetView();
+      const framed = !!mesh.n_faces || renderer.frameCell(record.key);
+      if (framed && framing) {
         framing.done = true;
         framing.camera = renderer.cameraState();
       }
@@ -8825,7 +8829,8 @@ function currentDocument() {
   // The viewport is opt-in: a document saved without one opens framing the
   // cells instead of jumping to a stored camera.
   if (!$('save-camera').checked) snap.camera = null;
-  return { kind: 'sbfsem-workspace', version: 1, ...snap };
+  // Not Hold: it is the page's, and opened elsewhere it left new cells off screen.
+  return { kind: 'sbfsem-workspace', version: 1, ...session.withoutPageState(snap) };
 }
 
 function describeDocument() {
@@ -9139,7 +9144,8 @@ async function openWorkspace(doc, label) {
   for (const record of replaced) {
     if (!kept.has(record.key)) api.unload(record.source, record.id).catch(() => {});
   }
-  await restoreSession(doc);
+  // A document saved before 2.30.2 can carry Hold; this page's own stays as it is.
+  await restoreSession(session.withoutPageState(doc));
   statusEl.textContent = `Opened ${label}`;
   statusEl.className = 'status';
 }
