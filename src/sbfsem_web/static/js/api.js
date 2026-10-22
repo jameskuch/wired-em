@@ -653,6 +653,8 @@ export const api = {
   closedCurves: (source, id, { copy } = {}) =>
     getJSON(`/api/neurons/${source}/${id}/closed-curves${copyQuery(copy)}`, 'outlines…'),
   skeleton: (source, id) => getJSON(`/api/neurons/${source}/${id}/skeleton`, 'skeleton…'),
+  /** Every synapse of a cell as one point (GraphApp's synapse dots). */
+  synapsePoints: (source, id) => getJSON(`/api/neurons/${source}/${id}/synapse-points`, 'synapses…'),
   /** The annotations as an averaged wireframe: rings, lines along, ties. */
   annotationWire: (source, id, params = {}) =>
     getJSON(`/api/neurons/${source}/${id}/annotation-wire${q(params)}`, 'annotation wireframe…'),

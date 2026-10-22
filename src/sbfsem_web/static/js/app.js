@@ -52,13 +52,17 @@ import {
 } from './materials.js';
 import { bindMaterialsPanel } from './materialpanel.js';
 import { bindGradientsPanel } from './gradientpanel.js';
-import { setGradientLibrary } from './colormaps.js';
+import { setGradientLibrary, colormapSample, colormapNames } from './colormaps.js';
 import { ViewRecorder, supportedFormats } from './video.js';
 import { NetworkView, SYNAPSE_COLORS } from './network.js';
 import { ConnectivityView } from './connectivity.js';
 import { SettingsPanel, pageAssets, savedRatio, expertRender } from './settings.js';
 import { fillLinkedNeuronsCard, sortableHead, sortRows } from './linkedneurons.js';
 import { stratificationChart, barChart, STRATA_TICK_PCT } from './charts.js';
+import {
+  GRAPH_SETTINGS_KEY, MARKER_SIZES, FLAG_PX, SYNAPSE_PX, FLAG_COLORS, graphColors, unfinishedIds,
+  segmentPositions, normalizeGraphSettings, findId, isolate, restoreVisibility,
+} from './graphapp.js';
 import * as session from './session.js';
 import { browserShortcut, toggleFullscreen, watchFullscreen } from './fullscreen.js';
 import { installColorPicker } from './colorpicker.js';
@@ -279,6 +283,9 @@ function uiFlags() {
     // Materials, colormap, scale bar, context surfaces, crop: view state, so
     // it belongs in the session and in the undo history like everything else.
     display: display ? display.snapshot() : undefined,
+    // GraphApp, and the visibility an isolation would give back (only a session
+    // restore reads it: Undo does not change the look).
+    graph: graphOn ? { on: true, saved: graphSaved ? [...graphSaved] : null, isolated: graphIsolated } : undefined,
   };
 }
 
@@ -575,7 +582,15 @@ async function boot() {
   // fresh browser starts with (a restored session overwrites this below).
   buildRenderPanel();
   writeControls(startupRender() || DEFAULT_RENDER);
-  renderer = new Renderer3D($('viewport'), { onPick: (pick) => { pickedRing(pick); return showPick(pick); } });
+  renderer = new Renderer3D($('viewport'), {
+    onPick: async (pick) => {
+      pickedRing(pick);
+      await showPick(pick);
+      // A synapse's dot in GraphApp: which synapse, and what it links to.
+      const record = pick.synapse ? state.neurons.get(pick.key) : null;
+      if (record) await showSynapsePick(record, pick.synapse, pick.locationId);
+    },
+  });
   renderer.onContextMenu = contextMenuFor;
   renderer.onSelectRequest = onSelectRequest;
   renderer.onSelectionChange = onSelectionChange;
@@ -1106,6 +1121,12 @@ async function restoreSession(saved) {
     // camera is decided now, so the box can be judged against it.
     display?.syncTwoD();
     if (saved.view && saved.view !== 'render') activateView(saved.view);
+    const graph = saved.ui?.graph;
+    if (graph?.on) {
+      graphSaved = Array.isArray(graph.saved) ? new Map(graph.saved) : null;
+      graphIsolated = graph.saved ? graph.isolated ?? null : null;
+      setGraphLook(true);
+    }
 
     renderNeuronList();
     populateTableSelect();
@@ -1424,8 +1445,13 @@ function bindEvents() {
   window.addEventListener('beforeunload', () => session.saveNow(state, renderer, uiFlags()));
 
   for (const tab of document.querySelectorAll('.tab')) {
-    tab.addEventListener('click', () => activateView(tab.dataset.view));
+    tab.addEventListener('click', async () => {
+      activateView(tab.dataset.view);
+      // "3D render" and "GraphApp" are one view in two looks.
+      if (tab.dataset.view === 'render') await setGraphLook(tab.dataset.look === 'graph');
+    });
   }
+  bindGraphTools();
 
   $('net-refresh').addEventListener('click', buildNetwork);
   $('net-source').addEventListener('change', buildNetwork);
@@ -2934,6 +2960,8 @@ async function addToScene(record, {
     // either of which would otherwise throw away the user's camera.
     if (frame && renderer.meshes.size === 1 && !display?.holdLimits) renderer.resetView();
     persist();
+    // GraphApp's drawing of the cell, once the draws settle (it reads this load's data).
+    debounced('graph-sync', () => syncGraph().catch(() => {}), 800);
     return mesh.n_faces ? 'drawn' : 'failed';
   } catch (error) {
     // The user unloaded the cell mid-build, or a newer draw took over: their
@@ -3908,7 +3936,11 @@ function toggleSection(key, id) {
  * inside it -- otherwise collapsing turns the panel into a row of unlabeled
  * triangles.
  */
+/** The cell panel's sections GraphApp has a use for; the rest are the 3D render's. */
+const GRAPH_SECTIONS = new Set(['skeleton-check', 'registration']);
+
 function section(parent, record, id, title, summary, build) {
+  if (graphOn && !GRAPH_SECTIONS.has(id)) return null;
   const open = sectionOpen(record.key, id);
   const wrap = document.createElement('div');
   wrap.className = `cell-section${open ? ' open' : ''}`;
@@ -4131,7 +4163,8 @@ function neuronRow(record) {
 
   const swatch = document.createElement('span');
   swatch.className = 'row-dot';
-  swatch.style.background = record.color;
+  swatch.style.background = graphOn ? graphColorsOf(record).annotation : record.color;
+  if (graphOn) swatch.title = `GraphApp draws c${record.id} in this color; the 3D render keeps its own`;
 
   const chevron = document.createElement('span');
   chevron.className = 'chev';
@@ -5142,6 +5175,14 @@ function contextMenuFor({
     menu.append(holder);
   };
 
+  // GraphApp's right click is short: isolate the cell, Viking, deselect.
+  if (graphOn && !pane) {
+    if (record) graphMenuItems(record, context, item);
+    else if (renderer.selection) item('Deselect', () => renderer.clearSelection()).title = 'Also Esc';
+    placeContextMenu(menu, at?.x ?? clientX, at?.y ?? clientY);
+    return;
+  }
+
   // Off every cell -- the surface hidden, only rings under the pointer -- the
   // markers still say which cell they are on.
   const marked = !record && renderer.selection?.kind === 'annotation'
@@ -5277,7 +5318,10 @@ function contextMenuFor({
   // These act on the cell the menu was opened on: it is made the focused cell
   // first (the Analyses and Annotations tabs describe the focused cell, which
   // was whichever one the list last showed), not whatever was focused before.
-  item('Open GraphApp', () => openGraphApp(record));
+  item('Open in GraphApp', () => openInGraphApp(record)).title =
+    `Show c${record.id} alone as MATLAB's GraphApp drew it: skeleton, a dot at every annotation, rings, `
+    + 'and the unfinished, terminal and off-edge annotations and synapses on request. The 3D render button '
+    + 'comes back to this view with every cell shown as it was';
   submenu('Analysis', [
     ['Connectivity (Graffinity)', () => showViewFor(record, 'connectivity')],
     ['Stratification', () => showViewFor(record, 'strata')],
@@ -6957,7 +7001,8 @@ function cellPanel(record) {
 
   actionsRow.append(toSelected, toAll);
   actions.append(actionsTitle, actionsRow);
-  panel.append(actions);
+  // A cell's visualization is the 3D render's look.
+  if (!graphOn) panel.append(actions);
   return panel;
 }
 
@@ -7304,11 +7349,7 @@ async function addSearchResults(ids) {
 function activateView(view, { cell = null } = {}) {
   state.view = view;
   persist();
-  for (const tab of document.querySelectorAll('.tab')) {
-    const active = tab.dataset.view === view;
-    tab.classList.toggle('active', active);
-    tab.setAttribute('aria-selected', String(active));
-  }
+  markTabs();
   for (const panel of document.querySelectorAll('.view')) {
     panel.classList.toggle('active', panel.id === `view-${view}`);
   }
@@ -7340,12 +7381,270 @@ function showViewFor(record, view) {
   activateView(view, { cell: record });
 }
 
-/** Open GraphApp on a cell: its volume's network, built for the cells loaded in it. */
-async function openGraphApp(record) {
+// -- GraphApp ------------------------------------------------------------------
+// MATLAB SBFSEM-tools' GraphApp as the 3D view's second look (graphapp.js): the
+// tab row's GraphApp button beside 3D render shows the same cells, camera and
+// zoom as GraphApp drew a neuron, on black.  The 3D render is left as it was,
+// and each cell's GraphApp objects are drawn once per load (in the background
+// after a load too), so switching either way is a flip of two layers.
+// Right-click "Open in GraphApp" goes there with only that cell shown; the
+// visibility it hid is given back on the way out, as GraphApp's own right-click
+// "Isolate" gives it back when unticked.
+
+let graphOn = false;            // the 3D view shows GraphApp
+let graphSaved = null;          // Map(key -> shown) an isolation keeps to give back
+let graphIsolated = null;       // the key isolated, while it is
+const graphDrawn = new Map();   // key -> the load its GraphApp objects were drawn from
+const graphHue = new Map();     // key -> its place in GraphApp's palette, first come first served
+let graphHueNext = 0;
+let graphSettings = normalizeGraphSettings(storedJSON(GRAPH_SETTINGS_KEY));
+
+/** The sizes and flag colors GraphApp draws with (graphapp.js). */
+const GRAPH_LOOK = { markerPx: MARKER_SIZES, flagPx: FLAG_PX, synapsePx: SYNAPSE_PX, flagColors: FLAG_COLORS };
+
+/** A cell's GraphApp colors, its palette place kept for as long as the tab lives. */
+function graphColorsOf(record) {
+  if (!graphHue.has(record.key)) graphHue.set(record.key, graphHueNext++);
+  return graphColors(graphHue.get(record.key));
+}
+
+/** A cell's synapses as GraphApp draws them (`/synapse-points`), kept per load. */
+function askSynapsePoints(record) {
+  return askKept(record, 'synapsePoints', () => api.synapsePoints(record.source, record.id));
+}
+
+/** Draw `record` as GraphApp does, unless it is drawn from this very load already. */
+async function drawGraphCell(record) {
+  const drawnFrom = `${record.loadGen}|${dataKey(record)}`;
+  if (graphDrawn.get(record.key) === drawnFrom && renderer.graphs.has(record.key)) return;
+  const curves = (record.summary?.n_curve_annotations || 0) > 0;
+  const [nodes, adjacency, skeleton, synapses, outlines] = await Promise.all([
+    nodesFor(record), adjacencyFor(record), askSkeleton(record),
+    askSynapsePoints(record).catch(() => []), curves ? askOutlines(record).catch(() => []) : [],
+  ]);
+  // Loaded again or let go while those were on their way: that load draws it.
+  if (state.neurons.get(record.key) !== record) return;
+  const edges = [];
+  for (const [a, ns] of adjacency) for (const b of ns) edges.push({ a, b });
+  const synapseColors = {};
+  for (const entry of record.synapseCounts || []) {
+    synapseColors[entry.local_name] = SYNAPSE_COLORS[entry.local_name] || rgbCss(entry.color);
+  }
+  renderer.setGraphCell(record.key, {
+    nodes, outlines, skeleton, unfinished: unfinishedIds(nodes, edges), synapses, synapseColors,
+  }, graphColorsOf(record), GRAPH_LOOK);
+  graphDrawn.set(record.key, drawnFrom);
+}
+
+/**
+ * Every loaded cell drawn as GraphApp does: while GraphApp is shown, and in the
+ * background once loads settle, so the switch to it finds them drawn.  Two at a
+ * time, the shown cells first.
+ */
+async function syncGraph() {
+  const records = [...state.neurons.values()].sort((a, b) => Number(b.visible) - Number(a.visible));
+  const missing = records.filter((r) => graphDrawn.get(r.key) !== `${r.loadGen}|${dataKey(r)}`
+    || !renderer.graphs.has(r.key));
+  if (!missing.length) return;
+  if (graphOn) {
+    statusEl.textContent = `Drawing ${missing.length} cell(s) for GraphApp…`;
+    statusEl.className = 'status busy';
+  }
+  let failed = 0;
+  await inParallel(missing, 2, async (record) => {
+    try { await drawGraphCell(record); } catch (error) {
+      failed += 1;
+      console.warn(`GraphApp could not draw c${record.id}:`, error);
+    }
+  });
+  if (graphOn) {
+    statusEl.textContent = failed ? `GraphApp could not draw ${failed} cell(s)` : 'GraphApp ready';
+    statusEl.className = failed ? 'status error' : 'status';
+  }
+}
+
+/** GraphApp's controls into the renderer (and the boxes that show them). */
+function applyGraphSettings() {
+  renderer.setGraphSettings(graphSettings, {
+    segmentColor: (t) => colormapSample(graphSettings.colormap, t),
+    positions: segmentPositions,
+  });
+}
+
+/**
+ * Show GraphApp (`on`) or the 3D render.  `isolateKey` goes to GraphApp with only
+ * that cell shown (right-click "Open in GraphApp"); leaving gives back the
+ * visibility an isolation hid.  The camera, the cells and the list stay.
+ */
+async function setGraphLook(on, { isolateKey = null } = {}) {
+  if (on) {
+    const entering = !graphOn;
+    graphOn = true;
+    renderer.setLook('graph');
+    applyGraphSettings();
+    if (isolateKey) isolateCell(isolateKey);
+    if (entering) {
+      $('view-render').classList.add('graph-on');
+      $('graph-tools').hidden = false;
+      markTabs();
+      renderNeuronList();
+      persist();
+    }
+    await syncGraph();
+    return;
+  }
+  if (!graphOn) return;
+  graphOn = false;
+  renderer.setLook('render');
+  unisolate();
+  $('view-render').classList.remove('graph-on');
+  $('graph-tools').hidden = true;
+  markTabs();
+  renderNeuronList();
+  persist();
+}
+
+/** Show only `key`, keeping what every cell showed to give back. */
+function isolateCell(key) {
+  const shown = new Map([...state.neurons.values()].map((r) => [r.key, r.visible]));
+  const { saved, show } = isolate(shown, key, graphSaved);
+  graphSaved = saved;
+  graphIsolated = key;
+  for (const [k, visible] of show) setVisible(k, visible);
+  renderNeuronList();
+  persist();
+}
+
+/** Give back what an isolation hid (the cells loaded since keep what they show). */
+function unisolate() {
+  if (!graphSaved) return;
+  const shown = new Map([...state.neurons.values()].map((r) => [r.key, r.visible]));
+  for (const [k, visible] of restoreVisibility(shown, graphSaved)) setVisible(k, visible);
+  graphSaved = null;
+  graphIsolated = null;
+  renderNeuronList();
+  persist();
+}
+
+/** Right-click "Open in GraphApp": GraphApp with only this cell shown. */
+async function openInGraphApp(record) {
   selectNeuron(record.key);
-  activateView('network');
-  $('net-source').value = record.source;
-  await buildNetwork();
+  if (state.view !== 'render') activateView('render');
+  await setGraphLook(true, { isolateKey: record.key });
+}
+
+/** The tab row: "3D render" or "GraphApp" lit by the look, the other tabs by the view. */
+function markTabs() {
+  for (const tab of document.querySelectorAll('.tab')) {
+    const active = tab.dataset.view === state.view
+      && (state.view !== 'render' || (tab.dataset.look === 'graph') === graphOn);
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', String(active));
+  }
+}
+
+/** The menu GraphApp's right click opens: isolate, Viking, deselect -- no more. */
+function graphMenuItems(record, context, item) {
+  const isolated = graphIsolated === record.key;
+  item(`Isolate c${record.id}`, () => (isolated ? unisolate() : isolateCell(record.key)), { checked: isolated })
+    .title = isolated
+      ? 'Untick: show the cells again as they were before isolating'
+      : 'Hide every other cell; untick to show them again as they were (leaving GraphApp does too)';
+  if (state.volumes.find((v) => v.name === record.source)?.viking_name && context?.locationId) {
+    item('Open in Viking', () => openLocationInViking(record, context.locationId)).title =
+      `Opens this volume in Viking at annotation ${context.locationId}`;
+  }
+  if (renderer.selection) item('Deselect', () => renderer.clearSelection()).title = 'Also Esc';
+}
+
+/** A synapse picked in GraphApp: the readout says which, and what it links to (asked once per cell). */
+const linkedPartners = new Map();   // key@dataKey -> Map(synapse ID -> partner cell ID or null)
+async function showSynapsePick(record, synapse, locationId) {
+  const text = $('pick-text');
+  const said = `synapse ${synapse.id} ${synapse.type}`;
+  text.textContent = `${volumeLongName(record.source)} c${record.id} · ${said}`;
+  writeLocationField($('pick-location'), locationId, record.source);
+  if (lastPick) {
+    lastPick.locationId = locationId;
+    lastPick.locationSource = record.source;
+  }
+  const cacheKey = `${record.key}@${dataKey(record)}`;
+  let partners = linkedPartners.get(cacheKey);
+  if (!partners) {
+    try {
+      const report = await api.linkedNeurons(record.source, record.id);
+      partners = new Map(report.rows.map((row) => [row.synapse_id, row.neuron_id ?? null]));
+      linkedPartners.set(cacheKey, partners);
+    } catch {
+      return;
+    }
+  }
+  if (lastPick?.locationId !== locationId) return;
+  const partner = partners.get(synapse.id);
+  text.textContent = `${volumeLongName(record.source)} c${record.id} · ${said} · `
+    + (partner ? `link c${partner}` : 'link none');
+}
+
+/** GraphApp's Find ID: a Location ID, else a synapse structure ID, among this volume's loaded cells. */
+async function graphFindId(text) {
+  const cells = await Promise.all([...state.neurons.values()].filter((r) => r.source === state.source)
+    .map(async (r) => ({
+      key: r.key, nodes: await nodesFor(r).catch(() => []), synapses: await askSynapsePoints(r).catch(() => []),
+    })));
+  const found = findId(text, cells);
+  if (!found) throw new Error('Enter a Location ID or a synapse ID (a positive integer)');
+  if (found.kind === 'unknown' || (found.kind === 'location' && !found.synapse)) {
+    await gotoLocationId(String(found.id ?? found.locationId));
+    return;
+  }
+  // A synapse, or a synapse's annotation: flown to and ringed in yellow.
+  const record = state.neurons.get(found.key);
+  const distance = renderer.camera.position.distanceTo(renderer.controls.target);
+  await renderer.flyTo(renderer.toWorld(found.xyz_um, record.source), { distance });
+  renderer.select({
+    kind: 'synapse', key: record.key, px: 0, depth: 0, through: true, type: found.synapse.type,
+    synapseId: found.synapse.synapse_id, locationId: found.locationId, section: found.section,
+    point: [...found.xyz_um], radiusUm: 0.35,
+  });
+  const point = { x: found.xyz_um[0], y: found.xyz_um[1], z: found.xyz_um[2] };
+  await showPick({ point, key: record.key });
+  await showSynapsePick(record, { id: found.synapse.synapse_id, type: found.synapse.type }, found.locationId);
+  statusEl.textContent = `Synapse ${found.synapse.synapse_id} of c${record.id}, at annotation ${found.locationId}`;
+  statusEl.className = 'status';
+}
+
+/** GraphApp's controls: kept in this browser, drawn at once. */
+function bindGraphTools() {
+  const boxes = {
+    'graph-discs': 'discs', 'graph-synapses': 'synapses', 'graph-unfinished': 'unfinished',
+    'graph-terminals': 'terminals', 'graph-offedges': 'offEdges', 'graph-segments': 'colorSegments',
+  };
+  const maps = $('graph-colormap');
+  maps.replaceChildren(...colormapNames().map((n) => new Option(n, n)));
+  const show = () => {
+    for (const [id, field] of Object.entries(boxes)) $(id).checked = !!graphSettings[field];
+    $('graph-marker').value = graphSettings.markerSize;
+    maps.value = graphSettings.colormap;
+    if (maps.value !== graphSettings.colormap) maps.value = 'Parula';
+  };
+  const changed = () => {
+    graphSettings = normalizeGraphSettings({
+      ...Object.fromEntries(Object.entries(boxes).map(([id, field]) => [field, $(id).checked])),
+      markerSize: $('graph-marker').value, colormap: maps.value,
+    });
+    storeValue(GRAPH_SETTINGS_KEY, graphSettings);
+    applyGraphSettings();
+  };
+  show();
+  for (const id of [...Object.keys(boxes), 'graph-marker', 'graph-colormap']) $(id).addEventListener('change', changed);
+  const find = $('graph-find');
+  find.addEventListener('keydown', async (event) => {
+    event.stopPropagation();          // the view's keys stay out of the box
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    try { await graphFindId(find.value); } catch (error) { fail(error); }
+  });
+  applyGraphSettings();
 }
 
 // -- the quick technique picker ---------------------------------------------

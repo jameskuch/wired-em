@@ -218,6 +218,16 @@ test('on its own pixel an annotation is picked before the surface it is drawn on
 
 const naming = { cell: 'c1178', volume: 'Inferior Monkey' };
 
+test('a GraphApp synapse is that one synapse, not its type', () => {
+  const naming = { cell: 'c21768', volume: 'Inferior Monkey' };
+  const one = { kind: 'synapse', key: 'k', type: 'RibbonPre', synapseId: 9329, section: 734 };
+  const other = { ...one, synapseId: 9330 };
+  assert.equal(describeCandidate(one, naming), 'Synapse 9329 (RibbonPre) of c21768 (Inferior Monkey) · section 734');
+  assert.equal(contextTitle(one, naming), 'c21768 · synapse 9329 (RibbonPre)');
+  assert.ok(!sameCandidate(one, other), 'two synapses of one type are two things');
+  assert.ok(sameCandidate({ kind: 'synapse', key: 'k', type: 'RibbonPre' }, { kind: 'synapse', key: 'k', type: 'RibbonPre' }));
+});
+
 test('the names the Select menu has always used are unchanged, byte for byte', () => {
   assert.equal(describeCandidate({ kind: 'annotation', locationId: 1335638, section: 983 }, naming),
     'Annotation 1335638 (Inferior Monkey) · c1178 · section 983');

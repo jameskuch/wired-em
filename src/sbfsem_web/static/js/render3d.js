@@ -213,6 +213,12 @@ export class Renderer3D {
     this.shifts = new Map();   // key -> Position shift layer (arrows, original rings, slice plane)
     this.moveArrows = new Map(); // key -> a cell's manual moves, an arrow each (setMoveArrows)
     this.moveSets = new Map();   // key -> the rings of what a manual step moves (setMoveSet)
+    // key -> the cell as GraphApp draws it (setGraphCell): one group of the skeleton,
+    // rings, a dot per annotation, the flagged annotations and the synapses.
+    this.graphs = new Map();
+    // Which look the view shows: 'render' (the 3D render) or 'graph' (GraphApp).
+    this.look = 'render';
+    this.graphSettings = null;
     this._nudges = new Map();  // marker slot -> [dx, dy, dz] um: a move not yet applied, drawn ahead
     this.volumeOffsets = new Map(); // source -> THREE.Vector3, microns
     this.zHide = new Map();    // key -> { min, max }: the Z range shown, volume microns
@@ -332,6 +338,14 @@ export class Renderer3D {
 
     this.group = new THREE.Group();
     this.scene.add(this.group);
+    // The two looks of the view (setLook): every cell's 3D render objects in one
+    // group, its GraphApp objects in the other, so switching shows one and hides
+    // the other and builds nothing.  Both inside the group: Flip Z and the volume
+    // offsets are the same for both.
+    this.renderLayer = new THREE.Group();
+    this.graphLayer = new THREE.Group();
+    this.graphLayer.visible = false;
+    this.group.add(this.renderLayer, this.graphLayer);
     // Selection highlights: inside the group so Flip Z mirrors them with the
     // scene, but in no content map, so bounds, picks and styles ignore them.
     this.highlightGroup = new THREE.Group();
@@ -731,7 +745,7 @@ export class Renderer3D {
     object.add(wire);
 
     this._place(object, this._sourceOf(key));
-    this.group.add(object);
+    this.renderLayer.add(object);
     this.meshes.set(key, object);
     // A layer keeps its place in the draw order through a rebuild.
     if (this._order.has(key)) this.setLayerOrder(key, this._order.get(key));
@@ -786,7 +800,7 @@ export class Renderer3D {
     object.userData.skeleton = skeleton;
     object.name = key;
     this._place(object, this._sourceOf(key));
-    this.group.add(object);
+    this.renderLayer.add(object);
     this.skeletons.set(key, object);
     this._applyZHide(key);
     this._recomputeBounds();
@@ -887,11 +901,27 @@ export class Renderer3D {
    * `color`.  The layer then ignores a later `setDiscStyle` color (there is no
    * single color to change); opacity and depth behavior still apply.
    */
-  setDiscs(key, nodes, {
+  setDiscs(key, nodes, options = {}) {
+    this.removeDiscs(key);
+    const object = this._ringMesh(key, nodes, options);
+    if (!object) return;
+    this._place(object, this._sourceOf(key));
+    this.renderLayer.add(object);
+    this.discs.set(key, object);
+    this._reachDirty = true;
+    this._applyZHide(key);
+    this._refreshBoundsIfBare();
+  }
+
+  /**
+   * The rings and outline bands of a cell's annotations as one mesh (setDiscs'
+   * and GraphApp's), with what selection needs kept on it (`rings`, `bands`,
+   * `stroke`); null when there is nothing to draw.  Not placed or added.
+   */
+  _ringMesh(key, nodes, {
     color = '#ffffff', opacity = 0.85, stroke = 0.1, outlines = [], through = true,
     depth = 0, ringColors = null, outlineColors = null,
   } = {}) {
-    this.removeDiscs(key);
     const SEG = RING_SEGMENTS;
     // Kept with their place in `nodes`, which a color array is indexed by.
     const ringAt = [];
@@ -915,7 +945,7 @@ export class Renderer3D {
         });
       }
     }
-    if (!rings.length && !polygons.length) return;
+    if (!rings.length && !polygons.length) return null;
     const nBand = polygons.reduce((n, p) => n + p.pts.length, 0);
     // `depth` gives the flat ribbon a height along Z, centered on the section
     // plane: a band with a rectangular cross-section, stroke wide and depth
@@ -1049,12 +1079,7 @@ export class Renderer3D {
     object.userData.bands = polygons;
     object.userData.stroke = stroke;
     applyDiscDepth(object, through);
-    this._place(object, this._sourceOf(key));
-    this.group.add(object);
-    this.discs.set(key, object);
-    this._reachDirty = true;
-    this._applyZHide(key);
-    this._refreshBoundsIfBare();
+    return object;
   }
 
   /** Disc color, opacity and depth behavior without rebuilding the rings. */
@@ -1118,7 +1143,7 @@ export class Renderer3D {
     object.name = key;
     applyDiscDepth(object, through);
     this._place(object, this._sourceOf(key));
-    this.group.add(object);
+    this.renderLayer.add(object);
     this.annoWires.set(key, object);
     this._reachDirty = true;
     this._applyZHide(key);
@@ -1208,7 +1233,7 @@ export class Renderer3D {
       frame.visible = false;
     }
     this._place(group, this._sourceOf(key));
-    this.group.add(group);
+    this.renderLayer.add(group);
     this.shifts.set(key, group);
     this.setShiftStyle(key, { opacity, through, width });
     this._reachDirty = true;
@@ -1479,7 +1504,7 @@ export class Renderer3D {
     }
     this._place(group, this._sourceOf(key));
     group.visible = !this._hiddenCells.has(key);
-    this.group.add(group);
+    this.renderLayer.add(group);
     this.moveArrows.set(key, group);
     this._applyZHide(key);
   }
@@ -1527,7 +1552,7 @@ export class Renderer3D {
     group.add(object);
     this._place(group, this._sourceOf(key));
     group.visible = !this._hiddenCells.has(key);
-    this.group.add(group);
+    this.renderLayer.add(group);
     this.moveSets.set(key, group);
     this._applyZHide(key);
   }
@@ -1611,7 +1636,7 @@ export class Renderer3D {
     object.renderOrder = 4;
     object.name = key;
     this._place(object, this._sourceOf(key));
-    this.group.add(object);
+    this.renderLayer.add(object);
     this.points.set(key, object);
     this._reachDirty = true;
     this._applyZHide(key);
@@ -1654,7 +1679,7 @@ export class Renderer3D {
     applyDiscDepth(object, through);
     if (through) object.renderOrder = 4;
     this._place(object, this._sourceOf(key));
-    this.group.add(object);
+    this.renderLayer.add(object);
     this.lines.set(key, object);
     this._reachDirty = true;
     this._applyZHide(key);
@@ -1812,7 +1837,7 @@ export class Renderer3D {
     if (!group.children.length) return;
     group.name = key;
     this._place(group, this._sourceOf(key));
-    this.group.add(group);
+    this.renderLayer.add(group);
     this.synapses.set(key, group);
     this._applyZHide(key);
   }
@@ -1834,7 +1859,7 @@ export class Renderer3D {
    */
   _cellLayers() {
     return [this.meshes, this.skeletons, this.synapses, this.discs, this.annoWires,
-      this.shifts, this.points, this.lines, this.moveArrows, this.moveSets];
+      this.shifts, this.points, this.lines, this.moveArrows, this.moveSets, this.graphs];
   }
 
   removeAll(key) {
@@ -1848,6 +1873,7 @@ export class Renderer3D {
     this._dispose(this.moveSets, key);
     this.removePoints(key);
     this.removeLines(key);
+    this.removeGraphCell(key);
     this.zHide.delete(key);
     this._hiddenCells.delete(key);
     if (this.selection?.key === key) this.clearSelection();
@@ -1860,7 +1886,8 @@ export class Renderer3D {
     const object = map.get(key);
     if (!object) return;
     // A highlight never outlives the layer it was drawn from.
-    if (this.selection?.key === key && this._layerOf(this.selection.kind) === map) {
+    if (this.selection?.key === key && (this._layerOf(this.selection.kind) === map
+        || (map === this.graphs && this.look === 'graph'))) {
       this.clearSelection();
     } else if (map === this.discs) {
       this._dropMarkersOf(key);
@@ -1876,7 +1903,7 @@ export class Renderer3D {
       if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
       else child.material?.dispose();
     });
-    this.group.remove(object);
+    object.parent?.remove(object);
     map.delete(key);
     this._reachDirty = true;
     this._refreshBoundsIfBare();
@@ -2415,8 +2442,7 @@ export class Renderer3D {
   /** Light viewport (for figures) or the dark default. */
   setInverted(on) {
     this.inverted = !!on;
-    this.scene.background = new THREE.Color(on ? 0xf6f7f9 : 0x101418);
-    this.container.classList.toggle('inverted', !!on);
+    this._applyBackground();
     this._recolorShifts();
     this.onInverted?.(this.inverted);
   }
@@ -2586,7 +2612,7 @@ export class Renderer3D {
     // Without this, Reset view and the viewpoint buttons did nothing for it.
     for (const shownOnly of [true, false]) {
       if (!this.bounds.isEmpty()) break;
-      for (const map of [this.discs, this.annoWires, this.lines, this.points]) {
+      for (const map of [this.discs, this.annoWires, this.lines, this.points, this.graphs]) {
         for (const object of map.values()) {
           if (!shownOnly || object.visible) this.bounds.expandByObject(object);
         }
@@ -2621,9 +2647,11 @@ export class Renderer3D {
     const frustum = new THREE.Frustum().setFromProjectionMatrix(
       new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse));
     const box = new THREE.Box3();
-    for (const map of [this.meshes, this.skeletons, this.discs, this.annoWires, this.lines, this.points]) {
+    for (const map of [this.meshes, this.skeletons, this.discs, this.annoWires, this.lines, this.points,
+      this.graphs]) {
       for (const object of map.values()) {
-        if (!object.visible) continue;
+        // A layer the look does not show (GraphApp's, or the 3D render's) is not seen either.
+        if (!object.visible || object.parent?.visible === false) continue;
         box.setFromObject(object);
         if (!box.isEmpty() && frustum.intersectsBox(box)) return true;
       }
@@ -2807,6 +2835,246 @@ export class Renderer3D {
     return back;
   }
 
+  // -- GraphApp --------------------------------------------------------------
+  // MATLAB SBFSEM-tools' GraphApp as a second look of the view (graphapp.js):
+  // each cell's skeleton, a dot at every annotation, its rings, the unfinished,
+  // terminal and off-edge annotations and its synapses, on black.  Each cell's
+  // GraphApp objects are one group in `graphs`, under `graphLayer`; setLook
+  // shows that layer or the 3D render's, so neither is rebuilt to switch.
+
+  /** Show the 3D render ('render') or GraphApp ('graph'); the camera stays as it is. */
+  setLook(look) {
+    const graph = look === 'graph';
+    if ((this.look === 'graph') === graph) return;
+    this.look = graph ? 'graph' : 'render';
+    this.renderLayer.visible = !graph;
+    this.graphLayer.visible = graph;
+    // The context sheets and vasculature are the 3D render's.
+    if (this.contextGroup) this.contextGroup.visible = !graph;
+    this._applyBackground();
+    // A selection only one look draws (a synapse type's markers, a wireframe edge) goes.
+    if (this.selection && ['synapse', 'wireframe'].includes(this.selection.kind)) this.clearSelection();
+    this._reachDirty = true;
+    this._recomputeBounds();
+  }
+
+  /** The background the look and the inversion ask for: GraphApp's is black. */
+  _applyBackground() {
+    const graph = this.look === 'graph';
+    this.scene.background = new THREE.Color(graph ? 0x000000 : (this.inverted ? 0xf6f7f9 : 0x101418));
+    // What is drawn over the view takes the dark style on GraphApp's black.
+    this.container.classList.toggle('inverted', !!this.inverted && !graph);
+    this.container.classList.toggle('graph-look', graph);
+  }
+
+  /** A round dot, for GraphApp's points (made once). */
+  _dotTexture() {
+    if (this._dot) return this._dot;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(32, 32, 30, 0, Math.PI * 2);
+    ctx.fill();
+    this._dot = new THREE.CanvasTexture(canvas);
+    return this._dot;
+  }
+
+  /** Points at `xyz` (micron triples) in `colors` (one THREE.Color each), `px` CSS pixels across. */
+  _dots(xyz, colors, px, { over = false } = {}) {
+    const positions = new Float32Array(xyz.length * 3);
+    const rgb = new Float32Array(xyz.length * 3);
+    xyz.forEach((p, i) => {
+      positions.set(p, i * 3);
+      rgb.set([colors[i].r, colors[i].g, colors[i].b], i * 3);
+    });
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(rgb, 3));
+    const object = new THREE.Points(geometry, new THREE.PointsMaterial({
+      size: px * this.webgl.getPixelRatio(), sizeAttenuation: false, vertexColors: true,
+      map: this._dotTexture(), alphaTest: 0.5, depthTest: !over, depthWrite: !over,
+    }));
+    object.userData.px = px;
+    object.raycast = () => {};
+    // The flagged annotations over everything, as GraphApp's markers were.
+    object.renderOrder = over ? 6 : 3;
+    return object;
+  }
+
+  /** The skeleton as lines with a color per vertex, and which segment each vertex is of. */
+  _graphSkeleton(skeleton, color) {
+    const positions = [];
+    const segOf = [];
+    skeleton.segments.forEach((segment, index) => {
+      const pts = segment.points_um || [];
+      for (let i = 0; i < pts.length - 1; i += 1) {
+        positions.push(...pts[i], ...pts[i + 1]);
+        segOf.push(index, index);
+      }
+    });
+    if (!positions.length) return null;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    const rgb = new Float32Array(segOf.length * 3);
+    for (let i = 0; i < segOf.length; i += 1) rgb.set([color.r, color.g, color.b], i * 3);
+    geometry.setAttribute('color', new THREE.BufferAttribute(rgb, 3));
+    const object = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ vertexColors: true }));
+    object.userData.segOf = Uint32Array.from(segOf);
+    object.raycast = () => {};
+    return object;
+  }
+
+  /**
+   * Draw a cell as GraphApp does.  `data`: `{ nodes, outlines, skeleton, unfinished,
+   * synapses, synapseColors }` -- the cell's own annotations (`/nodes`), its traced
+   * outlines, its skeleton (`/skeleton`), the Set of unfinished Location IDs
+   * (graphapp.unfinishedIds), its synapses (`/synapse-points`) and a CSS color per
+   * synapse type; `colors`: `{ annotation, skeleton }` (graphapp.graphColors).  The
+   * flag colors and dot sizes are `look`'s (graphapp.js).  Drawn by the current
+   * GraphApp settings (setGraphSettings), shown when GraphApp is and the cell is.
+   */
+  setGraphCell(key, data, colors, look) {
+    this.removeGraphCell(key);
+    const nodes = data.nodes || [];
+    const root = new THREE.Group();
+    root.name = key;
+    root.userData.colors = colors;
+    root.userData.look = look;
+    const annotation = new THREE.Color(colors.annotation);
+    if (data.skeleton?.segments?.length) {
+      const skeleton = this._graphSkeleton(data.skeleton, new THREE.Color(colors.skeleton));
+      if (skeleton) {
+        skeleton.userData.part = 'skeleton';
+        skeleton.userData.skeleton = data.skeleton;
+        root.add(skeleton);
+      }
+    }
+    const rings = this._ringMesh(key, nodes, {
+      color: colors.annotation, opacity: 0.9, stroke: 0.06, outlines: data.outlines || [], through: false,
+    });
+    if (rings) {
+      rings.userData.part = 'discs';
+      root.add(rings);
+    }
+    if (nodes.length) {
+      const dots = this._dots(nodes.map((n) => n.xyz_um), nodes.map(() => annotation), look.markerPx.medium);
+      dots.userData.part = 'nodes';
+      dots.userData.nodes = nodes;
+      // Each annotation's segment, for "Color segments": the first that lists it.
+      const segmentOf = new Map();
+      (data.skeleton?.segments || []).forEach((segment, index) => {
+        for (const id of segment.location_ids || []) if (!segmentOf.has(id)) segmentOf.set(id, index);
+      });
+      dots.userData.segmentOf = nodes.map((n) => segmentOf.get(n.id) ?? -1);
+      root.add(dots);
+    }
+    const flags = [
+      ['unfinished', (n) => data.unfinished?.has(n.id)],
+      ['terminals', (n) => n.terminal],
+      ['offEdges', (n) => n.off_edge],
+    ];
+    for (const [part, test] of flags) {
+      const chosen = nodes.filter(test);
+      if (!chosen.length) continue;
+      const color = new THREE.Color(look.flagColors[part]);
+      const dots = this._dots(chosen.map((n) => n.xyz_um), chosen.map(() => color), look.flagPx, { over: true });
+      dots.userData.part = part;
+      dots.userData.nodes = chosen;
+      root.add(dots);
+    }
+    const synapses = data.synapses || [];
+    if (synapses.length) {
+      const dots = this._dots(synapses.map((x) => x.xyz_um),
+        synapses.map((x) => new THREE.Color(data.synapseColors?.[x.type] || '#bbbbbb')), look.synapsePx);
+      dots.userData.part = 'synapses';
+      dots.userData.synapses = synapses;
+      root.add(dots);
+    }
+    if (!root.children.length) return;
+    this._place(root, this._sourceOf(key));
+    root.visible = !this._hiddenCells.has(key);
+    this.graphLayer.add(root);
+    this.graphs.set(key, root);
+    this._styleGraph(root);
+    this._reachDirty = true;
+    this._applyZHide(key);
+    this._refreshBoundsIfBare();
+  }
+
+  removeGraphCell(key) { this._dispose(this.graphs, key); }
+
+  /**
+   * GraphApp's controls (graphapp.normalizeGraphSettings) for every cell:
+   * which parts show, the dot size, and "Color segments" with `segmentColor(t)`,
+   * the colormap's sRGB triple at t (0 to 1), for each segment's place
+   * (graphapp.segmentPositions, by `positions(count)`).
+   */
+  setGraphSettings(settings, { segmentColor = null, positions = null } = {}) {
+    this.graphSettings = { settings, segmentColor, positions };
+    for (const root of this.graphs.values()) this._styleGraph(root);
+  }
+
+  _styleGraph(root) {
+    const held = this.graphSettings;
+    if (!held) return;
+    const { settings, segmentColor, positions } = held;
+    const look = root.userData.look;
+    const dpr = this.webgl.getPixelRatio();
+    const shows = { discs: settings.discs, synapses: settings.synapses, unfinished: settings.unfinished,
+      terminals: settings.terminals, offEdges: settings.offEdges };
+    const skeleton = root.children.find((c) => c.userData.part === 'skeleton');
+    const segments = skeleton?.userData.skeleton.segments.length || 0;
+    const colored = settings.colorSegments && segmentColor && positions && segments
+      ? positions(segments).map((t) => new THREE.Color().setRGB(...segmentColor(t), THREE.SRGBColorSpace))
+      : null;
+    for (const part of root.children) {
+      const name = part.userData.part;
+      if (name in shows) part.visible = !!shows[name];
+      if (name === 'nodes') {
+        part.material.size = (look.markerPx[settings.markerSize] ?? look.markerPx.medium) * dpr;
+        part.userData.px = part.material.size / dpr;
+        const rgb = part.geometry.getAttribute('color');
+        const base = new THREE.Color(root.userData.colors.annotation);
+        part.userData.segmentOf.forEach((seg, i) => {
+          const c = colored && seg >= 0 ? colored[seg] : base;
+          rgb.setXYZ(i, c.r, c.g, c.b);
+        });
+        rgb.needsUpdate = true;
+      }
+      if (name === 'skeleton') {
+        const rgb = part.geometry.getAttribute('color');
+        const base = new THREE.Color(root.userData.colors.skeleton);
+        part.userData.segOf.forEach((seg, i) => {
+          const c = colored ? colored[seg] : base;
+          rgb.setXYZ(i, c.r, c.g, c.b);
+        });
+        rgb.needsUpdate = true;
+      }
+    }
+  }
+
+  /** The rings a highlight is drawn on in the look shown. */
+  _ringsOf(key) {
+    if (this.look === 'graph') return this.graphs.get(key)?.children.find((c) => c.userData.part === 'discs');
+    return this.discs.get(key);
+  }
+
+  /** The skeleton a highlight is drawn along in the look shown. */
+  _skeletonOf(key) {
+    if (this.look === 'graph') return this.graphs.get(key)?.children.find((c) => c.userData.part === 'skeleton');
+    return this.skeletons.get(key);
+  }
+
+  /** `[key, part]` for every cell's GraphApp part named `name`. */
+  * _graphParts(name) {
+    for (const [key, root] of this.graphs) {
+      const part = root.children.find((c) => c.userData.part === name);
+      if (part) yield [key, part];
+    }
+  }
+
   // -- selection ------------------------------------------------------------
   // A left triple click picks the item under the pointer (asked for
   // 2026-09-18).  The surface is never an item: it is what everything else is
@@ -2927,7 +3195,7 @@ export class Renderer3D {
     }
 
     const world = new THREE.Vector3();
-    for (const [key, object] of this.skeletons) {
+    for (const [key, object] of [...this.skeletons, ...this._graphParts('skeleton')]) {
       const segments = object.userData.skeleton?.segments;
       if (!shown(object) || !segments) continue;
       const half = (object.userData.skeletonWidth || 0) / 2;
@@ -2957,7 +3225,7 @@ export class Renderer3D {
       });
     }
 
-    for (const [key, object] of this.discs) {
+    for (const [key, object] of [...this.discs, ...this._graphParts('discs')]) {
       if (!shown(object)) continue;
       const through = object.material.depthTest === false;
       const range = this.zHide.get(key);
@@ -3019,6 +3287,53 @@ export class Renderer3D {
           locationId: f.locationId, section: f.section, zUm: f.zUm,
           point: f.center,
         });
+      }
+    }
+
+    // GraphApp's dots: an annotation's (and a flagged one's) names the annotation, a
+    // synapse's the synapse and the annotation it is drawn at.
+    for (const [key, root] of this.graphs) {
+      if (!shown(root)) continue;
+      const source = this._sourceOf(key);
+      for (const part of root.children) {
+        const name = part.userData.part;
+        const items = part.userData.synapses || part.userData.nodes;
+        if (!items || !part.visible) continue;
+        const reach = SELECT_PX + (part.userData.px || 0) / 2;
+        for (const it of items) {
+          const here = project(world.set(...it.xyz_um).applyMatrix4(part.matrixWorld));
+          if (!here) continue;
+          const d = Math.hypot(here[0] - px, here[1] - py);
+          if (d > reach || !this._shown(key, this.toWorld(it.xyz_um, source))) continue;
+          if (name === 'synapses') {
+            out.push({
+              kind: 'synapse', key, px: d, depth: here[2], through: true, type: it.type,
+              synapseId: it.synapse_id, locationId: it.location_id, section: it.z_section,
+              point: [...it.xyz_um], radiusUm: 0.35,
+            });
+          } else {
+            out.push({
+              kind: 'annotation', key, px: d, depth: here[2], through: part.material.depthTest === false,
+              locationId: it.id, section: it.z_section, zUm: it.xyz_um[2], point: [...it.xyz_um],
+              radiusUm: it.radius_um,
+            });
+          }
+        }
+      }
+    }
+    if (this.graphs.size) {
+      // A ring, its dot and a flag on it are one annotation: the nearest stands for it.
+      const best = new Map();
+      for (const c of out) {
+        if (c.kind !== 'annotation' && !(c.kind === 'synapse' && c.synapseId)) continue;
+        const id = `${c.kind}|${c.key}|${c.locationId}`;
+        const held = best.get(id);
+        if (!held || c.px < held.px) best.set(id, c);
+      }
+      for (let i = out.length - 1; i >= 0; i -= 1) {
+        const c = out[i];
+        if (c.kind !== 'annotation' && !(c.kind === 'synapse' && c.synapseId)) continue;
+        if (best.get(`${c.kind}|${c.key}|${c.locationId}`) !== c) out.splice(i, 1);
       }
     }
 
@@ -3368,7 +3683,7 @@ export class Renderer3D {
       object.add(lines);
       object.userData.borrowed = true;
       object.userData.clipped = true;
-    } else if (item.kind === 'synapse') {
+    } else if (item.kind === 'synapse' && !item.synapseId) {
       const group = this.synapses.get(item.key);
       const child = group?.children.find((c) => c.userData.typeName === item.type);
       if (!child) return;
@@ -3390,8 +3705,8 @@ export class Renderer3D {
       if (!paths.length) return;
       const umpp = this.umPerPixelAt(this.toWorld(item.point, source));
       const core = Math.max(2 * umpp, item.kind === 'skeleton'
-        ? ((this.skeletons.get(item.key)?.userData.skeletonWidth || 0) / 2) * 1.3
-        : (this.discs.get(item.key)?.userData.stroke || 0.1) * 0.75);
+        ? ((this._skeletonOf(item.key)?.userData.skeletonWidth || 0) / 2) * 1.3
+        : (this._ringsOf(item.key)?.userData.stroke || 0.1) * 0.75);
       // A ring just chosen starts at full strength and settles; the rest are drawn settled.
       const settling = pulse && pulses(item.kind) && !prefersReducedMotion();
       const start = highlightLook(settling ? 0 : 1, item.kind);
@@ -3449,7 +3764,7 @@ export class Renderer3D {
       ];
     }
     if (item.kind === 'skeleton') {
-      const segment = this.skeletons.get(item.key)?.userData.skeleton?.segments?.[item.segment];
+      const segment = this._skeletonOf(item.key)?.userData.skeleton?.segments?.[item.segment];
       return segment ? [{
         points: segment.points_um.map((p) => new THREE.Vector3(p[0], p[1], p[2])), closed: false,
       }] : [];
@@ -3462,7 +3777,7 @@ export class Renderer3D {
       }
       return [{ points, closed: true }];
     };
-    const discs = this.discs.get(item.key);
+    const discs = item.kind === 'annotation' ? this._ringsOf(item.key) : null;
     const ring = (discs?.userData.rings || []).find((n) => n.id === item.locationId);
     if (ring) return circle(ring.xyz_um, ring.radius_um);
     const bands = (discs?.userData.bands || []).filter((b) => b.id === item.locationId).map((b) => ({
@@ -3704,7 +4019,7 @@ export class Renderer3D {
     // An annotation ring under the pointer is named, so the app can tell a click on the
     // yellow or on a marker (what the arrow keys then act on).
     this.onPick?.({ point: this._pickInVolume(), key: this.pickedKey,
-      locationId: hit.kind === 'annotation' ? hit.locationId : null });
+      locationId: hit.kind === 'annotation' || hit.synapse ? hit.locationId : null, synapse: hit.synapse });
   }
 
   /**
@@ -3724,7 +4039,10 @@ export class Renderer3D {
     const top = pickOf(this.candidatesAt(clientX, clientY, { context: true }));
     if (!top?.point) return null;
     const world = new THREE.Vector3(...this.toWorld(top.point, this._sourceOf(top.key)));
-    return { key: top.key, kind: top.kind, world, locationId: top.locationId ?? null };
+    return {
+      key: top.key, kind: top.kind, world, locationId: top.locationId ?? null,
+      synapse: top.synapseId ? { id: top.synapseId, type: top.type, section: top.section } : null,
+    };
   }
 
   _key(event) {

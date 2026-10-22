@@ -121,7 +121,14 @@
 
   <section class="content">
     <nav class="tabs" role="tablist">
-      <button class="tab active" data-view="render" role="tab" aria-selected="true">3D render</button>
+      <!-- One view in two looks (graphapp.js): the 3D render, and the same cells, camera and
+           zoom as MATLAB's GraphApp drew a neuron.  Two tabs drawn as one. -->
+      <span class="tab-pair">
+        <button class="tab active" data-view="render" role="tab" aria-selected="true"
+                data-help="The cells as you set them up: surfaces, colors, every Display and Render setting. Switching to GraphApp and back keeps the camera, the zoom and which cells are shown.">3D render</button><button
+                class="tab" data-view="render" data-look="graph" role="tab" aria-selected="false"
+                data-help="The same cells, camera and zoom as MATLAB SBFSEM-tools' GraphApp drew a neuron, on black, with no surface: each cell's skeleton in a near-white, a dot at every annotation and its rings in a pastel of the same hue, and, from the controls under the view, the unfinished, terminal and off-edge annotations, the synapses, Color segments and Find ID. A click names an annotation or a synapse; a right click isolates a cell. 3D render comes back to the view as you left it.">GraphApp</button>
+      </span>
       <button class="tab" data-view="compare" role="tab" aria-selected="false">Render compare</button>
       <button class="tab" data-view="network" role="tab" aria-selected="false">Network</button>
       <button class="tab" data-view="connectivity" role="tab" aria-selected="false">Connectivity</button>
@@ -425,6 +432,25 @@ Opening the editor changes nothing on screen; each edit previews on the depth-co
             </div>
           </div>
         </div>
+        </div>
+
+        <!-- GraphApp's controls (app.js bindGraphTools), shown while GraphApp is: what
+             MATLAB's GraphApp offered, kept in this browser. -->
+        <div id="graph-tools" class="viewport-tools graph-tools" hidden>
+          <label class="check" data-help="Each annotation's ring in its section plane, in the cell's GraphApp color (an annotation is a disc in its section, not a sphere)."><input type="checkbox" id="graph-discs"> Rings</label>
+          <label class="check" data-help="A dot at each synapse, in its type's Viking color (GraphApp's Show synapses). A click on one names the synapse, its type and the cell it links to."><input type="checkbox" id="graph-synapses"> Show synapses</label>
+          <label class="check" data-help="Annotations linked to exactly one other and marked neither terminal nor off-edge in Viking: ends still to be traced (GraphApp's Show unfinished, in red)."><input type="checkbox" id="graph-unfinished"><span class="flag-dot flag-unfinished" aria-hidden="true"></span>Show unfinished</label>
+          <label class="check" data-help="Annotations marked Terminal in Viking: the process ends there (GraphApp's Show terminals, in blue)."><input type="checkbox" id="graph-terminals"><span class="flag-dot flag-terminals" aria-hidden="true"></span>Show terminals</label>
+          <label class="check" data-help="Annotations marked Off Edge in Viking: the process leaves the volume there (GraphApp's Show off edges, navy, here lightened to read on black)."><input type="checkbox" id="graph-offedges"><span class="flag-dot flag-offedges" aria-hidden="true"></span>Show off edges</label>
+          <label class="field" data-help="How large the dot at every annotation is (GraphApp's Marker Size).">Marker size
+            <select id="graph-marker">
+              <option value="minimal">Minimal</option>
+              <option value="medium">Medium</option>
+              <option value="large">Large</option>
+            </select></label>
+          <label class="check" data-help="Each unbranched segment of the skeleton, and its dots, in a color of its own from the colormap beside it: a branch reads as one color, and a change of color where none is expected shows a break in the links (GraphApp's Color segments; the same colors every time)."><input type="checkbox" id="graph-segments"> Color segments</label>
+          <label class="field" data-help="The colormap Color segments takes its colors from.">Colormap <select id="graph-colormap"></select></label>
+          <label class="field" data-help="A Location ID, or a synapse's structure ID, of a cell loaded in this volume; Enter flies there and rings it in yellow (GraphApp's Find ID). A Location ID of a cell not loaded is looked up in Viking.">Find ID <input id="graph-find" type="text" inputmode="numeric" spellcheck="false" autocomplete="off" placeholder="Location or synapse ID"></label>
         </div>
 
         <div class="viewport-tools">

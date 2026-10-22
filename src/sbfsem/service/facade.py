@@ -169,6 +169,7 @@ from .dto import (
     SkeletonProblemDTO,
     StatsDTO,
     StratificationDTO,
+    SynapsePointDTO,
     SynapseTypeCountDTO,
     VolumeInfoDTO,
 )
@@ -2146,6 +2147,24 @@ class SbfsemService:
             r = hit.iloc[0]
             out["xyz_um"] = [float(r.Xum), float(r.Yum), float(r.Zum)]
         return out
+
+    def synapse_points(self, neuron_id: int, source) -> list[SynapsePointDTO]:
+        """Every synapse of this copy of the cell, one point each: the annotation
+        ``get_synapse_xyz`` draws it at (``Unique``), with its structure ID and
+        type, for GraphApp's synapse dots and their readout."""
+        neuron = self.neuron(neuron_id, source)
+        synapses = neuron.synapses
+        if synapses is None or synapses.empty or "LocalName" not in synapses.columns:
+            return []
+        kinds = {int(i): StructureTypes.from_str(t).value
+                 for i, t in zip(synapses["ID"], synapses["LocalName"], strict=True)}
+        nodes = neuron.nodes
+        rows = nodes[nodes["ParentID"].isin(list(kinds)) & nodes["Unique"].astype(bool)]
+        return [
+            SynapsePointDTO(synapse_id=int(r.ParentID), type=kinds[int(r.ParentID)], location_id=int(r.ID),
+                            xyz_um=[float(r.Xum), float(r.Yum), float(r.Zum)], z_section=int(r.Z))
+            for r in rows.sort_values("ParentID").itertuples()
+        ]
 
     def nodes(self, neuron_id: int, source, *, cell_only: bool = True) -> list[NodeDTO]:
         neuron = self.neuron(neuron_id, source)

@@ -868,7 +868,7 @@ def compare(c: Chrome, r: Report, ctx):
     right_click(c, *points_of(0, 1)[0])
     m = menu(c)
     r.check('with Open in Viking, and the items that act on the cell', m is not None and 'Open in Viking' in m['items']
-            and 'Open GraphApp' in m['items'], m and m['items'][:8])
+            and 'Open in GraphApp' in m['items'], m and m['items'][:8])
     close_menu(c)
 
     # A second layer in the same pane, another shape (the tube sweep); each layer on its own.

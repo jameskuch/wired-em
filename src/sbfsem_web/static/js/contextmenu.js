@@ -106,7 +106,8 @@ export function identity(c) {
   if (CELL_KINDS.has(c.kind)) return `cell|${c.key}`;
   if (c.kind === 'annotation') return `annotation|${c.key}|${c.locationId}`;
   if (c.kind === 'skeleton') return `skeleton|${c.key}|${c.segment}`;
-  if (c.kind === 'synapse') return `synapse|${c.key}|${c.type}`;
+  // A GraphApp synapse is one synapse; the 3D render's markers are a type.
+  if (c.kind === 'synapse') return c.synapseId ? `synapse|${c.key}|#${c.synapseId}` : `synapse|${c.key}|${c.type}`;
   return `${c.kind}|${c.key}`;
 }
 
@@ -171,6 +172,8 @@ export function describeCandidate(c, { cell, volume = '' }) {
   if (c.kind === 'surface') return `Surface of ${cell} (${volume})`;
   if (c.kind === 'annowire') return `Annotation wireframe of ${cell} (${volume})`;
   if (c.kind === 'shifts') return `Position shift of ${cell} (${volume})`;
+  // One synapse (GraphApp's dots), or a type's markers (the 3D render's).
+  if (c.synapseId) return `Synapse ${c.synapseId} (${c.type}) of ${cell} (${volume}) · section ${c.section}`;
   return `${c.type} synapses of ${cell} (${volume})`;
 }
 
@@ -183,7 +186,7 @@ export function contextTitle(c, { cell, volume = '' }) {
   if (!c || CELL_KINDS.has(c.kind)) return cell;
   if (c.kind === 'annotation') return `${cell} · annotation ${c.locationId} (${volume})`;
   if (c.kind === 'skeleton') return `${cell} · skeleton branch`;
-  if (c.kind === 'synapse') return `${cell} · ${c.type} synapses`;
+  if (c.kind === 'synapse') return c.synapseId ? `${cell} · synapse ${c.synapseId} (${c.type})` : `${cell} · ${c.type} synapses`;
   return cell;
 }
 

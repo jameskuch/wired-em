@@ -244,6 +244,19 @@ class LocationDTO(BaseModel):
     loaded: bool
 
 
+class SynapsePointDTO(BaseModel):
+    """One synapse of a cell where GraphApp draws it: its structure ID, its type
+    (``StructureTypes`` value, the name the synapse counts carry), and the one
+    annotation that stands for it (``Unique``, nearest the synapse's median
+    section): its Location ID, place and section."""
+
+    synapse_id: int
+    type: str
+    location_id: int
+    xyz_um: list[float]
+    z_section: int
+
+
 class EdgeDTO(BaseModel):
     structure_id: int
     a: int

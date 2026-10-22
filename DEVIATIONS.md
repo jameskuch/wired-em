@@ -731,6 +731,46 @@ stays 6:
   near the traced size on average. Read only by the disc methods
   (`facade.READ_ONLY_BY`).
 
+### 5.16 GraphApp is a look of the 3D view
+
+MATLAB's `GraphApp` (`views/GraphApp.m`) opened a figure of its own for one
+neuron. Since 2.28.0 it is the 3D view's second look, the GraphApp button
+beside 3D render (`graphapp.js`): the same cells, camera and zoom, so it holds
+several cells and switching keeps the view. What it draws, and how it differs:
+
+- **The skeleton, a dot at every annotation, and the rings**, on black. MATLAB
+  drew black lines with black dots on white; here each cell takes a hue from a
+  fixed palette (`GRAPH_HUES`), its skeleton a near-white of that hue and its
+  dots and rings a pastel of it, so cells side by side are told apart. The 3D
+  render's colors are not used.
+- **No "surface".** MATLAB's Show surface lofted each segment's rings into a
+  translucent tube colored by Z. Here each annotation's ring is drawn flat in
+  its own section plane (*Rings*), which is what an annotation is
+  (CLAUDE.md ground rule 2).
+- **Dots at MATLAB's real sizes.** MATLAB draws a `.` marker at a third of the
+  size it is given: Marker Size 2, 7 and 10 pt are 1.5, 3 and 4.5 px here; the
+  flagged annotations' 12 pt and the synapses' 15 pt are 6 and 7 px.
+- **The flagged annotations**: unfinished red, terminal blue, off-edge navy
+  lightened to #a99bff so it reads on black. Unfinished is
+  `Structure.unfinished` (degree 1, neither terminal nor off-edge), computed in
+  the page from `/nodes` and `/edges`.
+- **Color segments** takes the colormap's colors at golden-ratio steps
+  (`segmentPositions`), the same every time. MATLAB shuffled them with
+  `randperm` on every tick, recolored the synapse and flag dots too, and turned
+  every line black when unticked; its color list doubled itself in a loop.
+- **A synapse's readout** (MATLAB's data tip): its ID, type, the cell it links
+  to and its annotation. MATLAB showed the link only when `neuron.links` had
+  been fetched already; here the cell's links are fetched on its first synapse
+  click.
+- **Find ID** takes a Location ID first, then a synapse's structure ID, as
+  MATLAB did, and flies there with the annotation ringed in yellow, where MATLAB
+  drew a gray sphere with a Delete menu.
+- **Not ported**: the keys (the arrows, `z`, `a`/`d`, `q`/`e`, `w`/`s` moved axis
+  limits in MATLAB; the view's own keys stand), the `h` help dialog (hover help
+  instead), the View / Data Cursor modes (a click always names), the Update
+  Neuron button (the list's ↻), the broken Table tab, and the off-edge delete
+  that read the wrong tag.
+
 ---
 
 ## 6. Changes that need a decision

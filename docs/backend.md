@@ -1204,6 +1204,7 @@ svc.load_neuron(943, "i")
 svc.render_mesh(943, "i", color_by_strata=True)
 svc.stratification(943, "i", num_bins=20)
 svc.network([943], "i")
+svc.synapse_points(943, "i")   # one point a synapse: ID, type, its Unique annotation (GraphApp's dots)
 ```
 
 What the facade is strict about, because a lenient answer would be a wrong one

@@ -2513,3 +2513,32 @@ select[aria-expanded="true"] { border-color: var(--accent); }
 /* The render strips size every select to its widest option (#panel-render .field select). */
 #panel-render .field .numchoice select.numchoice-menu,
 #panel-compare-options .field .numchoice select.numchoice-menu { width: 24px; }
+
+/* -- GraphApp (graphapp.js): the 3D view's second look ------------------------ */
+/* "3D render" and "GraphApp" are two tabs drawn as one, side by side. */
+/* "3D render" and "GraphApp" read as one tab with two buttons: one outline round
+   both, the look shown filled. */
+.tab-pair {
+  display: inline-flex; align-items: stretch; padding: 2px;
+  border: 1px solid var(--line); border-bottom: none; border-radius: 6px 6px 0 0;
+}
+.tab-pair .tab { border: none; border-radius: 4px; padding: 4px 11px; }
+.tab-pair .tab.active { background: var(--bg); box-shadow: inset 0 0 0 1px var(--line); }
+.tab-pair:has(.tab.active) { background: var(--bg); }
+/* While GraphApp is shown, the 3D render's own controls step aside. */
+#view-render.graph-on #toggle-display,
+#view-render.graph-on .quick-render,
+#view-render.graph-on .tool-panels,
+#view-render.graph-on #render-scope,
+#view-render.graph-on #shift-chip,
+#view-render.graph-on #colorbar,
+#view-render.graph-on #render-notice { display: none !important; }
+.graph-tools { flex-wrap: wrap; align-items: center; }
+.graph-tools .field input[type="text"] { width: 150px; flex: none; }
+.graph-tools .flag-dot {
+  display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  margin: 0 4px 0 2px; vertical-align: middle;
+}
+.flag-dot.flag-unfinished { background: #ff5c5c; }
+.flag-dot.flag-terminals { background: #4aa8ff; }
+.flag-dot.flag-offedges { background: #a99bff; }

@@ -53,6 +53,11 @@ export const STORAGE_GROUPS = [
     keys: ['sbfsem:correction-log-ratio'],
   },
   {
+    id: 'graphapp', label: 'GraphApp controls',
+    help: 'What GraphApp shows (rings, synapses, the flagged annotations), its marker size and Color segments',
+    keys: ['sbfsem:graphapp'],
+  },
+  {
     id: 'strata', label: 'Stratification chart',
     help: 'The Stratification tab’s gridline step and what its PDF includes, as last chosen',
     keys: ['sbfsem:strata-ticks', 'sbfsem:strata-pdf'],

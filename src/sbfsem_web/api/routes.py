@@ -67,6 +67,7 @@ from sbfsem.service.dto import (
     SkeletonCheckDTO,
     SkeletonDTO,
     StratificationDTO,
+    SynapsePointDTO,
     VolumeInfoDTO,
 )
 from sbfsem.service.estimate import FINEST_UM as ESTIMATE_FINEST_UM
@@ -669,6 +670,16 @@ def neuron_nodes(request: Request, source: str, neuron_id: int, cell_only: bool 
     src = _source(source)
     _neuron_or_404(svc, neuron_id, src)
     return svc.nodes(neuron_id, src, cell_only=cell_only)
+
+
+@router.get("/neurons/{source}/{neuron_id}/synapse-points", response_model=list[SynapsePointDTO])
+def neuron_synapse_points(request: Request, source: str, neuron_id: int):
+    """Every synapse of the cell as one point (its structure ID, type, and the
+    annotation it is drawn at), for GraphApp's synapse dots."""
+    svc = service(request)
+    src = _source(source)
+    _neuron_or_404(svc, neuron_id, src)
+    return svc.synapse_points(neuron_id, src)
 
 
 @router.get("/volumes/{source}/locations/{location_id}", response_model=LocationDTO)

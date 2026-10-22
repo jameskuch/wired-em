@@ -37,6 +37,10 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
 * ``sheets`` -- Undo of a context sheet reaches the session stored in the browser.
 * ``volume`` -- switching volume takes the first volume's boundary sheets off the scene.
 * ``hold`` -- Hold in the Display panel keeps a load from reframing the scene.
+* ``graphapp`` -- GraphApp, the 3D view's second look: drawn in the background, switched both ways in
+  a frame with the camera and the shown cells kept, black, the 3D render's controls out of the way,
+  the cell list's GraphApp colors and sections, the controls, a synapse's readout, Find ID, Isolate
+  from GraphApp's right click, and Open in GraphApp from the 3D render's, each giving visibility back.
 * ``blind`` -- a surface landing in a view that shows no cell frames it (a load into a list that
   already held a row did not, 2026-10-21); a view that shows a cell, or one Held, stays; ``m``
   resets the view with the focus on the Load button, not only after a click in the canvas.
@@ -779,6 +783,122 @@ def hold(c: Chrome, r: Report, ctx):
     c.wait_for('window.sbfsem.renderer.meshes.size === 1', 240)
     c.settle(3)
     r.check('and neither does the cell\'s arrival', not moved(before, camera()), (before, camera()))
+
+
+# -- graphapp ---------------------------------------------------------------------------------
+
+def graphapp(c: Chrome, r: Report, ctx):
+    r.start('graphapp: the 3D view\'s second look')
+    R = 'window.sbfsem.renderer'
+    shown_js = f"[...{STATE}.neurons.values()].map((x) => [x.id, x.visible])"
+
+    def shown():
+        return [list(x) for x in js(c, shown_js)]
+    boot(c, ctx.url)
+    first = load(c, ctx.cell)
+    second = load(c, ctx.second)
+    r.check('both cells are drawn for GraphApp in the background, before it is opened',
+            c.wait_for(f'{R}.graphs.size === 2', 60), js(c, f'{R}.graphs.size'))
+    before = js(c, f'JSON.stringify({R}.cameraState())')
+    js(c, "document.querySelector('.tab[data-look=\"graph\"]').click()")
+    c.settle(2)
+    r.check('GraphApp is shown, its tab lit', js(c, f'{R}.look') == 'graph'
+            and js(c, "document.querySelector('.tab.active').textContent") == 'GraphApp')
+    r.check('on black', js(c, f'{R}.scene.background.getHex()') == 0)
+    r.check('the camera is where it was', js(c, f'JSON.stringify({R}.cameraState())') == before)
+    r.check('GraphApp\'s controls shown, the 3D render\'s technique and Display panel stepped aside',
+            js(c, "!document.getElementById('graph-tools').hidden")
+            and js(c, "document.getElementById('toggle-display').offsetParent === null")
+            and js(c, "document.getElementById('quick-technique').offsetParent === null"))
+    parts = js(c, f"""[...{R}.graphs.get({json.dumps(second)}).children].map((p) => p.userData.part)""")
+    r.check('a cell is its skeleton, rings and a dot per annotation', {'skeleton', 'discs', 'nodes'} <= set(parts), parts)
+    dot = js(c, f"{row(first, '.row-dot')}.style.background")
+    r.check('the list\'s dot is the cell\'s GraphApp color, not its 3D render color',
+            dot and dot != js(c, f"{STATE}.neurons.get({json.dumps(first)}).color"), dot)
+    js(c, f"{row(first, '.neuron-head')}.click()")
+    c.settle(2)
+    sections = js(c, f"""[...{row(first)}.parentElement.querySelectorAll('.cell-section .sec-name')]
+        .map((e) => e.textContent)""") or js(c, """[...document.querySelectorAll('.cell-panel .sec-name')]
+        .map((e) => e.textContent)""")
+    r.check('the cell panel keeps only what GraphApp uses', sorted(sections) == ['Registration', 'Skeleton check'],
+            sections)
+    js(c, f"{row(first, '.neuron-head')}.click()")
+    # The controls: a box shows its part at once, and is kept.
+    js(c, "document.getElementById('graph-unfinished').click()")
+    c.settle(1)
+    on = js(c, f"""[...{R}.graphs.values()].flatMap((g) => g.children)
+        .filter((p) => p.userData.part === 'unfinished').every((p) => p.visible)""")
+    r.check('Show unfinished draws the unfinished annotations', on)
+    r.check('and is kept in this browser', '"unfinished":true' in (js(c, "localStorage.getItem('sbfsem:graphapp')") or ''))
+    js(c, "document.getElementById('graph-segments').click()")
+    c.settle(1)
+    colors = js(c, f"""(() => {{ const s = [...{R}.graphs.get({json.dumps(second)}).children]
+        .find((p) => p.userData.part === 'skeleton'); const a = s.geometry.getAttribute('color').array;
+        const seen = new Set(); for (let i = 0; i < a.length; i += 3) seen.add(a.slice(i, i + 3).join());
+        return seen.size; }})()""")
+    r.check('Color segments gives the segments colors of their own', colors > 3, colors)
+
+    # A synapse's dot names the synapse, its type and the cell it links to.
+    js(c, "document.getElementById('graph-synapses').click()")
+    c.settle(1)
+    hit = js(c, f"""(() => {{ const R = {R}; R.resetView(); R.webgl.render(R.scene, R.camera);
+        const syn = [...R.graphs.get({json.dumps(second)}).children].find((p) => p.userData.part === 'synapses');
+        const rect = R.webgl.domElement.getBoundingClientRect();
+        for (const s of syn.userData.synapses) {{
+          const w = R.toWorld(s.xyz_um, {json.dumps(ctx.source)});
+          const v = R.camera.position.clone().set(w[0] ?? w.x, w[1] ?? w.y, w[2] ?? w.z).project(R.camera);
+          const x = rect.left + (v.x + 1) / 2 * rect.width;
+          const y = rect.top + (1 - v.y) / 2 * rect.height;
+          if (R.pickAt(x, y)?.synapse?.id === s.synapse_id) return {{ x, y, id: s.synapse_id }};
+        }}
+        return null; }})()""")
+    if hit:
+        c.click(hit['x'], hit['y'])
+        c.wait_for("document.getElementById('pick-text').textContent.includes('link')", 30)
+        text = js(c, "document.getElementById('pick-text').textContent")
+        r.check('a click on a synapse names it, its type and what it links to',
+                f"synapse {hit['id']}" in text and 'link' in text, text)
+        js(c, "(() => { const f = document.getElementById('graph-find'); f.value = '%d';"
+              " f.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()" % hit['id'])
+        c.wait_for(f'{R}.selection?.synapseId === {hit["id"]}', 30)
+        r.check('Find ID takes a synapse ID to it, ringed', js(c, f'{R}.selection?.synapseId') == hit['id'])
+    else:
+        r.skip('a click on a synapse names it, its type and what it links to', 'no synapse dot on screen')
+
+    # Isolate, from GraphApp's own right click, and back.
+    r.check('GraphApp\'s right click isolates a cell', menu_item(c, first, f'Isolate c{ctx.cell}'))
+    c.settle(1)
+    r.check('every other cell hidden', shown() == ([[ctx.cell, True], [ctx.second, False]]),
+            shown())
+    js(c, "document.querySelector('.tab[data-view=\"render\"]:not([data-look])').click()")
+    c.settle(2)
+    r.check('3D render gives the visibility back, its camera unchanged',
+            shown() == ([[ctx.cell, True], [ctx.second, True]])
+            and js(c, f'{R}.look') == 'render', shown())
+
+    # Open in GraphApp from the 3D render: that cell alone; the eye still works; back gives it all back.
+    js(c, f"{STATE}.neurons.get({json.dumps(first)}) && null")
+    r.check('the 3D render\'s right click has Open in GraphApp', menu_item(c, second, 'Open in GraphApp'))
+    c.settle(2)
+    r.check('it shows GraphApp with that cell alone',
+            js(c, f'{R}.look') == 'graph' and shown() == ([[ctx.cell, False], [ctx.second, True]]),
+            shown())
+    js(c, f"{row(first, '.vis')}.click()")
+    c.settle(1)
+    r.check('a hidden cell can be shown again in GraphApp', shown() == ([[ctx.cell, True], [ctx.second, True]]))
+    js(c, f"{row(first, '.vis')}.click()")
+    js(c, "document.querySelector('.tab[data-view=\"render\"]:not([data-look])').click()")
+    c.settle(2)
+    r.check('and 3D render gives back what was shown before', shown() == ([[ctx.cell, True], [ctx.second, True]]),
+            shown())
+
+    # The switch itself: a flip of two layers.
+    took = js(c, f"""(() => {{ const R = {R}; const g = document.querySelector('.tab[data-look="graph"]');
+        const d = document.querySelector('.tab[data-view="render"]:not([data-look])'); const t = [];
+        for (let i = 0; i < 4; i += 1) {{ for (const b of [g, d]) {{ const t0 = performance.now(); b.click();
+          R.webgl.render(R.scene, R.camera); t.push(performance.now() - t0); }} }}
+        return Math.max(...t.slice(2)); }})()""")
+    r.check('switching either way, a frame included, takes under 50 ms', took < 50, f'{took:.1f} ms')
 
 
 # -- blind ------------------------------------------------------------------------------------
@@ -3353,6 +3473,7 @@ SECTIONS = {
     'notice': notice, 'waiting': waiting, 'draws': draws, 'undo': undo, 'idle': idle,
     'picker': picker, 'save': save, 'analysis': analysis, 'strata': strata, 'strataexport': strataexport, 'twod': twod, 'sheets': sheets, 'volume': volume,
     'hold': hold,
+    'graphapp': graphapp,
     'blind': blind,
     'orbit': orbit,
     'keys': keys,

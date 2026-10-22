@@ -2692,6 +2692,48 @@ await sbfsem.api.stratification('i', 943) // any API call, as JSON
 Useful for scripted figure passes: set a camera angle, hide everything but one
 neuron, snapshot, repeat.
 
+## GraphApp
+
+The tab row's first tab has two buttons, **3D render** and **GraphApp** (since
+2.28.0). GraphApp shows the same cells, with the same camera and zoom, as MATLAB
+SBFSEM-tools' GraphApp drew a neuron: on black, with no surface, each cell's
+skeleton in a near-white, a dot at every annotation and the annotations' rings
+(each in its own section plane) in a pastel of the same hue. Each cell takes the
+next hue of GraphApp's own palette, and the list's dot shows it; the 3D render's
+colors are left alone. Switching either way takes a frame: each cell's GraphApp
+drawing is made in the background once its 3D render is drawn, and the 3D render
+is never rebuilt, so going back shows it exactly as it was.
+
+The cells shown are the list's: the eyes work in both. The cell panel keeps only
+**Skeleton check** and **Registration** in GraphApp; the 3D render's display
+sections, the render technique, the Display panel, the context sheets, the vessels
+and the Position shift arrows step aside.
+
+The controls under the view are GraphApp's, each with its hover help and kept in
+this browser:
+
+| Control | What it does |
+|---|---|
+| **Rings** | each annotation's ring in its section plane (on by default) |
+| **Show synapses** | a dot at each synapse in its type's color |
+| **Show unfinished** | red: linked to exactly one other annotation and marked neither terminal nor off-edge, an end still to trace |
+| **Show terminals** | blue: marked Terminal in Viking |
+| **Show off edges** | violet (MATLAB's navy, lightened for black): marked Off Edge |
+| **Marker size** | Minimal, Medium or Large dots (MATLAB's 2, 7 and 10 pt "." markers) |
+| **Color segments** | each unbranched segment, and its dots, in a color of its own from **Colormap**: a branch reads as one color, and an unexpected change of color shows a break in the links |
+| **Find ID** | a Location ID, or a synapse's structure ID, of a cell loaded in this volume; Enter flies there and rings it in yellow |
+
+A click names what is under the pointer: an annotation (its Location ID, section
+and Viking position, as in the 3D render) or a synapse (its ID, type and the cell
+it links to, read from Viking once per cell). The right-click menu is short:
+**Isolate cN** hides every other cell, and unticking it shows them again as they
+were; **Open in Viking** for an annotation; **Deselect**. The 3D render's own right
+click has **Open in GraphApp**, which goes to GraphApp with that cell alone; any cell
+can be shown again from the list while there, and **3D render** gives back the
+visibility from before. The GraphApp button itself keeps what is shown.
+
+The differences from MATLAB's GraphApp are in DEVIATIONS.md (5.16).
+
 ## Render compare
 
 One cell, rendered several ways at once. Pick the cell (listed with its
