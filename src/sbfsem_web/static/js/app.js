@@ -29,7 +29,7 @@ import {
   TECH_KNOBS, loadTechDefaults, storeTechDefaults, techKey, techniqueDefaults,
   curvePixelFor, CURVE_METHODS, curvePixelSeed, estimateBuildSeconds,
   RENDER_PRESETS, RENDER_REQUIRES, matchPreset, presetOptions, knobSummary, withIplMethod,
-  drawsIplDepth,
+  drawsIplDepth, flatQuery,
 } from './renderoptions.js';
 import {
   EstimateCache, estimateChip, estimateQuery, fittedPixel, fitStillWanted, interim, mainReason,
@@ -223,6 +223,8 @@ const meshCache = new MeshCache();
 // (askKept).  Let go of with the surfaces after a redeploy and when a workspace opens.
 const keptExtras = new MeshCache(KEPT_EXTRAS_LIMIT, extrasWeight);
 const skeletonCache = new Map();
+/** key -> { method, data }: a cell's skeleton on the flattened IPL (the 3D render's; GraphApp's is the other). */
+const flatSkeletonCache = new Map();
 // The newest draw of each cell: an older one still waiting on a build stands down.
 const draws = new DrawTokens();
 
@@ -251,6 +253,30 @@ function cellLabel(record) {
 function volumeHasBoundary(source) {
   const volume = state.volumes.find((v) => v.name === source);
   return volume ? !!volume.has_boundary : true;
+}
+
+// -- the flattened IPL (Display → Flatten IPL) ---------------------------------
+// James Anderson's request of 2026-10-22: every cell drawn with its volume's INL and
+// GCL flat, its Z the IPL depth times the volume's median IPL thickness along the
+// normals (the INL at 0), at 1:1 with X and Y.  One choice for the whole view, made
+// in the Display panel and off at every page load: it hides what is drawn in section
+// coordinates (rings, outlines, the annotation wireframe, the Position shift layer,
+// manual moves, markers), which a flattened Z cannot carry.
+let iplFlat = false;
+
+/** Whether `record` is drawn on the flattened IPL: the view is, and its volume has boundary markers. */
+function flatFor(record) {
+  return iplFlat && !!record && volumeHasBoundary(record.source);
+}
+
+/** What a request for a layer of `source` adds in the flattened view (`flatQuery`; {} otherwise). */
+function flatParams(source) {
+  return flatQuery(currentIplMethod(), iplFlat && volumeHasBoundary(source));
+}
+
+/** A cell's Z range as the renderer takes it: none while the cell is flattened, where Z is IPL depth. */
+function zHideOf(record, d) {
+  return flatFor(record) ? { min: null, max: null } : { min: d.zMin, max: d.zMax };
 }
 /**
  * Whether a volume's current section transforms are read here (`has_transforms`),
@@ -468,7 +494,7 @@ async function applyHistory(snap) {
         renderer.setWireframe(record.key, d.showWireframe);
         // The cell's Z range is a display setting like the rest: undoing or
         // redoing a Hide above/below must put the range back.
-        renderer.setZHide(record.key, { min: d.zMin, max: d.zMax });
+        renderer.setZHide(record.key, zHideOf(record, d));
         renderer.setWireframeStyle(record.key, {
           color: d.wireframeColor || record.color, opacity: d.wireframeOpacity,
         });
@@ -596,7 +622,8 @@ async function boot() {
       pickedRing(pick);
       // The readout names what the pointer is nearest (hoverReadout); a click still
       // names its cell in the list, and leaves the readout to the pointer.
-      if (hovered && !pick.copied) {
+      // A flattened cell's point has a depth, not an annotation: the click writes it.
+      if (hovered && !pick.copied && !flatFor(state.neurons.get(pick.key))) {
         if (pick.key) selectNeuron(pick.key);
       } else {
         await showPick(pick);
@@ -668,6 +695,7 @@ async function boot() {
       flare: (text) => flareStatus(text),
       fail,
       fly: flyToAnnotation,
+      flattened: (record) => flatFor(record),
     },
     dom: { panel: $('move-panel') },
   });
@@ -700,6 +728,9 @@ async function boot() {
   compare.setPaneCount(4);
   display = new DisplayPanel({
     renderer, api, state,
+    flatParams: (source) => flatParams(source),
+    onFlatten: (on) => setIplFlat(on),
+    hasBoundary: (source) => volumeHasBoundary(source),
     onChange: () => persist(),
     onStatus: (message, kind) => {
       statusEl.textContent = message;
@@ -774,6 +805,8 @@ async function boot() {
       if (fallback) setSource(fallback.name);
     }
     select.value = state.source;
+    // Flatten IPL is off in a volume with no boundary markers, now that the list says which.
+    display?.syncFlatten(iplFlat);
   } catch (error) {
     fail(error);
   }
@@ -1464,7 +1497,9 @@ function bindEvents() {
   }
 
   $('reset-view').addEventListener('click', resetViewNow);
-  $('snapshot').addEventListener('click', () => renderer.snapshot(`sbfsem-${Date.now()}.png`));
+  // A flattened view's picture says what its Z is and the thickness it was scaled by.
+  $('snapshot').addEventListener('click', () => renderer.snapshot(`sbfsem-${Date.now()}.png`,
+    { caption: flatLines() }));
   bindVideo();
 
   $('undo-btn').addEventListener('click', () => undoHistory());
@@ -2007,7 +2042,7 @@ function onStateChange(event) {
       });
       renderer.setSurface(record.key, d.showSurface);
       renderer.setWireframe(record.key, d.showWireframe);
-      renderer.setZHide(record.key, { min: d.zMin, max: d.zMax });
+      renderer.setZHide(record.key, zHideOf(record, d));
       for (const entry of record.synapseCounts) {
         const t = typeSettings(record.display, entry.local_name);
         renderer.setSynapseStyle(record.key, {
@@ -2840,12 +2875,116 @@ function iplMethodWords(method = currentIplMethod()) {
 async function iplMethodChanged() {
   strataFor = null;
   if (state.view === 'strata') drawStratification();
-  const depthDrawn = [...state.neurons.values()].filter((r) => drawsIplDepth(normalizeRender(r.render)));
+  const depthDrawn = [...state.neurons.values()].filter((r) => (
+    drawsIplDepth(normalizeRender(r.render)) || flatFor(r)));
+  // The flattened sheets lie where the method puts them too.
+  if (iplFlat) display?.flattenChanged();
   for (const record of depthDrawn) await rebuildOne(record);
   if (depthDrawn.length) {
     statusEl.textContent = `IPL depth ${iplMethodWords()}: redrew ${describeCells(depthDrawn)}`;
     statusEl.className = 'status';
   }
+  if (iplFlat) updateFlatNote();
+}
+
+/**
+ * Flatten IPL turned on or off (the Display panel, or `why` when the page turned it
+ * off itself: GraphApp draws in section coordinates).  Every cell is drawn again,
+ * flattened where its volume has IPL boundary markers, the context sheets with
+ * them, and the view framed again unless Held: the cells' Z moves by tens of µm.
+ * Turning it on lets go of the selection and the markers, drawn in section
+ * coordinates; it waits while annotations are being moved.
+ */
+async function setIplFlat(on, { why = '' } = {}) {
+  on = !!on;
+  if (on && moves?.active) {
+    display?.syncFlatten(iplFlat);
+    flareStatus('Leave move mode (Esc) before flattening the IPL');
+    return;
+  }
+  if (on === iplFlat) { display?.syncFlatten(iplFlat); return; }
+  iplFlat = on;
+  // What the readout named was in the other frame.
+  hovered = null;
+  lastPick = null;
+  showPickShift(null);
+  $('pick-text').textContent = on ? 'Click a flattened cell: its depth from the INL shows here'
+    : 'Point at a cell: the nearest annotation shows here';
+  $('pick-viking').textContent = 'Viking —';
+  $('pick-location').textContent = 'Location ID —';
+  display?.syncFlatten(iplFlat);
+  if (on) renderer.clearSelection();
+  display?.flattenChanged();
+  const records = [...state.neurons.values()];
+  statusEl.textContent = `${on ? 'Flattening' : 'Unflattening'} the IPL: drawing ${describeCells(records)}…`;
+  statusEl.className = 'status busy';
+  for (const record of records) await rebuildOne(record);
+  if (records.length && !display?.holdLimits) renderer.resetView();
+  await updateFlatNote();
+  const skipped = records.filter((r) => on && !volumeHasBoundary(r.source));
+  // Flared, so the busy line's "ready" does not take it straight away.
+  flareStatus((why || (on ? 'IPL flattened: Z is depth from the INL, scaled 1:1 (Display panel)'
+    : 'IPL no longer flattened: cells drawn in their volumes\' own Z'))
+    + (skipped.length ? `; ${describeCells(skipped)} not flattened (no IPL boundary markers)` : ''));
+}
+
+/** A volume's IPL thickness (`/ipl-thickness`), asked once per volume. */
+function askIplThickness(source) {
+  if (!iplThickness.has(source)) {
+    iplThickness.set(source, api.iplThickness(source).catch((error) => {
+      iplThickness.delete(source);
+      throw error;
+    }));
+  }
+  return iplThickness.get(source);
+}
+
+/** source -> the µm its cells are flattened by, as the server reported it. */
+const flatThicknessOf = new Map();
+
+/**
+ * The flattened view's lines, as the Display panel's note and a snapshot's caption
+ * carry them: what Z is, and each flattened volume's thickness.  [] when the view
+ * is not flattened.
+ */
+function flatLines({ short = false } = {}) {
+  if (!iplFlat) return [];
+  const sources = [...new Set([...state.neurons.values()].map((r) => r.source))];
+  if (!sources.length) sources.push(state.source);
+  const lines = [short
+    ? 'Z = depth from the INL x the median IPL thickness along the normals, 1:1.'
+    : `Flattened IPL: Z = depth from the INL (measured ${iplMethodWords()}) `
+      + 'x the volume\'s median IPL thickness along the normals; X/Y:Z 1:1.'];
+  for (const source of sources) {
+    if (!volumeHasBoundary(source)) {
+      lines.push(`${volumeLongName(source)}: not flattened (no IPL boundary markers).`);
+      continue;
+    }
+    const t = flatThicknessOf.get(source);
+    lines.push(t == null ? `${volumeLongName(source)}: …`
+      : `${volumeLongName(source)}: INL at Z = 0, GCL at Z = ${t.toFixed(2)} µm.`);
+  }
+  return lines;
+}
+
+/** What the note under Flatten IPL adds to `flatLines`: what a flattened cell does not draw. */
+const FLAT_HIDDEN = 'Rings, markers and arrows are not drawn while flattened (they sit in sections).';
+
+/** The Display panel's note under Flatten IPL, once each shown volume's thickness is known. */
+async function updateFlatNote() {
+  const note = () => (iplFlat ? [...flatLines({ short: true }), FLAT_HIDDEN] : []);
+  display?.setFlattenNote(note());
+  if (!iplFlat) return;
+  const sources = new Set([...state.neurons.values()].map((r) => r.source));
+  if (!sources.size) sources.add(state.source);
+  for (const source of sources) {
+    if (!volumeHasBoundary(source) || flatThicknessOf.has(source)) continue;
+    try {
+      const t = await askIplThickness(source);
+      if (t?.normal_um?.median != null) flatThicknessOf.set(source, t.normal_um.median);
+    } catch { /* the note says … for it */ }
+  }
+  display?.setFlattenNote(note());
 }
 
 /**
@@ -2903,9 +3042,11 @@ async function addToScene(record, {
    */
   const obtain = async (asked) => {
     let opts = asked;
-    // A surface cut or colored by IPL depth is the page's depth method's (never the cell's option).
+    // A surface cut or colored by IPL depth is the page's depth method's (never the cell's
+    // option), and so is one drawn on the flattened IPL, the view's.
     const depthMethod = currentIplMethod();
-    let cacheKey = meshCacheKey(record, effectiveSignature(withIplMethod(opts, depthMethod)));
+    const flat = flatFor(record);
+    let cacheKey = meshCacheKey(record, effectiveSignature(withIplMethod(opts, depthMethod, flat)));
     let mesh = meshCache.get(cacheKey);
     if (!mesh && !verbatim && CURVE_METHODS.has(opts.method)) {
       // Held to the server's estimate before anything is built: a Voxel size too
@@ -2914,7 +3055,7 @@ async function addToScene(record, {
       if (await fitPixelFor(record, opts, current)) {
         if (!current()) return null;
         opts = normalizeRender(state.neurons.get(record.key).render);
-        cacheKey = meshCacheKey(record, effectiveSignature(withIplMethod(opts, depthMethod)));
+        cacheKey = meshCacheKey(record, effectiveSignature(withIplMethod(opts, depthMethod, flat)));
         mesh = meshCache.get(cacheKey);
       }
       if (!current()) return null;
@@ -2922,7 +3063,7 @@ async function addToScene(record, {
     if (mesh) return { mesh, options: opts, fetched: false };
     waiting ??= showWaitingPoints(record, current, framing);
     progress?.stage('queued on the server');
-    mesh = await api.mesh(record.source, record.id, withIplMethod(opts, depthMethod), {
+    mesh = await api.mesh(record.source, record.id, withIplMethod(opts, depthMethod, flat), {
       alive: current,
       onSubmitted: askExtras,
       onStatus: progress ? (job) => progress.stage(stageText(job)) : undefined,
@@ -3010,6 +3151,9 @@ async function addToScene(record, {
     renderer.setMesh(record.key, mesh, {
       color: record.color, opacity: record.opacity, material: materialSpec(d0.material),
     });
+    // The thickness a flattened surface was scaled by, for the readout, the files and the note.
+    record.flatThickness = mesh.ipl_flatten_um ?? null;
+    if (record.flatThickness != null) flatThicknessOf.set(record.source, record.flatThickness);
     // Whichever draw puts the surface on screen ends the waiting points, the
     // one that made them or not: a draw that hit this tab's cache has none of
     // its own, and the retired build before it left its points for this draw to
@@ -3018,7 +3162,7 @@ async function addToScene(record, {
     renderer.setSurface(record.key, d0.showSurface);
     renderer.setWireframe(record.key, d0.showWireframe);
     // removeAll forgets a cell's Z range; its display settings hold it.
-    renderer.setZHide(record.key, { min: d0.zMin, max: d0.zMax });
+    renderer.setZHide(record.key, zHideOf(record, d0));
     // setMesh builds the wire child at the cell color and full opacity;
     // restore the panel's own wireframe styling on every rebuild.
     renderer.setWireframeStyle(record.key, {
@@ -3297,8 +3441,10 @@ async function refreshExtras(record, { early = null } = {}) {
   const gen = loadGeneration(record.key);
   const gone = () => loadGeneration(record.key) !== gen;
   if (early && !(await adoptExtras(early, extraCaches(), record.key, gone))) return;
+  // On the flattened IPL, what is drawn in section coordinates is not drawn.
+  const flat = flatFor(record);
 
-  if (display.showDiscs) {
+  if (display.showDiscs && !flat) {
     try {
       // Cached: stroke changes rebuild the rings from the same annotations.
       let nodes = nodesCache.get(record.key);
@@ -3331,10 +3477,11 @@ async function refreshExtras(record, { early = null } = {}) {
 
   // The Position shift layer: drawn from the same cached annotations, so it costs
   // a request only the first time they are needed.
-  await shifts?.refresh(record, { gone });
+  if (flat) shifts?.remove(record);
+  else await shifts?.refresh(record, { gone });
   if (gone()) return;
 
-  if (display.showAnnoWire) {
+  if (display.showAnnoWire && !flat) {
     try {
       const params = annoWireParams(display);
       const sig = JSON.stringify(params);
@@ -3360,11 +3507,24 @@ async function refreshExtras(record, { early = null } = {}) {
     try {
       // Cached: changing the skeleton's width rebuilds its geometry, and
       // re-fetching identical centerline data to do that would be waste.
-      let skeleton = skeletonCache.get(record.key);
-      if (!skeleton) {
-        skeleton = await askSkeleton(record);
-        if (gone()) return;
-        skeletonCache.set(record.key, skeleton);
+      let skeleton;
+      if (flat) {
+        // On the flattened IPL: the server's flattening, kept by the depth method.
+        const method = currentIplMethod();
+        const kept = flatSkeletonCache.get(record.key);
+        skeleton = kept?.method === method ? kept.data : null;
+        if (!skeleton) {
+          skeleton = await api.skeleton(record.source, record.id, flatParams(record.source));
+          if (gone()) return;
+          flatSkeletonCache.set(record.key, { method, data: skeleton });
+        }
+      } else {
+        skeleton = skeletonCache.get(record.key);
+        if (!skeleton) {
+          skeleton = await askSkeleton(record);
+          if (gone()) return;
+          skeletonCache.set(record.key, skeleton);
+        }
       }
       if (gone()) return;
       renderer.setSkeleton(record.key, skeleton, {
@@ -3390,7 +3550,7 @@ async function refreshExtras(record, { early = null } = {}) {
           type: entry.local_name,
           mesh: t.show
             ? await api.synapseMesh(record.source, record.id, entry.local_name, {
-              radius_um: t.size, shape: t.shape,
+              radius_um: t.size, shape: t.shape, flat: flatParams(record.source),
             })
             : null,
           // The Viking color for the type, unless overridden.
@@ -3566,6 +3726,19 @@ async function showPick({ point, key, copied }) {
   // not the renderer's last clicked point.
   if (copied && (lastPick || !point)) { copyPickField('viking'); return; }
   const record = key ? state.neurons.get(key) : null;
+  if (record && flatFor(record)) {
+    // A point on the flattened IPL has no place in Viking's sections: its Z is depth.
+    lastPick = null;
+    showPickShift(null);
+    const t = record.flatThickness;
+    writeGroups($('pick-text'), `${volumeLongName(record.source)} c${record.id}`,
+      `µm ${point.x.toFixed(2)}, ${point.y.toFixed(2)}`,
+      `depth ${point.z.toFixed(2)} µm from the INL${t != null ? ` (GCL at ${t.toFixed(2)})` : ''}`);
+    $('pick-viking').textContent = 'Viking — (the IPL is flattened)';
+    $('pick-location').textContent = 'Location ID —';
+    if (key) selectNeuron(key);
+    return;
+  }
   const scale = pickScale(record);
   const source = record?.source || state.source;
   const pick = {
@@ -3648,7 +3821,8 @@ const hoverAsked = new Map();       // key -> the load of the cell a fetch was s
 function hoverReadout(clientX, clientY) {
   const cells = [];
   for (const record of state.neurons.values()) {
-    if (!record.visible) continue;
+    // A flattened cell is drawn on IPL depth, its annotations in sections: none is nearest.
+    if (!record.visible || flatFor(record)) continue;
     const nodes = nodesCache.get(record.key);
     if (nodes) {
       cells.push({ key: record.key, nodes });
@@ -4896,6 +5070,7 @@ function initFullscreen() {
 function forgetDrawn(record, { keepSurfaces = false, keepDrawn = false } = {}) {
   if (!keepSurfaces) dropWithPrefix(meshCache, `${record.key}|`);
   skeletonCache.delete(record.key);
+  flatSkeletonCache.delete(record.key);
   nodesCache.delete(record.key);
   nodesAsked.delete(record.key);
   edgesCache.delete(record.key);
@@ -5772,11 +5947,15 @@ function choose(candidate) {
  * GraphApp click, which takes the nearest dot (markers.js `dotChoices`). */
 function onSelectRequest({ candidates: under, clientX, clientY, look = 'render' }) {
   hideContextMenu();
-  // The rings about as near as the nearest one, not its neighbors a few pixels off.
-  const candidates = look === 'graph' ? dotChoices(under) : choosable(under);
+  // The rings about as near as the nearest one, not its neighbors a few pixels off.  A
+  // flattened cell has no annotation to choose: its Z is depth, not a section.
+  const unflat = iplFlat ? under.filter((c) => !flatFor(state.neurons.get(c.key))) : under;
+  const candidates = look === 'graph' ? dotChoices(unflat) : choosable(unflat);
   if (!candidates.length) {
     renderer.clearSelection();
-    statusEl.textContent = 'Nothing selectable there (the surface never is)';
+    statusEl.textContent = under.length && !unflat.length
+      ? 'No annotation can be chosen on the flattened IPL: its Z is depth, not a section (Display → Flatten IPL)'
+      : 'Nothing selectable there (the surface never is)';
     statusEl.className = 'status';
     return;
   }
@@ -6601,10 +6780,15 @@ async function exportLoadedSwc(source) {
 /** The file one cell's export link names, and its name: from the cell as it is now. */
 function exportRequest(record, fmt, extra = {}) {
   const live = state.neurons.get(record.key) ?? record;
+  // A surface or its wireframe is written as drawn, flattened too; an SWC or the
+  // JSON carries the annotations where Viking has them.
+  const flat = flatFor(live) && fmt !== 'swc' && fmt !== 'json';
+  const t = flat ? (live.flatThickness ?? flatThicknessOf.get(live.source)) : null;
+  const tag = flat ? `-ipl-flat${t != null ? `-${Number(t.toFixed(4))}um` : ''}` : '';
   return {
     url: api.exportUrl(live.source, live.id, fmt,
-      { ...exportOptions(live), ...(fmt === 'swc' ? SWC_APP_OPTIONS : {}), ...extra }),
-    filename: extra.wireframe ? `c${live.id}-wireframe.${fmt}` : `c${live.id}.${fmt}`,
+      { ...exportOptions(live, flat), ...(fmt === 'swc' ? SWC_APP_OPTIONS : {}), ...extra }),
+    filename: extra.wireframe ? `c${live.id}-wireframe${tag}.${fmt}` : `c${live.id}${tag}.${fmt}`,
   };
 }
 
@@ -6621,9 +6805,9 @@ function exportAnnoWire(record, fmt) {
     `c${live.id}-annotation-wire.${fmt}`);
 }
 
-/** The options of the mesh on screen, so exports match it (see exportQuery). */
-function exportOptions(record) {
-  return exportQuery(record.render, currentIplMethod());
+/** The options of the mesh on screen, so exports match it (see exportQuery); `flat`: flattened as drawn. */
+function exportOptions(record, flat = false) {
+  return exportQuery(record.render, currentIplMethod(), flat);
 }
 
 document.addEventListener('pointerdown', (event) => {
@@ -7647,6 +7831,7 @@ function applyGraphSettings() {
  */
 async function setGraphLook(on, { isolateKey = null } = {}) {
   if (on) {
+    if (iplFlat) await setIplFlat(false, { why: 'IPL no longer flattened: GraphApp draws the annotations where they are' });
     const entering = !graphOn;
     graphOn = true;
     renderer.setLook('graph');
@@ -8239,18 +8424,11 @@ async function showStrataMethod(records, method, run) {
   if (!note) return;
   const lines = [`IPL depth measured ${iplMethodWords(method)} (Settings).`];
   const sources = [...new Set(records.map((r) => r.source))].filter((src) => volumeHasBoundary(src));
-  for (const source of sources) {
-    if (!iplThickness.has(source)) {
-      iplThickness.set(source, api.iplThickness(source).catch((error) => {
-        iplThickness.delete(source);
-        throw error;
-      }));
-    }
-  }
+  for (const source of sources) askIplThickness(source).catch(() => {});
   note.textContent = lines[0];
   for (const source of sources) {
     let t;
-    try { t = await iplThickness.get(source); } catch { continue; }
+    try { t = await askIplThickness(source); } catch { continue; }
     if (run !== strataRun) return;
     lines.push(iplThicknessText(volumeLongName(source), t));
   }

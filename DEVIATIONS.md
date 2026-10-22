@@ -824,6 +824,51 @@ Cost: 0.13 s for 200,000 mesh vertices and 0.81 s for 1.5 million (the column
 0.04 and 0.30 s); a cell's annotations, under 15 ms. Cped, RPC1 and RPC2 have no
 boundary markers, so neither method measures there.
 
+### 5.18 Cells drawn on a flattened IPL depth axis at 1:1
+
+An addition (2.33.0, the second stage of James Anderson's request of 2026-10-22).
+MATLAB's `flattenRender` (ported as `meshops.flatten_render`, unchanged) put the
+depth fraction itself on Z, so a flattened cell was 0 to 1 tall and hundreds of µm
+wide. `IPLBoundaries.flatten(xyz, method, thickness_um)` and
+`meshops.flatten_ipl(mesh, boundaries, method, thickness_um)` put
+`fraction × thickness_um` on Z instead and leave X and Y alone:
+
+- the INL lies at Z = 0 and the GCL at Z = `thickness_um` in every volume, whichever
+  side of the INL the GCL lies on (the Neitz volumes have it at smaller Z, so a
+  flattened monkey cell is drawn the other way up from its own Z; Flip Z turns it
+  back), so a point's Z is its depth from the INL on an IPL of that one thickness;
+- the thickness is one number per volume (the user's choice, 2026-10-22): its median
+  IPL thickness along the normals (`IPLBoundaries.median_thickness_um`, the median
+  `thickness_summary` and `GET /api/volumes/{source}/ipl-thickness` report: RC1
+  15.6 µm, Temporal 23.8, Inferior 27.66, Nasal 28.7, RC2 42.1), so cells of one
+  volume share one axis. Where a cell's own IPL is thinner or thicker than the
+  median, its Z is stretched or squeezed by that ratio; on an IPL of one thickness
+  that is tilted, the flattened Z is each point's distance from the INL along the
+  normal, exactly (`tests/unit/test_ipl_flatten.py`);
+- the fraction is measured by `method` as everywhere else (§5.17): the library's
+  default the column, the app's the normals;
+- a point with no depth (beyond the fits) is left out with every face that touches
+  it; `meta["ipl_flatten"]` and the mesh DTO's `ipl_flatten_um`,
+  `ipl_flatten_method` and `ipl_flatten_dropped` say what was done.
+
+The library, the API (`ipl_flatten=false` on the mesh, mesh-job, export, skeleton,
+synapse, boundary-sheet and vessel routes) and the app all default to off. In the
+app it is the Display panel's Flatten IPL 1:1, one choice for the whole view, off at
+every page load and greyed in Cped, RPC1 and RPC2: every cell whose volume has
+boundary markers is drawn flattened, with its skeleton, synapse markers (centers
+flattened, shapes unbent), the INL and GCL sheets (flat at 0 and at the thickness)
+and the vessels; rings, outlines, the annotation wireframe, the Position shift
+layer, manual moves, markers and a cell's Z range are drawn in section coordinates
+and are not drawn while flattened, and GraphApp turns it off. The pick readout shows
+the depth in µm from the INL. Every figure and file says what it was scaled by: the
+panel's note, a snapshot's caption, an export's file name
+(`c16137-NeitzInferiorMonkey-ipl-flat-27.6566um.obj`) and, where the format has
+room, its comments (OBJ, PLY, a binary STL's header, GLB `extras.sbfsem`, DAE
+`contributor/comments`). An SWC or the JSON export keeps Viking's positions.
+Cost on Inferior c16137 (222,112 vertices, cached surface): 332 ms for the
+flattened mesh along the normals and 220 ms along Z, against 209 ms unflattened;
+no vertex had no depth.
+
 ---
 
 ## 6. Changes that need a decision

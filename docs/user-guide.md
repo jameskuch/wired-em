@@ -395,6 +395,27 @@ markers (Inferior Monkey has them; Cped does not), and the vessels are
 decimated hard server-side — vasculature is 880,000 triangles of smooth tube
 that looks identical at 15%.
 
+**Flatten IPL 1:1** (since 2.33.0, James Anderson's request) draws every cell
+with its volume's INL and GCL flat. Each point's Z becomes its IPL depth,
+measured as Settings → *IPL depth measured* says, times the volume's median IPL
+thickness along the layers' normals (Inferior Monkey 27.66 µm, RC1 15.6, Temporal
+23.8, Nasal 28.7, RC2 42.1), so the INL lies at Z = 0 and the GCL at that
+thickness in every volume, and X/Y:Z stays 1:1: Z reads as depth from the INL in
+µm. One number per volume, so cells of a volume share one axis; where a cell's
+own IPL is thinner or thicker than the median it is squeezed or stretched by that
+ratio. The boundary sheets lie flat at 0 and at the thickness, and the skeleton,
+synapse markers and vessels follow. Rings, outlines, the annotation wireframe,
+the Position shift arrows, manual moves, markers and a cell's Z range belong to
+sections, so they are not drawn while the view is flattened, and GraphApp turns
+it off. Monkey volumes have their GCL at smaller Z than their INL, so a monkey
+cell is drawn the other way up when flattened (Flip Z turns it back). The note
+under the box gives each volume's thickness; a Snapshot carries the same lines
+under the picture; an export of a flattened cell is flattened too, its file name
+ending `-ipl-flat-<µm>um` and its comments (OBJ, PLY, STL header, GLB extras,
+DAE) saying what Z is. The pick readout gives the depth from the INL. It starts
+off at every page load and is off in Cped, RPC1 and RPC2, which have no boundary
+markers.
+
 ### Volume offsets
 
 Cells from different volumes share one scene, each in its own volume's

@@ -12,15 +12,17 @@ import { EXPORT_KEYS, pick, normalizeRender } from './renderoptions.js';
  * exported at the 0.05 um default), and the IPL clip when the render has one
  * (a cell clipped to isolate its ON or OFF arbors was exported whole), with
  * `iplMethod`, how the page measures the clip's depth, when it is given.  Depth
- * coloring is a look, not geometry, and stays out.
+ * coloring is a look, not geometry, and stays out.  `flatten`: the view is
+ * flattened on the IPL, and so is the file (`ipl_flatten`, with the method).
  */
-export function exportQuery(render, iplMethod = undefined) {
+export function exportQuery(render, iplMethod = undefined, flatten = false) {
   const full = normalizeRender(render);
   const clipped = full.clip_ipl !== undefined && full.clip_ipl !== null;
   return {
     ...pick(full, EXPORT_KEYS),
     ...(clipped ? { clip_ipl: full.clip_ipl, keep_above: full.keep_above } : {}),
-    ...(clipped && iplMethod ? { ipl_method: iplMethod } : {}),
+    ...((clipped || flatten) && iplMethod ? { ipl_method: iplMethod } : {}),
+    ...(flatten ? { ipl_flatten: true } : {}),
   };
 }
 

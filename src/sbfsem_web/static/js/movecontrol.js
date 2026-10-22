@@ -150,6 +150,10 @@ export class MoveController {
       this.hooks.flare(`c${t.record.id} was not loaded from the server with a setting: it cannot be moved`);
       return false;
     }
+    if (this.hooks.flattened?.(t.record)) {
+      this.hooks.flare(`c${t.record.id} is drawn on the flattened IPL: turn Flatten IPL off to move annotations`);
+      return false;
+    }
     this.active = true;
     this.scope = 'one';
     this.range = null;
@@ -451,6 +455,12 @@ export class MoveController {
    * and its skeleton bent to the moves not yet in the render.
    */
   refresh(record, marked = null) {
+    if (this.hooks.flattened?.(record)) {
+      // Drawn in section coordinates, which a flattened cell does not have.
+      this.renderer.nudgeSkeleton?.(record.key, null);
+      this.renderer.removeMoveArrows?.(record.key);
+      return;
+    }
     const nodes = this.cachedNodes(record);
     const tag = this.tagOf(record);
     const store = this.storeOf(record);

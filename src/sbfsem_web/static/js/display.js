@@ -10,8 +10,14 @@ import {
   DEFAULT_COLORMAP, bandColors, colormapNames, colormapSample, isCustomGradient,
   isPreviewGradient, resolveColormap,
 } from './colormaps.js';
+import { RENDER_FIELDS } from './render-schema.js';
 
 const $ = (id) => document.getElementById(id);
+
+/** A context request's flattening as one string ('' for none): what a loaded sheet is kept by. */
+export function flatTag(flat) {
+  return flat && flat.ipl_flatten ? `flat:${flat.ipl_method ?? ''}` : '';
+}
 
 /**
  * Camera azimuth/elevation in MATLAB's convention.
@@ -194,15 +200,26 @@ export class Colorbar {
  * material or a colormap change is instant and never invalidates a mesh.
  */
 export class DisplayPanel {
-  constructor({ renderer, api, state, onChange = () => {}, onStatus = () => {} }) {
+  /**
+   * `flatParams(source)`: what a context sheet's request adds while the view is
+   * flattened on the IPL ({} when it is not); `onFlatten(on)`: Flatten IPL was
+   * ticked or unticked (the page owns the choice and draws the cells again);
+   * `hasBoundary(source)`: whether a volume has IPL boundary markers.
+   */
+  constructor({ renderer, api, state, onChange = () => {}, onStatus = () => {},
+    flatParams = () => ({}), onFlatten = () => {}, hasBoundary = () => true }) {
     this.renderer = renderer;
     this.api = api;
     this.state = state;
     this.onChange = onChange;
     this.onStatus = onStatus;
+    this.flatParams = flatParams;
+    this.onFlatten = onFlatten;
+    this.hasBoundary = hasBoundary;
     this.scaleBar = new ScaleBar(renderer, $('scale-bar'));
     this.colorbar = new Colorbar(renderer, $('colorbar'));
     this.contextLoaded = new Map(); // key -> source it was loaded for
+    this.contextFlat = new Map();   // key -> the flattening it was loaded with ('' for none)
     this._contextRun = 0;           // the latest restore() that carried the context sheets
     this.holdLimits = false;
     this._bind();
@@ -280,6 +297,12 @@ export class DisplayPanel {
       $(id).addEventListener('change', () => this._toggleBoundary(key, $(id)));
     }
     $('ctx-vessels').addEventListener('change', () => this._toggleVessels($('ctx-vessels')));
+    // Flatten IPL: one choice for the whole view, its help the schema's.
+    const flatten = $('ctx-flatten');
+    const help = RENDER_FIELDS.find((f) => f.key === 'ipl_flatten')?.help;
+    if (help) $('ctx-flatten-field').dataset.help = help;
+    flatten.addEventListener('change', () => this.onFlatten(flatten.checked));
+    this.syncFlatten(false);
     $('ctx-opacity').addEventListener('input', (e) => {
       const opacity = Number(e.target.value);
       for (const key of this.contextLoaded.keys()) {
@@ -529,18 +552,20 @@ export class DisplayPanel {
       this.renderer.setContextStyle(key, { visible: false });
       return;
     }
-    if (this.contextLoaded.get(key) === this.state.source) {
+    if (this._loadedAsShown(key)) {
       this.renderer.setContextStyle(key, { visible: true });
       return;
     }
     // Pinned before the request. A session restore can switch volume while
     // the sheet is in flight, and a sheet fetched for one volume must never be
     // recorded as another's -- that put Inferior Monkey's INL over RC1 cells.
+    // The flattening too: the box can be ticked while the sheet is on its way.
     const source = this.state.source;
+    const flat = this.flatParams(source);
     checkbox.disabled = true;
     let mesh;
     try {
-      mesh = await this.api.boundaryMesh(source, layer);
+      mesh = await this.api.boundaryMesh(source, layer, 2, flat);
     } catch (error) {
       checkbox.checked = false;
       this.onStatus(error?.detail || `No ${layer} boundary for this volume`, 'error');
@@ -548,13 +573,16 @@ export class DisplayPanel {
     } finally {
       checkbox.disabled = false;
     }
-    if (this.state.source !== source) return this._toggleBoundary(layer, checkbox);
+    if (this.state.source !== source || flatTag(this.flatParams(source)) !== flatTag(flat)) {
+      return this._toggleBoundary(layer, checkbox);
+    }
     this.renderer.setContextMesh(key, mesh, {
       color: layer === 'INL' ? '#7f8fd6' : '#9b7fd6',
       opacity: Number($('ctx-opacity').value),
       source,
     });
     this.contextLoaded.set(key, source);
+    this.contextFlat.set(key, flatTag(flat));
     // Unticked while it was in flight (or undone): loaded, but not shown.
     if (!checkbox.checked) this.renderer.setContextStyle(key, { visible: false });
   }
@@ -565,16 +593,17 @@ export class DisplayPanel {
       this.renderer.setContextStyle(key, { visible: false });
       return;
     }
-    if (this.contextLoaded.get(key) === this.state.source) {
+    if (this._loadedAsShown(key)) {
       this.renderer.setContextStyle(key, { visible: true });
       return;
     }
     const source = this.state.source; // pinned, as in _toggleBoundary
+    const flat = this.flatParams(source);
     checkbox.disabled = true;
     this.onStatus('Loading blood vessels…');
     let mesh;
     try {
-      mesh = await this.api.vesselMesh(source);
+      mesh = await this.api.vesselMesh(source, flat);
     } catch (error) {
       checkbox.checked = false;
       this.onStatus(error?.detail || String(error?.message || error), 'error');
@@ -582,7 +611,9 @@ export class DisplayPanel {
     } finally {
       checkbox.disabled = false;
     }
-    if (this.state.source !== source) return this._toggleVessels(checkbox);
+    if (this.state.source !== source || flatTag(this.flatParams(source)) !== flatTag(flat)) {
+      return this._toggleVessels(checkbox);
+    }
     if (!mesh.n_faces) {
       checkbox.checked = false;
       this.onStatus('This volume has no traced blood vessels', 'error');
@@ -592,6 +623,7 @@ export class DisplayPanel {
       color: '#c0392b', opacity: Number($('ctx-opacity').value), source,
     });
     this.contextLoaded.set(key, source);
+    this.contextFlat.set(key, flatTag(flat));
     // Unticked while it was in flight (or undone): loaded, but not shown.
     if (!checkbox.checked) this.renderer.setContextStyle(key, { visible: false });
     this.onStatus('Blood vessels loaded');
@@ -603,9 +635,63 @@ export class DisplayPanel {
       if (source === this.state.source) continue;
       this.renderer.removeContextMesh(key);
       this.contextLoaded.delete(key);
+      this.contextFlat.delete(key);
       const box = { 'boundary:INL': 'ctx-inl', 'boundary:GCL': 'ctx-gcl', vessels: 'ctx-vessels' }[key];
       if (box && $(box)) $(box).checked = false;
     }
+    this.syncFlatten($('ctx-flatten').checked);
+  }
+
+  /** Whether the sheet `key` on the renderer is this volume's, flattened as the view is now. */
+  _loadedAsShown(key) {
+    return this.contextLoaded.get(key) === this.state.source
+      && this.contextFlat.get(key) === flatTag(this.flatParams(this.state.source));
+  }
+
+  /**
+   * The view was flattened or unflattened (or its depth method changed): the sheets
+   * shown are fetched again as it now draws them, and the ones hidden are let go,
+   * to be fetched so when next ticked.
+   */
+  flattenChanged() {
+    for (const [key, box, toggle] of [
+      ['boundary:INL', 'ctx-inl', (el) => this._toggleBoundary('INL', el)],
+      ['boundary:GCL', 'ctx-gcl', (el) => this._toggleBoundary('GCL', el)],
+      ['vessels', 'ctx-vessels', (el) => this._toggleVessels(el)],
+    ]) {
+      if (!this.contextLoaded.has(key) || this._loadedAsShown(key)) continue;
+      if ($(box)?.checked) {
+        toggle($(box));
+      } else {
+        this.renderer.removeContextMesh(key);
+        this.contextLoaded.delete(key);
+        this.contextFlat.delete(key);
+      }
+    }
+  }
+
+  /**
+   * The Flatten IPL box as the page has it: ticked or not, and off (greyed, with the
+   * reason) in a volume with no IPL boundary markers unless it is on, so it can
+   * always be turned off.
+   */
+  syncFlatten(on) {
+    const box = $('ctx-flatten');
+    const field = $('ctx-flatten-field');
+    if (!box) return;
+    box.checked = !!on;
+    const marked = this.hasBoundary(this.state.source);
+    box.disabled = !on && !marked;
+    field?.classList.toggle('inert', box.disabled);
+    if (field) field.title = box.disabled ? 'This volume has no IPL boundary markers' : '';
+  }
+
+  /** The lines under Flatten IPL: what Z is and each volume's thickness ([] hides them). */
+  setFlattenNote(lines) {
+    const note = $('ctx-flatten-note');
+    if (!note) return;
+    note.textContent = (lines || []).join('\n');
+    note.hidden = !(lines && lines.length);
   }
 
   /** Everything the session should remember about the view. */

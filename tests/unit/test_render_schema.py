@@ -155,11 +155,12 @@ def test_the_route_dependencies_return_what_they_declare():
 
 def test_field_keys_are_unique_and_in_default_render_order():
     keys = [f.key for f in schema.FIELDS]
-    assert len(keys) == len(set(keys)) == 39
+    assert len(keys) == len(set(keys)) == 40
     assert [f.key for f in schema.FIELDS if f.in_render] == DEFAULT_RENDER_ORDER
-    # The page's one IPL depth method is not a cell's render option either.
-    assert [f.key for f in schema.FIELDS if not f.in_render] == ["clip_z", "ipl_method"]
-    assert keys[:-2] == DEFAULT_RENDER_ORDER, "clip_z and ipl_method come last"
+    # The page's one IPL depth method and its one flattened view are not a
+    # cell's render options either.
+    assert [f.key for f in schema.FIELDS if not f.in_render] == ["clip_z", "ipl_method", "ipl_flatten"]
+    assert keys[:-3] == DEFAULT_RENDER_ORDER, "clip_z, ipl_method and ipl_flatten come last"
 
 
 def test_wire_and_scope_agree():

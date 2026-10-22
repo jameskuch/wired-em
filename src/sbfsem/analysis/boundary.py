@@ -32,6 +32,11 @@ markers, the fraction moves about 1 % of the IPL or less for 95 % of points, but
 a thickness along Z reads 1/cos(tilt) too thick (2 % at 12°, 22 % at RC2's
 steepest 35°).  Both read the same fitted surfaces at the same heights: only the
 direction differs.
+
+**A flattened depth axis** (:meth:`IPLBoundaries.flatten`, 2026-10-22, an
+addition): each point's Z replaced by its fraction times one stated thickness,
+the volume's median IPL thickness along the normals by default, so a cell can be
+drawn with its layers flat at 1:1.
 """
 
 from __future__ import annotations
@@ -404,6 +409,39 @@ class IPLBoundaries:
             fraction = np.where(thickness > 0, from_inl / thickness, np.nan)
         thickness = np.where(np.isfinite(fraction), thickness, np.nan)
         return IPLDepth(method, fraction, np.where(np.isfinite(fraction), from_inl, np.nan), thickness)
+
+    @functools.cached_property
+    def median_thickness_um(self) -> float:
+        """The volume's median IPL thickness along the normals, in µm
+        (:func:`thickness_summary`'s, with its defaults): the thickness a
+        flattened depth axis is scaled by when none is given (:meth:`flatten`).
+        NaN when no column has markers of both layers near it."""
+        median = thickness_summary(self)["normal_um"]["median"]
+        return float("nan") if median is None else float(median)
+
+    def flatten(self, xyz, method: str = "column", thickness_um: float | None = None) -> np.ndarray:
+        """Each XYZ point (microns) on a flattened IPL depth axis: X and Y as they
+        are, Z replaced by ``fraction * thickness_um``, the fraction measured by
+        ``method`` (:meth:`depth`).
+
+        The INL sits at Z = 0 and the GCL at Z = ``thickness_um`` in every volume,
+        whichever side of the INL its GCL lies on, so a point's Z is its depth
+        from the INL on an IPL of that one thickness, at 1:1 with X and Y.
+        ``thickness_um`` defaults to :attr:`median_thickness_um`.  Z is NaN where
+        the point has no depth.  An addition (2026-10-22, James Anderson's
+        request; DEVIATIONS.md): MATLAB's ``flattenRender`` put the fraction
+        itself on Z (:func:`~sbfsem.geometry.meshops.flatten_render`).
+        """
+        if thickness_um is None:
+            thickness_um = self.median_thickness_um
+        thickness_um = float(thickness_um)
+        if not (np.isfinite(thickness_um) and thickness_um > 0):
+            raise ValueError(f"{self.source}: a flattened IPL needs a thickness above 0 µm, "
+                             f"not {thickness_um!r}")
+        pts = np.asarray(xyz, dtype=float).reshape(-1, 3)
+        out = pts.copy()
+        out[:, 2] = self.micron2ipl(pts, method) * thickness_um
+        return out
 
     def strata_cdata(self, vertices, fill_nan: bool = True, method: str = "column") -> np.ndarray:
         """Per-vertex IPL depth for coloring a render.  Ports ``getStrataCData``."""

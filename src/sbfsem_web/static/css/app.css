@@ -1408,6 +1408,10 @@ table.rep-matrix tbody tr:hover { background: none; }
 .vol-row input[type="number"] { width: 7ch; }
 .vol-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .panel-note { margin: 2px 0 0; font-size: 10.5px; color: var(--muted); line-height: 1.35; }
+/* Flatten IPL (Display → Context): greyed in a volume with no boundary markers, and its note
+   a line per volume. */
+.check.inert { opacity: .4; }
+.flatten-note { white-space: pre-line; }
 .panel-row { display: flex; gap: 5px; margin-top: 2px; }
 .panel-row button { flex: 1; font-size: 11.5px; padding: 3px 6px; }
 .lim-grid {

@@ -31,6 +31,7 @@ __all__ = [
     "bounding_box_grid",
     "group_bounding_box",
     "flatten_render",
+    "flatten_ipl",
 ]
 
 
@@ -85,6 +86,37 @@ def flatten_render(mesh: Mesh, boundaries, method: str = "column") -> Mesh:
     depth = boundaries.micron2ipl(mesh.vertices, method)
     out.vertices = np.column_stack([mesh.vertices[:, 0], mesh.vertices[:, 1], depth])
     out.vertex_data = depth
+    return out
+
+
+def flatten_ipl(mesh: Mesh, boundaries, method: str = "column",
+                thickness_um: float | None = None) -> Mesh:
+    """The mesh on a flattened IPL depth axis at 1:1 with X and Y.
+
+    Each vertex's Z becomes its depth fraction times ``thickness_um``
+    (:meth:`~sbfsem.analysis.boundary.IPLBoundaries.flatten`: the INL at 0, the
+    GCL at ``thickness_um``, by default the volume's median IPL thickness along
+    the normals).  A vertex with no depth is left out with every face that
+    touches it, as :func:`clip_mesh_by_stratification` leaves it out.  The
+    vertex data is kept.  ``meta["ipl_flatten"]`` says what was done:
+    ``thickness_um``, ``method`` and ``dropped_vertices``.  An addition beside
+    MATLAB's :func:`flatten_render`, which put the fraction itself on Z.
+    """
+    if thickness_um is None:
+        thickness_um = boundaries.median_thickness_um
+    thickness_um = float(thickness_um)
+    note = {"thickness_um": thickness_um, "method": method, "dropped_vertices": 0}
+    if mesh.is_empty:
+        out = mesh.copy()
+        out.meta["ipl_flatten"] = note
+        return out
+    flat = boundaries.flatten(mesh.vertices, method, thickness_um)
+    keep = np.isfinite(flat[:, 2])
+    out = Mesh(flat, mesh.faces, mesh.vertex_data, dict(mesh.meta))
+    if not keep.all():
+        out = out._select_vertices(keep)
+    note["dropped_vertices"] = int((~keep).sum())
+    out.meta["ipl_flatten"] = note
     return out
 
 

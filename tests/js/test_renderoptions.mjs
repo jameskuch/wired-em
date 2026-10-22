@@ -621,6 +621,30 @@ test('a render cut or colored by IPL depth carries the page\'s depth method, and
   assert.equal(ro.FIELD_BY_KEY.ipl_method.inRender, false);
 });
 
+test('a flattened view asks for every surface flattened, by the page\'s method, and an unflattened one never does', () => {
+  const plain = ro.normalizeRender({});
+  const flat = ro.withIplMethod(plain, 'normal', true);
+  assert.equal(flat.ipl_flatten, true);
+  assert.equal(flat.ipl_method, 'normal', 'the depth the flattening reads is the page\'s');
+  assert.ok(!('ipl_flatten' in plain), 'the cell\'s own options are left alone');
+  assert.equal(ro.withIplMethod(plain, 'normal', false), plain, 'unflattened: the request it always was');
+  // The mesh cache tells flattened from not, and the two methods apart.
+  assert.notEqual(ro.effectiveSignature(flat), ro.effectiveSignature(plain));
+  assert.notEqual(ro.effectiveSignature(flat), ro.effectiveSignature(ro.withIplMethod(plain, 'column', true)));
+  // A colored, clipped render keeps its own view options when flattened.
+  const both = ro.withIplMethod(ro.normalizeRender({ clip_ipl: 0.4, color_by_strata: true }), 'column', true);
+  assert.equal(both.clip_ipl, 0.4);
+  assert.equal(both.ipl_method, 'column');
+  // The context layers' query.
+  assert.deepEqual(ro.flatQuery('normal', true), { ipl_flatten: true, ipl_method: 'normal' });
+  assert.deepEqual(ro.flatQuery('normal', false), {});
+  // Off by default, and not a cell's render option.
+  assert.ok(!('ipl_flatten' in ro.DEFAULT_RENDER));
+  assert.equal(ro.FIELD_BY_KEY.ipl_flatten.inRender, false);
+  assert.equal(ro.FIELD_BY_KEY.ipl_flatten.default, false);
+  assert.equal(ro.FIELD_BY_KEY.ipl_flatten.scope, 'view');
+});
+
 // -- run -------------------------------------------------------------------------
 let failed = 0;
 for (const [name, fn] of cases) {

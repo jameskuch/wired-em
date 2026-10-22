@@ -351,6 +351,9 @@ _HELP: dict[str, str] = {
     "clip_ipl": (
         "Cuts every mesh at a stratification depth (0 = INL border, 1 = GCL border), keeping the side above or below — for isolating ON vs OFF arbors. The depth is measured as the Settings tab says: along the layers' normals (the default), or straight along Z as MATLAB did. It lives with the render settings because the cut is applied on the server when the mesh is built; applied by Apply to selected / all. Needs the volume to have IPL boundary markers."
     ),
+    "ipl_flatten": (
+        "Draws every cell with its volume's INL and GCL flat: each point's Z becomes its IPL depth, measured as the Settings tab says, times the volume's median IPL thickness along the layers' normals (Inferior Monkey 27.7 µm, RC2 42.1 µm), so the INL is at Z = 0 and the GCL at that thickness in every volume, and X/Y:Z stays 1:1. Z is then depth from the INL in µm on an IPL of that one thickness; a cell's own IPL may be thinner or thicker there. The boundary sheets lie flat at 0 and at the thickness, and vessels and synapses follow. Annotation rings, markers, arrows and section slices are drawn in section coordinates, so they are hidden while the view is flattened. A point with no depth (beyond the boundary markers' fits) is left out. Needs IPL boundary markers: Cped, RPC1 and RPC2 have none."
+    ),
 }
 
 _GEOMETRY = ("mesh", "export", "body", "facade")
@@ -696,6 +699,15 @@ FIELDS: tuple[Field, ...] = (
         server_enum=True, scope="view", wire=_VIEW, ui=False, in_render=False,
         ui_reason="one choice for the whole page, the Settings tab's: how Clip IPL and depth "
                   "coloring measure depth, as the Stratification tab does",
+    ),
+    # 2026-10-22, the request's second stage: the cells drawn on a flattened IPL
+    # depth axis, Z = fraction x the volume's median IPL thickness along the
+    # normals (0 = INL), at 1:1 with X and Y.  Off everywhere by default.
+    Field(
+        "ipl_flatten", "bool", "Flatten IPL", False, help=_HELP["ipl_flatten"],
+        scope="view", wire=_VIEW, ui=False, in_render=False,
+        ui_reason="one choice for the whole view, the Display panel's: every cell is drawn on "
+                  "the flattened axis or none is, as their layers are",
     ),
 )
 

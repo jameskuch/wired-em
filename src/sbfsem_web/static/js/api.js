@@ -586,12 +586,13 @@ export const api = {
     postJSON('/api/admin/recycle-workers', { confirm: 'recycle' }, 'replacing the build processes…'),
   adminRestart: () => postJSON('/api/admin/restart', { confirm: 'restart' }, 'restarting the server…'),
   volumes: () => getJSON('/api/volumes', 'volumes…'),
-  // Volume context: the fitted IPL boundary sheets and the vasculature.
-  boundaryMesh: (source, layer, decimate = 2) =>
-    getJSON(`/api/volumes/${source}/boundary/${layer}/mesh${q({ decimate })}`,
+  // Volume context: the fitted IPL boundary sheets and the vasculature; `flat`
+  // is renderoptions.flatQuery's, {} for the volume's own Z.
+  boundaryMesh: (source, layer, decimate = 2, flat = {}) =>
+    getJSON(`/api/volumes/${source}/boundary/${layer}/mesh${q({ decimate, ...flat })}`,
       `${layer} boundary…`),
-  vesselMesh: (source) =>
-    getJSON(`/api/volumes/${source}/vessels/mesh`, 'blood vessels…'),
+  vesselMesh: (source, flat = {}) =>
+    getJSON(`/api/volumes/${source}/vessels/mesh${q(flat)}`, 'blood vessels…'),
   search: (source, label, exact = false) =>
     getJSON(`/api/volumes/${source}/search${q({ label, exact })}`, 'searching…'),
   // The Viking ExportPortal grammar: IDs, ranges, and label terms. The server
@@ -652,7 +653,9 @@ export const api = {
   /** Splined closed-curve outlines (TypeCode 6), in microns, in the cell's frame. */
   closedCurves: (source, id, { copy } = {}) =>
     getJSON(`/api/neurons/${source}/${id}/closed-curves${copyQuery(copy)}`, 'outlines…'),
-  skeleton: (source, id) => getJSON(`/api/neurons/${source}/${id}/skeleton`, 'skeleton…'),
+  /** The cell's segments; `flat` as boundaryMesh's (the flattened view's skeleton). */
+  skeleton: (source, id, flat = {}) =>
+    getJSON(`/api/neurons/${source}/${id}/skeleton${q(flat)}`, 'skeleton…'),
   /** Every synapse of a cell as one point (GraphApp's synapse dots). */
   synapsePoints: (source, id) => getJSON(`/api/neurons/${source}/${id}/synapse-points`, 'synapses…'),
   /** The annotations as an averaged wireframe: rings, lines along, ties. */
@@ -805,7 +808,7 @@ export const api = {
   compareReportPath: (jobId) => `/api/compare-reports/${encodeURIComponent(jobId)}`,
   synapseMesh: (source, id, type, opts = {}) =>
     getJSON(`/api/neurons/${source}/${id}/synapses/${encodeURIComponent(type)}/mesh`
-      + q({ radius_um: opts.radius_um ?? 0.5, shape: opts.shape ?? 'circle' })),
+      + q({ radius_um: opts.radius_um ?? 0.5, shape: opts.shape ?? 'circle', ...(opts.flat || {}) })),
 
   /** How thick a volume's IPL is, along the layers' normals and along Z, and where it thins. */
   iplThickness: (source) => getJSON(`/api/volumes/${source}/ipl-thickness`, 'IPL thickness…'),

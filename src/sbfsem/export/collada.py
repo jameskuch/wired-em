@@ -49,8 +49,10 @@ def collada_document(
     scene_name: str = "SBFSEMtools",
     meter: float = MICROMETER,
     unit_name: str = "micrometer",
+    notes: Mapping[str, object] | None = None,
 ) -> etree._ElementTree:
-    """Build the COLLADA document for a set of named meshes."""
+    """Build the COLLADA document for a set of named meshes.  ``notes`` go in
+    the asset's contributor ``comments``, a ``key value`` line each."""
     items = list(meshes.items()) if isinstance(meshes, Mapping) else list(meshes)
 
     root = etree.Element("COLLADA", nsmap={None: COLLADA_NS})
@@ -61,6 +63,9 @@ def collada_document(
     created.text = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     contributor = etree.SubElement(asset, "contributor")
     etree.SubElement(contributor, "authoring_tool").text = "SBFSEM-pytools"
+    if notes:
+        etree.SubElement(contributor, "comments").text = "\n".join(
+            f"{key} {value}" for key, value in notes.items())
     unit = etree.SubElement(asset, "unit")
     unit.set("meter", repr(float(meter)))
     unit.set("name", unit_name)

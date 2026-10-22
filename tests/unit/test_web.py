@@ -545,11 +545,11 @@ def test_exports_cut_a_clipped_render_as_the_mesh_route_does(client):
 
 def test_the_export_routes_declare_the_views_clip_as_the_mesh_route_does(client):
     """The clip is a fifth declaration, beside the schema's four (``_export_clip``):
-    the export routes take it, and how its IPL depth is measured, with the type,
-    default and bounds the mesh route gives them, and nothing else of the
-    schema's ``view`` fields (depth coloring is a look, not geometry).  A clip
-    bound or name changed on one side and not the other fails here, naming the
-    parameter."""
+    the export routes take it, how its IPL depth is measured and the flattened
+    IPL, with the type, default and bounds the mesh route gives them, and nothing
+    else of the schema's ``view`` fields (depth coloring is a look, not
+    geometry).  A clip bound or name changed on one side and not the other fails
+    here, naming the parameter."""
     from sbfsem.service import render_schema as schema
 
     paths = client.get("/openapi.json").json()["paths"]
@@ -558,7 +558,7 @@ def test_the_export_routes_declare_the_views_clip_as_the_mesh_route_does(client)
         return {p["name"]: p["schema"] for p in paths[path]["get"]["parameters"]}
 
     mesh = declared("/api/neurons/{source}/{neuron_id}/mesh")
-    clip_keys = {"clip_ipl", "keep_above", "clip_z", "ipl_method"}
+    clip_keys = {"clip_ipl", "keep_above", "clip_z", "ipl_method", "ipl_flatten"}
     view_keys = {f.key for f in schema.FIELDS if f.scope == "view"}
     assert clip_keys <= view_keys, "the clip is still a view field of the schema"
     assert clip_keys <= set(mesh), "and the mesh route still takes all three"

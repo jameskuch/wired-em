@@ -81,7 +81,7 @@ from ..geometry.meshdiff import (
     deviation_map,
     mesh_difference,
 )
-from ..geometry.meshops import bounding_box, clip_mesh, clip_mesh_by_stratification
+from ..geometry.meshops import bounding_box, clip_mesh, clip_mesh_by_stratification, flatten_ipl
 from ..geometry.primitives import synapse_ellipsoids, synapse_spheres
 from ..geometry.segmentation import dendrite_segmentation
 from ..geometry.unify import (
@@ -1005,7 +1005,7 @@ class SbfsemService:
         smooth = int(params.pop("smooth_iterations", 1))
         reduce = float(params.pop("reduce_fraction", 1.0))
         pixel = float(params.pop("pixel_size_um", 0.05))
-        for view in ("clip_z", "clip_ipl", "keep_above", "color_by_strata", "ipl_method"):
+        for view in ("clip_z", "clip_ipl", "keep_above", "color_by_strata", "ipl_method", "ipl_flatten"):
             params.pop(view, None)
         options = self._mesh_options(**params)
         key = self._grid_key(neuron, method, smooth, reduce, pixel, options)
@@ -2265,23 +2265,45 @@ class SbfsemService:
         ]
 
     # -- geometry ----------------------------------------------------------
-    def skeleton(self, neuron_id: int, source) -> SkeletonDTO:
-        """Per-segment polylines, for a lightweight 3D view."""
+    def skeleton(self, neuron_id: int, source, *, ipl_flatten: bool = False,
+                 ipl_method: str = "column") -> SkeletonDTO:
+        """Per-segment polylines, for a lightweight 3D view.
+
+        ``ipl_flatten``: each point on the flattened IPL axis (:meth:`flatten`),
+        a segment broken where a point has no depth and that point left out.
+        """
         neuron = self.neuron(neuron_id, source)
         result = dendrite_segmentation(neuron)
-        segments = [
-            SegmentDTO(
-                location_ids=np.asarray(row.ID, dtype=np.int64).tolist(),
-                points_um=np.asarray(row.XYZum, dtype=float).tolist(),
-                radii_um=np.asarray(row.Rum, dtype=float).tolist(),
+        flatten = None
+        if ipl_flatten:
+            boundaries = self.boundaries(neuron.source)
+            thickness = self.flat_thickness_um(neuron.source)
+
+            def flatten(points):
+                return boundaries.flatten(points, ipl_method, thickness)
+
+        segments: list[SegmentDTO] = []
+        for row in result.table.itertuples():
+            ids = np.asarray(row.ID, dtype=np.int64)
+            points = np.asarray(row.XYZum, dtype=float).reshape(-1, 3)
+            radii = np.asarray(row.Rum, dtype=float)
+            runs = [slice(0, len(points))]
+            if flatten is not None:
+                points = flatten(points)
+                runs = _finite_runs(np.isfinite(points[:, 2]))
+            segments.extend(
+                SegmentDTO(location_ids=ids[run].tolist(), points_um=points[run].tolist(),
+                           radii_um=radii[run].tolist())
+                for run in runs
             )
-            for row in result.table.itertuples()
-        ]
         try:
             soma_xyz = [float(v) for v in neuron.get_soma_xyz()]
             soma_radius = float(neuron.get_soma_size())
         except (ValueError, AttributeError):
             soma_xyz, soma_radius = None, None
+        if flatten is not None and soma_xyz is not None:
+            flat_soma = flatten(np.array([soma_xyz]))[0]
+            soma_xyz = [float(v) for v in flat_soma] if np.isfinite(flat_soma).all() else None
         return SkeletonDTO(
             neuron_id=int(neuron.id),
             segments=segments,
@@ -2405,6 +2427,7 @@ class SbfsemService:
         keep_above: bool = True,
         color_by_strata: bool = False,
         ipl_method: str = "column",
+        ipl_flatten: bool = False,
         pathway: str = "original",
         post_order: str = "smooth_first",
         voxel_detail: float = 1.0,
@@ -2445,7 +2468,7 @@ class SbfsemService:
         return self.render_buffers(
             neuron_id, source, neuron=neuron, clip_z=clip_z, clip_ipl=clip_ipl,
             keep_above=keep_above, color_by_strata=color_by_strata, ipl_method=ipl_method,
-            method=method, smooth_iterations=smooth_iterations,
+            ipl_flatten=ipl_flatten, method=method, smooth_iterations=smooth_iterations,
             reduce_fraction=reduce_fraction, pixel_size_um=pixel_size_um,
             pathway=pathway, post_order=post_order,
             voxel_detail=voxel_detail, voxel_smooth_um=voxel_smooth_um,
@@ -2474,6 +2497,7 @@ class SbfsemService:
         keep_above: bool = True,
         color_by_strata: bool = False,
         ipl_method: str = "column",
+        ipl_flatten: bool = False,
         **options: Any,
     ) -> MeshBuffers:
         """:meth:`render_mesh`'s render as its arrays (:class:`MeshBuffers`): the
@@ -2486,7 +2510,9 @@ class SbfsemService:
         coloring makes a new mesh over its arrays, where :meth:`render_mesh` once
         copied the whole surface first.  ``ipl_method`` is how the IPL clip and
         coloring measure depth: ``"column"`` (MATLAB's) or ``"normal"``
-        (:meth:`~sbfsem.analysis.boundary.IPLBoundaries.depth`).
+        (:meth:`~sbfsem.analysis.boundary.IPLBoundaries.depth`).  ``ipl_flatten``
+        draws the result on the flattened IPL axis (:meth:`flatten`), cut and
+        colored first, where the annotations are.
         """
         if neuron is None:
             neuron = self.neuron(neuron_id, source)
@@ -2507,7 +2533,33 @@ class SbfsemService:
             vertex_data = (self.boundaries(neuron.source).strata_cdata(mesh.vertices, method=ipl_method)
                            if colored else mesh.vertex_data)
             mesh = Mesh(mesh.vertices, mesh.faces, vertex_data, meta)
+        if ipl_flatten:
+            mesh = self.flatten(mesh, neuron.source, ipl_method=ipl_method)
         return self.mesh_buffers(f"c{neuron.id}", mesh)
+
+    def flat_thickness_um(self, source) -> float:
+        """The thickness a flattened IPL axis is scaled by in this volume: its
+        median IPL thickness along the normals, the median the ``ipl-thickness``
+        route reports.  Raises :class:`ValueError` for a volume with no boundary
+        markers."""
+        volume = Volumes.from_str(source)
+        if not volume.has_boundary:
+            raise ValueError(f"{volume.source} has no IPL boundary markers")
+        median = self.ipl_thickness(volume.source)["normal_um"]["median"]
+        if median is None:
+            raise ValueError(f"{volume.source}: no column has markers of both IPL layers near it")
+        return float(median)
+
+    def flatten(self, mesh: Mesh, source, *, ipl_method: str = "column") -> Mesh:
+        """``mesh`` on the volume's flattened IPL axis
+        (:func:`~sbfsem.geometry.meshops.flatten_ipl`): Z is the depth fraction,
+        measured by ``ipl_method``, times :meth:`flat_thickness_um`, the INL at 0.
+        Never the cached mesh: it has no ``mesh_id``.  Raises :class:`ValueError`
+        for a volume with no boundary markers."""
+        thickness = self.flat_thickness_um(source)
+        flat = flatten_ipl(mesh, self.boundaries(source), ipl_method, thickness)
+        flat.meta.pop("mesh_id", None)
+        return flat
 
     #: Post-generation options with their defaults. The app overrides these;
     #: the defaults keep a bare call MATLAB-faithful.
@@ -3040,12 +3092,16 @@ class SbfsemService:
         *,
         radius_um: float = 0.5,
         shape: str = "circle",
+        ipl_flatten: bool = False,
+        ipl_method: str = "column",
     ) -> MeshDTO:
         """Marker mesh for every synapse of one type.
 
         ``circle`` is a sphere per synapse, as MATLAB's ``synapseSphere`` drew
         them.  ``oval`` is an ellipsoid aligned to the annotation's own
         ``LINESTRING`` axis, which shows which way each synapse was drawn.
+        ``ipl_flatten``: each marker at its center's place on the flattened IPL
+        axis (:meth:`flatten`), its shape unbent; one with no depth is left out.
         """
         if shape not in self.SYNAPSE_SHAPES:
             raise ValueError(
@@ -3053,13 +3109,29 @@ class SbfsemService:
             )
         neuron = self.neuron(neuron_id, source)
         name = f"c{neuron.id}-{synapse_type}"
+        def flat(points):
+            """``points`` on the flattened axis, and which of them have a depth."""
+            points = np.asarray(points, dtype=float).reshape(-1, 3)
+            if not ipl_flatten or not len(points):
+                return points, np.ones(len(points), dtype=bool)
+            out = self.boundaries(neuron.source).flatten(
+                points, ipl_method, self.flat_thickness_um(neuron.source))
+            return out, np.isfinite(out[:, 2])
+
         if shape == "circle":
-            xyz = neuron.get_synapse_xyz(synapse_type)
-            return self._mesh_dto(name, synapse_spheres(xyz, radius_um))
-        centers, axes, halves = neuron.get_synapse_axes(synapse_type)
-        return self._mesh_dto(
-            name, synapse_ellipsoids(centers, axes, halves, radius_um)
-        )
+            xyz, keep = flat(neuron.get_synapse_xyz(synapse_type))
+            mesh = synapse_spheres(xyz[keep], radius_um)
+        else:
+            centers, axes, halves = neuron.get_synapse_axes(synapse_type)
+            centers, keep = flat(centers)
+            mesh = synapse_ellipsoids(centers[keep], np.asarray(axes)[keep], np.asarray(halves)[keep],
+                                      radius_um)
+        if ipl_flatten:
+            # A copy: an empty mesh may be the shared EMPTY_MESH.
+            mesh = Mesh(mesh.vertices, mesh.faces, mesh.vertex_data, {**mesh.meta, "ipl_flatten": {
+                "thickness_um": self.flat_thickness_um(neuron.source), "method": ipl_method,
+                "dropped_vertices": int((~keep).sum())}})
+        return self._mesh_dto(name, mesh)
 
     #: Coordinates are microns and the finest voxel is 7.5 nm, so four decimals
     #: (0.1 nm) is well past the data's resolution.  Rounding here roughly halves
@@ -3080,6 +3152,7 @@ class SbfsemService:
         The faces are the mesh's own, read-only; nothing else is shared with it.
         """
         meta = mesh.meta or {}
+        flat = meta.get("ipl_flatten")
         voxel = meta.get("voxel2_um")
         coarsened = meta.get("voxel2_coarsened")
         vertices = np.round(mesh.vertices, cls.COORDINATE_DECIMALS).astype(np.float64, copy=False).ravel()
@@ -3101,6 +3174,9 @@ class SbfsemService:
                              if meta.get("voxel2_asked") is not None else None),
             voxel2_coarsened=bool(coarsened) if coarsened is not None else None,
             voxel2_reason=(str(meta["voxel2_reason"]) or None) if "voxel2_reason" in meta else None,
+            ipl_flatten_um=float(flat["thickness_um"]) if flat else None,
+            ipl_flatten_method=str(flat["method"]) if flat else None,
+            ipl_flatten_dropped=int(flat["dropped_vertices"]) if flat else None,
         )
         return MeshBuffers(head, vertices, faces, vertex_data)
 
@@ -3163,14 +3239,16 @@ class SbfsemService:
         clip_ipl: float | None = None,
         keep_above: bool = True,
         ipl_method: str = "column",
+        ipl_flatten: bool = False,
     ) -> Mesh:
         """``mesh`` cut the way :meth:`render_mesh` cuts a render, for an export
         of a render that is clipped on screen (``clip_z`` along Z, then
-        ``clip_ipl`` by stratification depth, measured by ``ipl_method``).
+        ``clip_ipl`` by stratification depth, measured by ``ipl_method``), and
+        flattened when ``ipl_flatten`` is (:meth:`flatten`).
 
         The mesh handed in is the cached one and is never changed; with no clip
-        it comes back as it is.  Raises :class:`ValueError` for ``clip_ipl`` in a
-        volume that has no IPL boundary markers.
+        it comes back as it is.  Raises :class:`ValueError` for ``clip_ipl`` or
+        ``ipl_flatten`` in a volume that has no IPL boundary markers.
         """
         if clip_z is not None:
             mesh = clip_mesh(mesh, clip_z, keep_above=keep_above)
@@ -3178,6 +3256,8 @@ class SbfsemService:
             mesh = clip_mesh_by_stratification(
                 mesh, self.boundaries(source), clip_ipl, keep_above=keep_above, method=ipl_method
             )
+        if ipl_flatten:
+            mesh = self.flatten(mesh, source, ipl_method=ipl_method)
         return mesh
 
     def mesh_for(self, neuron: Neuron, options: dict | None = None) -> Mesh:
@@ -3726,14 +3806,17 @@ class SbfsemService:
     #: Context geometry (boundaries, vasculature) is expensive to build and
     #: identical for every viewer, so it is cached per volume for the process
     #: lifetime rather than per request.
-    def boundary_mesh(self, source, layer: str, *, decimate: int = 2) -> MeshDTO:
+    def boundary_mesh(self, source, layer: str, *, decimate: int = 2,
+                      ipl_flatten: bool = False, ipl_method: str = "column") -> MeshDTO:
         """The fitted INL or GCL surface as a renderable sheet.
 
         ``RenderApp``'s "Boundary Markers" checkboxes drew exactly this: the
         smoothed surface through the layer's markers, as context under or over
         a neuron.  ``decimate`` takes every Nth grid line -- the fit is 200x200
         and a full-resolution sheet is 79k triangles of a surface with no
-        detail at that scale.
+        detail at that scale.  ``ipl_flatten``: on the flattened IPL axis
+        (:meth:`flatten`), where the INL lies flat at 0 and the GCL at the
+        volume's thickness.
         """
         layer = str(layer).upper()
         if layer not in ("INL", "GCL"):
@@ -3744,7 +3827,8 @@ class SbfsemService:
             cached = self._meshes.get(key)
             if cached is not None:
                 self._meshes.move_to_end(key)
-                return self._mesh_dto(f"{volume.source}-{layer}", cached)
+                return self._context_dto(f"{volume.source}-{layer}", cached, volume.source,
+                                         ipl_flatten, ipl_method)
 
         boundaries = self.boundaries(volume.source)
         surface = boundaries.inl if layer == "INL" else boundaries.gcl
@@ -3757,11 +3841,18 @@ class SbfsemService:
 
         mesh = surf_to_mesh(grid_x, grid_y, z).drop_nan()
         self._cache_mesh(key, mesh)
-        return self._mesh_dto(f"{volume.source}-{layer}", mesh)
+        return self._context_dto(f"{volume.source}-{layer}", mesh, volume.source, ipl_flatten, ipl_method)
+
+    def _context_dto(self, name: str, mesh: Mesh, source, ipl_flatten: bool, ipl_method: str) -> MeshDTO:
+        """A context mesh as it is drawn: on the flattened IPL axis when ``ipl_flatten``."""
+        if ipl_flatten:
+            mesh = self.flatten(mesh, source, ipl_method=ipl_method)
+        return self._mesh_dto(name, mesh)
 
     def vessel_mesh(self, source, *, method: str = "cylinder",
                     smooth_iterations: int = 1,
-                    reduce_fraction: float = 0.15) -> MeshDTO:
+                    reduce_fraction: float = 0.15,
+                    ipl_flatten: bool = False, ipl_method: str = "column") -> MeshDTO:
         """Every blood vessel in a volume, as one mesh.
 
         ``RenderApp``'s "Blood Vessels" checkbox.  Vessels are ordinary Viking
@@ -3770,7 +3861,8 @@ class SbfsemService:
 
         Decimated hard by default: vasculature is context, not the subject, and
         the full build is ~880k triangles (a 50 MB JSON payload) of smooth
-        tube that looks identical at 15%.
+        tube that looks identical at 15%.  ``ipl_flatten``: on the flattened IPL
+        axis (:meth:`flatten`), as the cells beside them are drawn.
         """
         from ..io.structure_group import Vasculature
 
@@ -3788,9 +3880,11 @@ class SbfsemService:
             cached = self._meshes.get(key)
             if cached is not None:
                 self._meshes.move_to_end(key)
-                return self._mesh_dto(f"{volume.source}-vessels", cached)
+                return self._context_dto(f"{volume.source}-vessels", cached, volume.source,
+                                         ipl_flatten, ipl_method)
         if not len(group.ids):
-            return self._mesh_dto(f"{volume.source}-vessels", EMPTY_MESH)
+            return self._context_dto(f"{volume.source}-vessels", EMPTY_MESH, volume.source,
+                                     ipl_flatten, ipl_method)
         parts = []
         for vessel in group.load_vessels().values():
             try:
@@ -3807,7 +3901,7 @@ class SbfsemService:
         if not mesh.is_empty and 0 < reduce_fraction < 1:
             mesh = mesh.decimate(float(reduce_fraction))
         self._cache_mesh(key, mesh)
-        return self._mesh_dto(f"{volume.source}-vessels", mesh)
+        return self._context_dto(f"{volume.source}-vessels", mesh, volume.source, ipl_flatten, ipl_method)
 
     def closed_curves(self, neuron_id: int, source, *, z_section: int | None = None,
                       spline_points: int | None = None) -> list[ClosedCurveDTO]:
@@ -5042,6 +5136,13 @@ def _averaged_discs(neuron: Neuron, gain: float) -> Neuron:
     sub.analysis = {}
     sub.model = None
     return sub
+
+
+def _finite_runs(finite: np.ndarray) -> list[slice]:
+    """The runs of ``True`` in ``finite``, as slices: a polyline broken where a
+    point is missing."""
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], finite.astype(np.int8), [0]])))
+    return [slice(int(a), int(b)) for a, b in zip(edges[::2], edges[1::2], strict=True)]
 
 
 def _stats_dto(values) -> StatsDTO | None:

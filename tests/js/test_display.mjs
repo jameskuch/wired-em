@@ -22,7 +22,12 @@ function makeElement(id) {
   const listeners = new Map();
   const el = {
     id, checked: false, value: '', hidden: false, disabled: false, textContent: '', className: '',
-    style: {}, dataset: {}, options: [], children: [], listeners,
+    style: {}, dataset: {}, options: [], children: [], listeners, title: '',
+    classes: new Set(),
+    classList: {
+      toggle(name, on) { if (on ?? !el.classes.has(name)) el.classes.add(name); else el.classes.delete(name); },
+      contains(name) { return el.classes.has(name); },
+    },
     addEventListener(type, fn) { if (!listeners.has(type)) listeners.set(type, []); listeners.get(type).push(fn); },
     removeEventListener() {},
     fire(type, extra = {}) { for (const fn of listeners.get(type) || []) fn({ target: el, ...extra }); },
@@ -225,23 +230,70 @@ function stubRenderer() {
   return r;
 }
 
-function panel() {
+function panel({ flat = null, marked = () => true } = {}) {
   elements.clear();
   byId('scale-bar'); byId('colorbar');
   byId('opt-levels').value = '256';
   byId('ctx-opacity').value = '0.45';
   const renderer = stubRenderer();
+  const asked = [];
   const api = {
-    boundaryMesh: async () => ({ n_faces: 1 }),
-    vesselMesh: async () => ({ n_faces: 1 }),
+    boundaryMesh: async (source, layer, decimate, q = {}) => { asked.push([layer, q]); return { n_faces: 1 }; },
+    vesselMesh: async (source, q = {}) => { asked.push(['vessels', q]); return { n_faces: 1 }; },
   };
   const state = { neurons: new Map(), selection: new Set(), volumes: [], source: 'S' };
   const statuses = [];
+  const flattened = [];
   const display = new D.DisplayPanel({
     renderer, api, state, onChange() {}, onStatus: (m, k) => statuses.push([m, k]),
+    ...(flat ? { flatParams: () => flat.query } : {}),
+    onFlatten: (on) => flattened.push(on), hasBoundary: marked,
   });
-  return { display, renderer, state, statuses };
+  return { display, renderer, state, statuses, asked, flattened };
 }
+
+test('Flatten IPL: the sheets shown are fetched again flattened, the hidden ones let go', async () => {
+  const flat = { query: {} };
+  const { display, renderer, asked, flattened } = panel({ flat });
+  byId('ctx-inl').checked = true;
+  await display._toggleBoundary('INL', byId('ctx-inl'));
+  byId('ctx-vessels').checked = true;
+  await display._toggleVessels(byId('ctx-vessels'));
+  byId('ctx-vessels').checked = false;
+  await display._toggleVessels(byId('ctx-vessels'));
+  assert.deepEqual(asked, [['INL', {}], ['vessels', {}]]);
+  // The box is the page's: ticking it tells the page, which flattens and calls back.
+  byId('ctx-flatten').checked = true;
+  byId('ctx-flatten').fire('change');
+  assert.deepEqual(flattened, [true]);
+  flat.query = { ipl_flatten: true, ipl_method: 'normal' };
+  display.flattenChanged();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(asked.at(-1), ['INL', { ipl_flatten: true, ipl_method: 'normal' }], 'the INL sheet, flattened');
+  assert.equal(display.contextFlat.get('boundary:INL'), 'flat:normal');
+  assert.ok(!display.contextLoaded.has('vessels'), 'the hidden vessels are let go, to be asked flattened');
+  assert.ok(renderer.calls.some((c) => c[0] === 'sheetRemove' && c[1] === 'vessels'), 'and taken off the renderer');
+  // Shown again as it already is: no request.
+  const before = asked.length;
+  await display._toggleBoundary('INL', byId('ctx-inl'));
+  assert.equal(asked.length, before);
+  assert.equal(D.flatTag({}), '');
+  assert.equal(D.flatTag({ ipl_flatten: true, ipl_method: 'column' }), 'flat:column');
+});
+
+test('Flatten IPL is off in a volume with no boundary markers, unless it is on', () => {
+  const { display } = panel({ marked: () => false });
+  assert.equal(byId('ctx-flatten').disabled, true);
+  assert.ok(byId('ctx-flatten-field').classes.has('inert'));
+  display.syncFlatten(true);
+  assert.equal(byId('ctx-flatten').disabled, false, 'on, it can always be turned off');
+  assert.equal(byId('ctx-flatten').checked, true);
+  display.setFlattenNote(['a', 'b']);
+  assert.equal(byId('ctx-flatten-note').textContent, 'a\nb');
+  assert.equal(byId('ctx-flatten-note').hidden, false);
+  display.setFlattenNote([]);
+  assert.equal(byId('ctx-flatten-note').hidden, true);
+});
 
 test('snapshot: a map the gradient editor is previewing is stored as the map the menu names', () => {
   const { display, renderer } = panel();

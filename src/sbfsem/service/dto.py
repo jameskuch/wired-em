@@ -322,6 +322,17 @@ class MeshDTO(BaseModel):
     voxel2_asked_um: float | None = None
     voxel2_coarsened: bool | None = None
     voxel2_reason: str | None = None
+    #: A render drawn on the flattened IPL axis (``ipl_flatten``): Z is each
+    #: vertex's IPL depth fraction times this many µm, the volume's median IPL
+    #: thickness along the normals, so the INL is at 0 and the GCL here.  The
+    #: area and volume above are the flattened surface's.  ``None`` for a mesh
+    #: in the volume's own Z.
+    ipl_flatten_um: float | None = None
+    #: How the flattened render's depth was measured (``column`` or ``normal``).
+    ipl_flatten_method: str | None = None
+    #: What a flattened mesh left out for having no IPL depth: a surface's
+    #: vertices, a synapse mesh's markers.
+    ipl_flatten_dropped: int | None = None
 
 
 class DeviationDTO(BaseModel):

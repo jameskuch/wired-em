@@ -232,6 +232,26 @@ function closedPolygon(points) {
   return out;
 }
 
+/**
+ * `text` broken at spaces into lines no wider than `width`, as `measure` (a canvas
+ * context's measureText width) reads them; a word wider than that has a line of its own.
+ */
+export function wrapText(text, width, measure) {
+  const lines = [];
+  let line = '';
+  for (const word of String(text).split(/\s+/).filter(Boolean)) {
+    const next = line ? `${line} ${word}` : word;
+    if (line && measure(next) > width) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = next;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
 export class Renderer3D {
   constructor(container, { onPick } = {}) {
     this.container = container;
@@ -2937,28 +2957,57 @@ export class Renderer3D {
     this.controls.update();
   }
 
-  snapshot(filename = 'sbfsem.png') {
+  /** Save the picture on screen as a PNG; `caption` lines go in a strip under it (`snapshotURL`). */
+  snapshot(filename = 'sbfsem.png', { caption = [] } = {}) {
     const link = document.createElement('a');
     link.download = filename;
-    link.href = this.snapshotURL();
+    link.href = this.snapshotURL({ caption });
     link.click();
   }
 
   /**
    * The picture on screen as a data URL, drawn first so it is this frame.  With
    * `maxWidth`, a wider canvas is scaled down to it (a report wants a pane's look,
-   * not its device pixels); `type` and `quality` are toDataURL's.
+   * not its device pixels); `type` and `quality` are toDataURL's.  `caption`, lines
+   * of text, goes in a strip of the background's color under the picture, never
+   * over it: what a figure must say of itself (the flattened IPL's thickness).
    */
-  snapshotURL({ type = 'image/png', quality = undefined, maxWidth = 0 } = {}) {
+  snapshotURL({ type = 'image/png', quality = undefined, maxWidth = 0, caption = [] } = {}) {
     this.webgl.render(this.scene, this.camera);
     const canvas = this.webgl.domElement;
-    if (!(maxWidth > 0) || canvas.width <= maxWidth || typeof document === 'undefined') {
+    const lines = (caption || []).filter(Boolean);
+    const scaled = maxWidth > 0 && canvas.width > maxWidth;
+    if ((!scaled && !lines.length) || typeof document === 'undefined') {
       return canvas.toDataURL(type, quality);
     }
+    const width = scaled ? maxWidth : canvas.width;
+    const height = scaled ? Math.max(1, Math.round(canvas.height * maxWidth / canvas.width)) : canvas.height;
+    // The caption at about 13 CSS pixels, however many device pixels the canvas has,
+    // each line wrapped at the picture's width.
+    const ratio = canvas.clientWidth > 0 ? width / canvas.clientWidth : 1;
+    const font = Math.max(10, Math.round(13 * ratio));
+    const pad = Math.round(font * 0.6);
+    const step = Math.round(font * 1.35);
     const out = document.createElement('canvas');
-    out.width = maxWidth;
-    out.height = Math.max(1, Math.round(canvas.height * maxWidth / canvas.width));
-    out.getContext('2d').drawImage(canvas, 0, 0, out.width, out.height);
+    let ctx = out.getContext('2d');
+    const face = `${font}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+    ctx.font = face;
+    const wrapped = lines.flatMap((line) => wrapText(line, width - 2 * pad, (t) => ctx.measureText(t).width));
+    const strip = wrapped.length ? wrapped.length * step + 2 * pad : 0;
+    out.width = width;
+    out.height = height + strip;
+    ctx = out.getContext('2d');  // resizing a canvas resets its state
+    const background = this.scene.background instanceof THREE.Color ? this.scene.background : new THREE.Color(0x101418);
+    ctx.fillStyle = `#${background.getHexString()}`;
+    ctx.fillRect(0, 0, out.width, out.height);
+    ctx.drawImage(canvas, 0, 0, width, height);
+    if (wrapped.length) {
+      const light = background.r * 0.299 + background.g * 0.587 + background.b * 0.114 > 0.5;
+      ctx.fillStyle = light ? '#1d232b' : '#e8ecf1';
+      ctx.font = face;
+      ctx.textBaseline = 'top';
+      wrapped.forEach((line, i) => ctx.fillText(line, pad, height + pad + i * step));
+    }
     return out.toDataURL(type, quality);
   }
 

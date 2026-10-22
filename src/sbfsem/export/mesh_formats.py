@@ -206,34 +206,63 @@ def _to_trimesh(mesh: Mesh):
     return trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces, process=False)
 
 
-def write_stl(mesh: Mesh, path: str | Path, *, binary: bool = True) -> Path:
+#: A binary STL's header is 80 free bytes; one that starts "solid" reads as ASCII.
+_STL_HEADER = 80
+
+
+def _note_lines(notes: Mapping[str, object] | None) -> list[str]:
+    """``notes`` as ``key value`` lines, one each."""
+    return [f"{key} {value}" for key, value in (notes or {}).items()]
+
+
+def write_stl(mesh: Mesh, path: str | Path, *, binary: bool = True,
+              notes: Mapping[str, object] | None = None) -> Path:
+    """``notes`` go in a binary file's 80-byte header (cut to fit), or as an
+    ASCII file's solid name."""
     path = Path(path)
     tm = _to_trimesh(mesh)
     data = tm.export(file_type="stl" if binary else "stl_ascii")
+    text = "; ".join(_note_lines(notes))
+    if text and isinstance(data, (bytes, bytearray)):
+        header = ("sbfsem " + text).encode("ascii", "replace")[:_STL_HEADER].ljust(_STL_HEADER, b" ")
+        data = header + bytes(data[_STL_HEADER:])
+    elif text:
+        data = data.replace("solid ", f"solid {text} ", 1)
     mode = "wb" if isinstance(data, (bytes, bytearray)) else "w"
     with path.open(mode, encoding=None if "b" in mode else "utf-8") as fh:
         fh.write(data)
     return path
 
 
-def write_obj(mesh: Mesh, path: str | Path) -> Path:
+def write_obj(mesh: Mesh, path: str | Path, *, notes: Mapping[str, object] | None = None) -> Path:
+    """``notes`` become ``#`` comment lines at the top."""
     path = Path(path)
-    path.write_text(_to_trimesh(mesh).export(file_type="obj"), encoding="utf-8")
+    head = "".join(f"# {line}\n" for line in _note_lines(notes))
+    path.write_text(head + _to_trimesh(mesh).export(file_type="obj"), encoding="utf-8")
     return path
 
 
-def write_ply(mesh: Mesh, path: str | Path) -> Path:
+def write_ply(mesh: Mesh, path: str | Path, *, notes: Mapping[str, object] | None = None) -> Path:
+    """``notes`` become ``comment`` lines in the header, after its format line."""
     path = Path(path)
-    path.write_bytes(_to_trimesh(mesh).export(file_type="ply"))
+    data = _to_trimesh(mesh).export(file_type="ply")
+    if notes:
+        end = data.index(b"\n", data.index(b"\nformat ") + 1) + 1
+        comments = "".join(f"comment {line}\n" for line in _note_lines(notes)).encode("ascii", "replace")
+        data = data[:end] + comments + data[end:]
+    path.write_bytes(data)
     return path
 
 
-def write_gltf(meshes, path: str | Path) -> Path:
-    """Write one or more meshes to ``.glb`` (binary glTF) or ``.gltf``."""
+def write_gltf(meshes, path: str | Path, *, notes: Mapping[str, object] | None = None) -> Path:
+    """Write one or more meshes to ``.glb`` (binary glTF) or ``.gltf``.  ``notes``
+    go in the scene's ``extras`` under ``sbfsem``."""
     import trimesh
 
     path = Path(path)
     scene = trimesh.Scene()
+    if notes:
+        scene.metadata["sbfsem"] = dict(notes)
     if isinstance(meshes, Mesh):
         meshes = {path.stem: meshes}
     items = meshes.items() if isinstance(meshes, Mapping) else list(meshes)
@@ -254,11 +283,15 @@ def write_gltf(meshes, path: str | Path) -> Path:
     return path
 
 
-def mesh_to_glb_bytes(mesh: Mesh, name: str = "mesh") -> bytes:
-    """Serialize a mesh to GLB in memory, for streaming over HTTP."""
+def mesh_to_glb_bytes(mesh: Mesh, name: str = "mesh", *,
+                      notes: Mapping[str, object] | None = None) -> bytes:
+    """Serialize a mesh to GLB in memory, for streaming over HTTP; ``notes`` as
+    :func:`write_gltf`'s."""
     import trimesh
 
     scene = trimesh.Scene()
+    if notes:
+        scene.metadata["sbfsem"] = dict(notes)
     scene.add_geometry(_to_trimesh(mesh), node_name=name, geom_name=name)
     return scene.export(file_type="glb")
 

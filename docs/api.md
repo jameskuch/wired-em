@@ -109,6 +109,22 @@ measures with its `copy_tag` as `?copy=`, reads its `/nodes` and
 `surface_area_um2` and `volume_um3`. `vertex_data` holds per-vertex IPL depth
 when `color_by_strata=true`, measured as `ipl_method` says.
 
+**A flattened IPL** (since 2.33.0): `ipl_flatten=true` (default false) on the
+mesh and mesh-job routes, the mesh exports (`export/{obj,ply,stl,glb,dae}`,
+wireframes, `mesh.glb`), `skeleton`, `synapses/{type}/mesh`,
+`volumes/{source}/boundary/{layer}/mesh` and `volumes/{source}/vessels/mesh`
+draws the geometry with each point's Z replaced by its IPL depth fraction,
+measured as `ipl_method` says, times the volume's median IPL thickness along the
+normals (the `ipl-thickness` route's `normal_um.median`): the INL at Z = 0, the
+GCL at that thickness, X and Y unchanged. A point with no depth is left out (a
+skeleton segment is split there). The mesh DTO then carries `ipl_flatten_um` (the
+thickness), `ipl_flatten_method` and `ipl_flatten_dropped` (vertices, or synapse
+markers, left out), and no `mesh_id`; an export's file name ends
+`-ipl-flat-<µm>um`, and OBJ/PLY comments, a binary STL's header, GLB
+`extras.sbfsem` and DAE `contributor/comments` say what Z is. 400 in a volume
+with no boundary markers. SWC and JSON exports are never flattened, and the
+render-prefs route takes the option and never stores it.
+
 ### A finished mesh as binary
 
 `GET /api/mesh-jobs/{id}` with `Accept: application/x-sbfsem-mesh` answers a

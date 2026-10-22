@@ -444,10 +444,13 @@ def volume_info(request: Request, source: str):
 
 @router.get("/volumes/{source}/boundary/{layer}/mesh", response_model=MeshDTO)
 def boundary_mesh(request: Request, source: str, layer: str,
-                  decimate: int = Query(2, ge=1, le=20)):
-    """The fitted INL or GCL surface, for context under or over a render."""
+                  decimate: int = Query(2, ge=1, le=20),
+                  ipl_flatten: bool = False, ipl_method: IplMethod = "column"):
+    """The fitted INL or GCL surface, for context under or over a render;
+    ``ipl_flatten`` lays it flat as the cells are drawn then."""
     try:
-        return service(request).boundary_mesh(_source(source), layer, decimate=decimate)
+        return service(request).boundary_mesh(_source(source), layer, decimate=decimate,
+                                              ipl_flatten=ipl_flatten, ipl_method=ipl_method)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -470,10 +473,13 @@ def ipl_thickness(request: Request, source: str,
 
 
 @router.get("/volumes/{source}/vessels/mesh", response_model=MeshDTO)
-def vessel_mesh(request: Request, source: str):
-    """Every blood vessel in the volume, as one mesh."""
+def vessel_mesh(request: Request, source: str,
+                ipl_flatten: bool = False, ipl_method: IplMethod = "column"):
+    """Every blood vessel in the volume, as one mesh; ``ipl_flatten`` on the
+    flattened IPL axis, as the cells are drawn then."""
     try:
-        return service(request).vessel_mesh(_source(source))
+        return service(request).vessel_mesh(_source(source), ipl_flatten=ipl_flatten,
+                                            ipl_method=ipl_method)
     except ODataError as exc:
         raise HTTPException(status_code=502, detail=f"Viking query failed: {exc}") from exc
     except (ValueError, FileNotFoundError) as exc:
@@ -798,11 +804,16 @@ def neurons_freshness(request: Request, body: FreshnessBatchBody):
 
 
 @router.get("/neurons/{source}/{neuron_id}/skeleton", response_model=SkeletonDTO)
-def neuron_skeleton(request: Request, source: str, neuron_id: int):
+def neuron_skeleton(request: Request, source: str, neuron_id: int,
+                    ipl_flatten: bool = False, ipl_method: IplMethod = "column"):
+    """The cell's segments as polylines; ``ipl_flatten`` on the flattened IPL axis."""
     svc = service(request)
     src = _source(source)
     _neuron_or_404(svc, neuron_id, src)
-    return svc.skeleton(neuron_id, src)
+    try:
+        return svc.skeleton(neuron_id, src, ipl_flatten=ipl_flatten, ipl_method=ipl_method)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _annotation_wire_options(
@@ -873,6 +884,7 @@ def mesh_params(
     keep_above: bool = True,
     color_by_strata: bool = False,
     ipl_method: str = Query("column", pattern="^(normal|column)$"),
+    ipl_flatten: bool = False,
 ) -> dict:
     """Every render option, shared verbatim by the mesh and mesh-job routes."""
     return {
@@ -892,6 +904,7 @@ def mesh_params(
         "keep_above": keep_above,
         "color_by_strata": color_by_strata,
         "ipl_method": ipl_method,
+        "ipl_flatten": ipl_flatten,
         "pathway": pathway,
         "post_order": post_order,
         "voxel_detail": voxel_detail,
@@ -1012,7 +1025,7 @@ def start_grid_job(request: Request, source: str, neuron_id: int,
 
 
 #: The mesh route's options that cut or color a built mesh: nothing an estimate weighs.
-_VIEW_OPTIONS = ("clip_z", "clip_ipl", "keep_above", "color_by_strata", "ipl_method")
+_VIEW_OPTIONS = ("clip_z", "clip_ipl", "keep_above", "color_by_strata", "ipl_method", "ipl_flatten")
 
 
 @router.get("/neurons/{source}/{neuron_id}/render-estimate")
@@ -1050,10 +1063,12 @@ def render_estimate(request: Request, source: str, neuron_id: int,
 def _mesh_object_or_400(svc, neuron_id: int, src, geometry: dict, clip: dict | None = None):
     """``svc.mesh_object`` with the mesh route's answer to a build that cannot run
     (the closed-curve raster over its voxel limit, a missing file): 400 and the
-    reason, not a bare 500.  ``clip`` cuts the mesh as the viewer's clip does."""
+    reason, not a bare 500.  ``clip`` cuts the mesh as the viewer's clip does,
+    and flattens it as the viewer's Flatten IPL does."""
     try:
         mesh = svc.mesh_object(neuron_id, src, **geometry)
-        if clip and (clip["clip_z"] is not None or clip["clip_ipl"] is not None):
+        if clip and (clip["clip_z"] is not None or clip["clip_ipl"] is not None
+                     or clip.get("ipl_flatten")):
             mesh = svc.clipped_mesh(mesh, src, **clip)
         return mesh
     except (ValueError, FileNotFoundError) as exc:
@@ -1338,6 +1353,8 @@ class AttachedRenderBody(MeshOptionsBody):
     #: Taken as the mesh route takes it, and never stored: how depth is measured
     #: is one setting for the whole page (its Settings tab), not a cell's.
     ipl_method: str = Field(default="column", pattern="^(normal|column)$")
+    #: The same: the flattened IPL is the whole view's (the Display panel's).
+    ipl_flatten: bool = False
 
 
 @router.put("/neurons/{source}/{neuron_id}/render-prefs")
@@ -1348,6 +1365,7 @@ def put_render_prefs(request: Request, source: str, neuron_id: CellId,
     # missing option as its default and a null as a value.
     render = body.model_dump(exclude_none=True)
     render.pop("ipl_method", None)
+    render.pop("ipl_flatten", None)
     try:
         _cell_renders(request).set(_source(source), neuron_id, render)
     except QuotaError as exc:
@@ -1694,13 +1712,15 @@ def neuron_mesh_deviation(request: Request, source: str, neuron_id: int,
             response_model=MeshDTO)
 def synapse_mesh(request: Request, source: str, neuron_id: int, synapse_type: str,
                  radius_um: float = Query(0.5, gt=0),
-                 shape: str = Query("circle", pattern="^(circle|oval)$")):
+                 shape: str = Query("circle", pattern="^(circle|oval)$"),
+                 ipl_flatten: bool = False, ipl_method: IplMethod = "column"):
     svc = service(request)
     src = _source(source)
     _neuron_or_404(svc, neuron_id, src)
     try:
         return svc.synapse_mesh(
-            neuron_id, src, synapse_type, radius_um=radius_um, shape=shape
+            neuron_id, src, synapse_type, radius_um=radius_um, shape=shape,
+            ipl_flatten=ipl_flatten, ipl_method=ipl_method,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2216,21 +2236,49 @@ def _export_clip(
     keep_above: bool = Query(True, description="Which side of the cut to keep"),
     clip_z: float | None = Query(None, description="Cut the exported mesh at this Z, in microns"),
     ipl_method: str = Query("column", pattern="^(normal|column)$",
-                            description="How the IPL clip measures depth: along Z (column, "
-                                        "MATLAB's) or along the layers' normals (normal)"),
+                            description="How the IPL clip and the flattening measure depth: "
+                                        "along Z (column, MATLAB's) or along the layers' "
+                                        "normals (normal)"),
+    ipl_flatten: bool = Query(False, description="Export on the flattened IPL axis, as the "
+                                                 "viewer's Flatten IPL draws it: Z = IPL depth "
+                                                 "fraction x the volume's median IPL thickness "
+                                                 "along the normals, the INL at 0"),
 ) -> dict:
-    """The viewer's clip, so an export of a clipped render is the surface on screen.
+    """The viewer's clip and flattening, so an export of a clipped or flattened
+    render is the surface on screen.
 
-    A fifth declaration of four schema fields, beside the four the schema lists:
-    ``render_schema`` marks ``clip_ipl``, ``keep_above``, ``clip_z`` and
-    ``ipl_method`` as the mesh route's (``wire=('mesh',)``), and the export
-    routes take the same four here, with ``_geometry_options`` carrying only the
-    geometry.  The export link the browser builds (``exportQuery``) adds
-    ``clip_ipl``, ``keep_above`` and ``ipl_method`` by hand.
+    A fifth declaration of five schema fields, beside the four the schema lists:
+    ``render_schema`` marks ``clip_ipl``, ``keep_above``, ``clip_z``,
+    ``ipl_method`` and ``ipl_flatten`` as the mesh route's (``wire=('mesh',)``),
+    and the export routes take the same five here, with ``_geometry_options``
+    carrying only the geometry.  The export link the browser builds
+    (``exportQuery``) adds ``clip_ipl``, ``keep_above``, ``ipl_method`` and
+    ``ipl_flatten`` by hand.
     ``tests/unit/test_web.py`` holds this to the mesh route's type, default and
     bounds, and ``tests/js/test_exports.mjs`` holds the link's names to the schema's.
     """
-    return {"clip_z": clip_z, "clip_ipl": clip_ipl, "keep_above": keep_above, "ipl_method": ipl_method}
+    return {"clip_z": clip_z, "clip_ipl": clip_ipl, "keep_above": keep_above, "ipl_method": ipl_method,
+            "ipl_flatten": ipl_flatten}
+
+
+def _flatten_notes(mesh, source) -> dict | None:
+    """What an export says of a flattened mesh, in its file where the format has
+    room (``notes``): the thickness it was scaled by, and what Z now is."""
+    flat = mesh.meta.get("ipl_flatten") if mesh.meta else None
+    if not flat:
+        return None
+    t = round(float(flat["thickness_um"]), 4)
+    return {
+        "ipl_flatten_um": t,
+        "ipl_flatten": (f"Z = IPL depth fraction x {t} um, the median IPL thickness along the "
+                        f"normals of {source}: INL at Z = 0, GCL at Z = {t}; X and Y in um, 1:1"),
+        "ipl_method": flat["method"],
+    }
+
+
+def _flat_stem(stem: str, notes: dict | None) -> str:
+    """A flattened export's file name says the thickness it was scaled by."""
+    return f"{stem}-ipl-flat-{notes['ipl_flatten_um']:g}um" if notes else stem
 
 
 #: Formats the wireframe exporter can express edges in.  SWC is the
@@ -2309,8 +2357,11 @@ def export_neuron(request: Request, source: str, neuron_id: int, fmt: str,
             if mesh.is_empty:
                 raise HTTPException(status_code=400,
                                     detail="Neuron produced an empty mesh")
+            notes = _flatten_notes(mesh, src)
+            stem = _flat_stem(stem, notes)
+            path = Path(tmp) / f"{stem}.{fmt}"
             _write_wireframe(mesh, fmt, path, thickness_um=wireframe_thickness_um,
-                             name=f"c{neuron_id}")
+                             name=f"c{neuron_id}", notes=notes)
         elif fmt == "swc":
             from sbfsem.export.swc import write_swc
 
@@ -2328,10 +2379,13 @@ def export_neuron(request: Request, source: str, neuron_id: int, fmt: str,
             mesh = _mesh_object_or_400(svc, neuron_id, src, geometry, clip)
             if mesh.is_empty:
                 raise HTTPException(status_code=400, detail="Neuron produced an empty mesh")
+            notes = _flatten_notes(mesh, src)
+            stem = _flat_stem(stem, notes)
+            path = Path(tmp) / f"{stem}.{fmt}"
             if fmt == "dae":
                 from sbfsem.export.collada import write_collada
 
-                write_collada({f"c{neuron_id}": mesh}, path)
+                write_collada({f"c{neuron_id}": mesh}, path, notes=notes)
             else:
                 from sbfsem.export import mesh_formats
 
@@ -2341,7 +2395,7 @@ def export_neuron(request: Request, source: str, neuron_id: int, fmt: str,
                     "ply": mesh_formats.write_ply,
                     "glb": mesh_formats.write_gltf,
                 }[fmt]
-                writer(mesh, path)
+                writer(mesh, path, notes=notes)
         data = path.read_bytes()
 
     return Response(
@@ -2523,6 +2577,6 @@ def mesh_glb(request: Request, source: str, neuron_id: int,
     if mesh.is_empty:
         raise HTTPException(status_code=400, detail="Neuron produced an empty mesh")
     return Response(
-        content=mesh_to_glb_bytes(mesh, f"c{neuron_id}"),
+        content=mesh_to_glb_bytes(mesh, f"c{neuron_id}", notes=_flatten_notes(mesh, src)),
         media_type="model/gltf-binary",
     )

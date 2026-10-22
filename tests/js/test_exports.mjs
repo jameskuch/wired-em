@@ -292,6 +292,17 @@ test('a clipped export measures its depth as the page does, and an unclipped one
   assert.equal(X.exportQuery({ clip_ipl: 0 }, 'column').ipl_method, 'column', '0 is the INL border, a clip');
 });
 
+test('a flattened view\'s export is flattened as drawn, by the page\'s method', () => {
+  const flat = X.exportQuery({}, 'normal', true);
+  assert.equal(flat.ipl_flatten, true);
+  assert.equal(flat.ipl_method, 'normal');
+  const plain = X.exportQuery({}, 'normal');
+  assert.ok(!('ipl_flatten' in plain) && !('ipl_method' in plain), 'unflattened: the link it always was');
+  const clipped = X.exportQuery({ clip_ipl: 0.3 }, 'column', true);
+  assert.equal(clipped.clip_ipl, 0.3);
+  assert.equal(clipped.ipl_method, 'column');
+});
+
 test('fileSize', () => {
   assert.equal(X.fileSize(3_200_000), '3.2 MB');
   assert.equal(X.fileSize(840 * 1024), '840 kB');
