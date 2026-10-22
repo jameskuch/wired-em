@@ -79,19 +79,40 @@ from check_dropdowns import SHIFT, Chrome, Report, find_chrome  # noqa: E402
 
 BACKGROUND = (16, 20, 24)
 
-#: Hides what lies over the render (the readout, the hint, the banners) so a screenshot of it
-#: holds the scene and nothing else; `visibility` keeps the layout.
+#: Hides what lies over the render (the readout, the hint, the banners, the view cube) so a
+#: screenshot of it holds the scene and nothing else; `visibility` keeps the layout.  The view
+#: cube (2.19.0) is 144 x 172 px in the top-right corner: left in, it was two thirds of c1178's
+#: "drawn" pixels, and a click on it reaches the cube, not the render (2026-10-21).
 HIDE = ("document.head.append(Object.assign(document.createElement('style'), { textContent: "
-        "'.viewport-overlay, #restore-banner, #render-notice, #render-error, #load-progress { visibility: hidden !important; }' }));"
+        "'.viewport-overlay, .viewcube, #restore-banner, #render-notice, #render-error, #load-progress "
+        "{ visibility: hidden !important; }' }));"
         "window.sbfsem.renderer.setAxesVisible(false); true")
+
+#: What is still shown over the render's canvas: [description, ...], empty when the scene is alone.
+OVER = """(() => { const cv = window.sbfsem.renderer.webgl.domElement; const R = cv.getBoundingClientRect(); const out = [];
+    for (const e of document.querySelectorAll('body *')) {
+      if (e === cv || e.contains(cv)) continue;
+      const b = e.getBoundingClientRect();
+      if (b.width < 1 || b.height < 1 || b.right <= R.left || b.left >= R.right || b.bottom <= R.top || b.top >= R.bottom) continue;
+      const s = getComputedStyle(e); if (s.visibility !== 'visible' || +s.opacity === 0) continue;
+      out.push(`${e.tagName.toLowerCase()}${e.id ? '#' + e.id : ''}${typeof e.className === 'string' && e.className ? '.' + e.className.trim().split(/\\s+/).join('.') : ''}`
+               + ` ${Math.round(b.width)}x${Math.round(b.height)} at ${Math.round(b.left)},${Math.round(b.top)}`); }
+    return out; })()"""
 
 
 # -- the page --------------------------------------------------------------------------------------
 
 def prepare(c: Chrome) -> None:
-    """Put the scene alone in the picture: no overlays, no axes."""
+    """Put the scene alone in the picture: no overlays, no axes.
+
+    Something new drawn over the render would be sampled as the cell, and a click on it
+    reaches it, not the render: the section stops here and names it, rather than
+    reporting clicks that "found nothing" (the view cube, 2.19.0 to 2.28.0)."""
     js(c, HIDE)
     c.settle(3)
+    over = js(c, OVER)
+    if over:
+        raise RuntimeError(f'{len(over)} element(s) still shown over the render (add them to HIDE): {over[:4]}')
 
 
 def canvas(c: Chrome) -> tuple[float, float, float, float]:
@@ -551,11 +572,15 @@ def candidates(c: Chrome, r: Report, ctx):
     r.check('and the menu stays, about it: the title and the tick moved',
             m2 is not None and f'annotation {want} ' in m2['title'] and m2['ticked'][annotation_rows[1]]
             and sum(m2['ticked']) == 1, m2 and (m2['title'], m2['ticked']))
-    # (A menu against the window's right edge keeps that edge: its left follows its width.)
-    moved_left = abs((m2['box'][0] + m2['box'][2]) - (m['box'][0] + m['box'][2])) if m2 else None
+    # Both are placed at the click and kept on screen (`placeInside`): each edge stays, or the
+    # menu rests against the window's right or bottom margin, which its new size needs.  (The
+    # first menu need not rest there: at c1178's rim on 2026-10-21 it was 393.5 px wide with
+    # 1.55 px to spare, and the 480.9 px one after the click rests on the margin.)
+    rests_right = m2 is not None and m2['box'][0] + m2['box'][2] >= c.width - 9
     rests = m2 is not None and m2['box'][1] + m2['box'][3] >= c.height - 9
-    r.check('the menu stays where it was, moving up only as far as its new height needs',
-            m2 is not None and moved_left < 1 and (abs(m2['box'][1] - m['box'][1]) < 1 or rests),
+    r.check('the menu stays where it was, moving left and up only as far as its new size needs',
+            m2 is not None and (abs(m2['box'][0] - m['box'][0]) < 1 or rests_right)
+            and (abs(m2['box'][1] - m['box'][1]) < 1 or rests),
             m2 and (m['box'], m2['box']))
     r.check('and the render has the keyboard again (the arrows step the markers)',
             js(c, "document.activeElement === window.sbfsem.renderer.webgl.domElement"))

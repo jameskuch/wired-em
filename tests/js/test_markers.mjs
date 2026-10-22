@@ -218,6 +218,29 @@ test('a triple click offers the rings about as near as the nearest, not its neig
   assert.equal(M.RING_TIE_PX, 1.5);
 });
 
+test('a click in GraphApp takes the nearest dot, not the branch it lies on or its neighbors', () => {
+  const ring = (px, id) => ({ kind: 'annotation', px, locationId: id });
+  const branch = (px) => ({ kind: 'skeleton', px, segment: 3 });
+  const synapse = (px) => ({ kind: 'synapse', px, synapseId: 7, locationId: 70 });
+  const ids = (list) => M.dotChoices(list).map((c) => c.locationId ?? c.kind);
+  // c21768 at the whole cell's zoom (tools/check_app.py --only graphapp): a click 0.7 px off a
+  // dot whose neighbors lie 2 px from it.  The triple click's rule offered four.
+  const c21768 = [branch(0), ring(0.7, 1164303), ring(1.4, 898478), ring(1.9, 898528), ring(2.0, 1207983)];
+  assert.deepEqual(ids(c21768), [1164303]);
+  assert.equal(M.choosable(c21768).filter((c) => c.kind === 'annotation').length, 4);
+  // A dot on its branch: the annotation, whichever is nearer.
+  assert.deepEqual(ids([branch(0), ring(0.4, 1)]), [1]);
+  // Dots on top of each other on screen (a process seen end-on) are offered together.
+  assert.deepEqual(ids([ring(0.1, 1), ring(0.5, 2), ring(0.7, 3)]), [1, 2]);
+  // A synapse's dot is a dot too: nearest wins, and one lying on an annotation's is offered with it.
+  assert.deepEqual(ids([branch(0), ring(3, 1), synapse(2)]), [70]);
+  assert.deepEqual(ids([ring(0, 1), synapse(0.3), branch(0.5)]), [1, 70]);
+  // Between dots, on the line: the branch, as before; nothing, nothing.
+  assert.deepEqual(ids([branch(1)]), ['skeleton']);
+  assert.deepEqual(ids([]), []);
+  assert.equal(M.DOT_TIE_PX, 0.5);
+});
+
 // -- a whole z-slice (2026-10-20) ------------------------------------------------------
 
 test('the next section with annotations, up or down, never the one it is on', () => {

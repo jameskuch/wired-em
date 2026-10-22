@@ -767,7 +767,7 @@ several cells and switching keeps the view. What it draws, and how it differs:
   drew a gray sphere with a Delete menu.
 - **Not ported**: the keys (the arrows, `z`, `a`/`d`, `q`/`e`, `w`/`s` moved axis
   limits in MATLAB; the view's own keys stand), the `h` help dialog (hover help
-  instead), the View / Data Cursor modes (a click always names), the Update
+  instead), the View / Data Cursor modes (a click always selects and names), the Update
   Neuron button (the list's ↻), the broken Table tab, and the off-edge delete
   that read the wrong tag.
 

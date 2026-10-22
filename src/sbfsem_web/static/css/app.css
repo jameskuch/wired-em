@@ -2533,6 +2533,10 @@ select[aria-expanded="true"] { border-color: var(--accent); }
 #view-render.graph-on #shift-chip,
 #view-render.graph-on #colorbar,
 #view-render.graph-on #render-notice { display: none !important; }
+/* The hint names the look's selection gesture: a triple click, or in GraphApp one click. */
+.hint .sel-graph,
+#view-render.graph-on .hint .sel-render { display: none; }
+#view-render.graph-on .hint .sel-graph { display: inline; }
 .graph-tools { flex-wrap: wrap; align-items: center; }
 .graph-tools .field input[type="text"] { width: 150px; flex: none; }
 .graph-tools .flag-dot {

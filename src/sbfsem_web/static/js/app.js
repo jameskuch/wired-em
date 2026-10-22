@@ -11,7 +11,7 @@ import {
 } from './state.js';
 import { parseStructureSpec } from './ids.js';
 import {
-  activeSlot, choosable, hideLevels, inSlice, leadOf, markerReadout, markerReadoutText, markerRows,
+  activeSlot, choosable, dotChoices, hideLevels, inSlice, leadOf, markerReadout, markerReadoutText, markerRows,
   placeChoice, sameAnnotation, signed, SLICE_SCOPES, sliceStep, SLOT_NAMES, SLOTS, stepAnchor, stepMarker,
   sideOf,
 } from './markers.js';
@@ -5437,7 +5437,7 @@ function placeContextMenu(menu, clientX, clientY) {
   menu.style.top = `${top}px`;
 }
 
-// -- selection (left triple click) and the Z range -------------------------
+// -- selection (left triple click; a click in GraphApp) and the Z range ----
 
 function hasZHide(record) {
   const d = normalizeDisplay(record.display);
@@ -5600,11 +5600,12 @@ function choose(candidate) {
 }
 
 /** One candidate is selected outright; several are offered in a chooser whose
- * rows light the item up as the mouse passes over them. */
-function onSelectRequest({ candidates: under, clientX, clientY }) {
+ * rows light the item up as the mouse passes over them.  `look` 'graph': a
+ * GraphApp click, which takes the nearest dot (markers.js `dotChoices`). */
+function onSelectRequest({ candidates: under, clientX, clientY, look = 'render' }) {
   hideContextMenu();
   // The rings about as near as the nearest one, not its neighbors a few pixels off.
-  const candidates = choosable(under);
+  const candidates = look === 'graph' ? dotChoices(under) : choosable(under);
   if (!candidates.length) {
     renderer.clearSelection();
     statusEl.textContent = 'Nothing selectable there (the surface never is)';

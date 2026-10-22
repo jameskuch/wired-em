@@ -2,7 +2,8 @@
 // so node can run them (tests/js/test_markers.mjs); app.js and render3d.js act on
 // the answers.
 //
-// A triple click selects an annotation, drawn yellow: the reference.  Up to two
+// A triple click (in GraphApp a single click) selects an annotation, drawn yellow:
+// the reference.  Up to two
 // more annotations of the same volume are marked against it (2026-10-16): one
 // ABOVE it, drawn red, and one BELOW it, drawn blue.  "Above" is the top of the
 // upright view, as for Hide above and the Up key: higher sections, unless Flip Z
@@ -31,6 +32,29 @@ export function choosable(candidates, tiePx = RING_TIE_PX) {
   if (!rings.length) return candidates;
   const nearest = Math.min(...rings.map((c) => c.px));
   return candidates.filter((c) => c.kind !== 'annotation' || c.px <= nearest + tiePx);
+}
+
+/**
+ * How much farther than the nearest dot another may be and still be offered by a click in
+ * GraphApp, in screen pixels: dots this close lie on top of each other on screen, as down a
+ * process seen end-on.
+ */
+export const DOT_TIE_PX = 0.5;
+
+/**
+ * What a click offers in GraphApp (2026-10-22): the dot nearest the pointer -- an annotation's
+ * (its dot, its ring or a flag on it) or a synapse's -- and any other within `tiePx` of it; a
+ * skeleton branch only when no dot is near.  MATLAB's GraphApp named the one node a click
+ * landed on (its Data Cursor snapped to the nearest vertex), and every dot lies on its
+ * skeleton.  The triple click's rule (`choosable`: the rings within RING_TIE_PX of the
+ * nearest, and the branch beside them) offered four annotations and a chooser for a click
+ * half a pixel off a dot of c21768 at the whole cell's zoom, where neighbors lie 2 px apart.
+ */
+export function dotChoices(candidates, tiePx = DOT_TIE_PX) {
+  const dots = candidates.filter((c) => c.kind === 'annotation' || c.kind === 'synapse');
+  if (!dots.length) return candidates;
+  const nearest = Math.min(...dots.map((c) => c.px));
+  return dots.filter((c) => c.px <= nearest + tiePx);
 }
 
 /** The three slots, in the order the readout lists them: top to bottom, as drawn. */

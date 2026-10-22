@@ -127,7 +127,7 @@
         <button class="tab active" data-view="render" role="tab" aria-selected="true"
                 data-help="The cells as you set them up: surfaces, colors, every Display and Render setting. Switching to GraphApp and back keeps the camera, the zoom and which cells are shown.">3D render</button><button
                 class="tab" data-view="render" data-look="graph" role="tab" aria-selected="false"
-                data-help="The same cells, camera and zoom as MATLAB SBFSEM-tools' GraphApp drew a neuron, on black, with no surface: each cell's skeleton in a near-white, a dot at every annotation and its rings in a pastel of the same hue, and, from the controls under the view, the unfinished, terminal and off-edge annotations, the synapses, Color segments and Find ID. A click names an annotation or a synapse; a right click isolates a cell. 3D render comes back to the view as you left it.">GraphApp</button>
+                data-help="The same cells, camera and zoom as MATLAB SBFSEM-tools' GraphApp drew a neuron, on black, with no surface: each cell's skeleton in a near-white, a dot at every annotation and its rings in a pastel of the same hue, and, from the controls under the view, the unfinished, terminal and off-edge annotations, the synapses, Color segments and Find ID. A click selects an annotation or a synapse and names it, the annotation's ring and dot drawn yellow (one click, where the 3D render takes three); a right click isolates a cell. 3D render comes back to the view as you left it.">GraphApp</button>
       </span>
       <button class="tab" data-view="compare" role="tab" aria-selected="false">Render compare</button>
       <button class="tab" data-view="network" role="tab" aria-selected="false">Network</button>
@@ -234,7 +234,8 @@
                   aria-label="Mouse and keyboard controls"
                   title="Mouse and keyboard controls">?</button>
           <div id="nav-hint" class="hint">
-            drag orbit &middot; right-drag pan &middot; triple-click select &middot;
+            drag orbit &middot; right-drag pan &middot;
+            <span class="sel-render">triple-click select</span><span class="sel-graph">click select</span> &middot;
             shift/ctrl/alt-drag roll/pitch/yaw &middot;
             <kbd>q</kbd>/<kbd>e</kbd> roll &middot; <kbd>z</kbd>/<kbd>Z</kbd> zoom &middot;
             <kbd>m</kbd> reset &middot; <kbd>&#8984;Z</kbd> undo &middot; <kbd>c</kbd> copy Viking

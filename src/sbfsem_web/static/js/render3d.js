@@ -123,6 +123,8 @@ const MAX_DRAW_INDICES = 12_000_000;
 const SELECT_PX = 6;
 /** The most rings of a z-slice drawn as just chosen, settling; a bigger one is drawn settled. */
 const SLICE_PULSE_MAX = 60;
+/** The least a highlighted annotation's GraphApp dot is across, CSS px, before its glow. */
+const DOT_HIGHLIGHT_MIN_PX = 6;
 /** The slots a selection has: the yellow, the red above it, the blue below. */
 const SLOTS = ['primary', 'above', 'below'];
 /** Slack, in microns, so a point on the very edge of the crop box is not taken for outside it. */
@@ -381,9 +383,12 @@ export class Renderer3D {
 
     // A left TRIPLE click selects what is under the pointer -- an annotation,
     // a skeleton branch, a wireframe, a synapse type; never the surface.  The
-    // app decides what to do with several candidates (it asks).
+    // app decides what to do with several candidates (it asks).  In GraphApp a
+    // single click does (`gcX`, `gcY`: where its last click was).
     let tcX = 0;
     let tcY = 0;
+    let gcX = NaN;
+    let gcY = NaN;
     this.webgl.domElement.addEventListener('pointerdown', (e) => {
       if (e.button === 0) { tcX = e.clientX; tcY = e.clientY; }
     }, { signal });
@@ -398,6 +403,19 @@ export class Renderer3D {
       }
       if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
       if (Math.hypot(e.clientX - tcX, e.clientY - tcY) > 5) return;
+      // In GraphApp ONE click selects, as MATLAB's GraphApp named the node a click
+      // landed on (2026-10-22); the clicks after it in a double or triple click on the
+      // same spot do nothing more.  A click on nothing lets go, as below.
+      if (this.look === 'graph') {
+        const fresh = e.detail <= 1 || Math.hypot(e.clientX - gcX, e.clientY - gcY) > 5;
+        gcX = e.clientX;
+        gcY = e.clientY;
+        if (!fresh) return;
+        const candidates = this.candidatesAt(e.clientX, e.clientY);
+        if (!candidates.length) this.clearSelection();
+        else this.onSelectRequest?.({ candidates, clientX: e.clientX, clientY: e.clientY, look: 'graph' });
+        return;
+      }
       // A plain click on empty space lets go of the selection, as it does in
       // every other 3D program; a drag from there still only orbits.  A ring
       // is not empty space although no ray stops on it: that click is the
@@ -2849,8 +2867,11 @@ export class Renderer3D {
     this.look = graph ? 'graph' : 'render';
     this.renderLayer.visible = !graph;
     this.graphLayer.visible = graph;
-    // The context sheets and vasculature are the 3D render's.
+    // The context sheets and vasculature are the 3D render's, a highlighted annotation's dot GraphApp's.
     if (this.contextGroup) this.contextGroup.visible = !graph;
+    for (const object of this.highlightGroup.children) {
+      for (const child of object.children) if (child.userData.graphOnly) child.visible = graph;
+    }
     this._applyBackground();
     // A selection only one look draws (a synapse type's markers, a wireframe edge) goes.
     if (this.selection && ['synapse', 'wireframe'].includes(this.selection.kind)) this.clearSelection();
@@ -2998,6 +3019,7 @@ export class Renderer3D {
     this.graphLayer.add(root);
     this.graphs.set(key, root);
     this._styleGraph(root);
+    this._dotHighlights(key);
     this._reachDirty = true;
     this._applyZHide(key);
     this._refreshBoundsIfBare();
@@ -3014,6 +3036,13 @@ export class Renderer3D {
   setGraphSettings(settings, { segmentColor = null, positions = null } = {}) {
     this.graphSettings = { settings, segmentColor, positions };
     for (const root of this.graphs.values()) this._styleGraph(root);
+    // A highlighted annotation's dot is sized by the dots it stands out from.
+    for (const object of this.highlightGroup.children) {
+      const dot = object.children.find((c) => c.userData.graphOnly);
+      if (!dot) continue;
+      dot.userData.base = this._dotBase(object.userData.key, dot.userData.corePx);
+      if (!object.userData.settle) this._sizeHighlightDot(dot, highlightLook(1, 'annotation'));
+    }
   }
 
   _styleGraph(root) {
@@ -3072,6 +3101,73 @@ export class Renderer3D {
     for (const [key, root] of this.graphs) {
       const part = root.children.find((c) => c.userData.part === name);
       if (part) yield [key, part];
+    }
+  }
+
+  /** The annotation GraphApp draws a dot at for Location `locationId` of `key`, or null. */
+  _graphNode(key, locationId) {
+    const dots = this.graphs.get(key)?.children.find((c) => c.userData.part === 'nodes');
+    if (!dots || locationId == null) return null;
+    if (!dots.userData.byId) dots.userData.byId = new Map(dots.userData.nodes.map((n) => [n.id, n]));
+    return dots.userData.byId.get(locationId) ?? null;
+  }
+
+  /** A highlight dot's size at a look's core 1, CSS px: as wide as the ring's tube, twice a dot. */
+  _dotBase(key, corePx) {
+    const dots = this.graphs.get(key)?.children.find((c) => c.userData.part === 'nodes');
+    return Math.max(2 * (corePx || 0), 2 * (dots?.userData.px || 0), DOT_HIGHLIGHT_MIN_PX);
+  }
+
+  /**
+   * GraphApp's dot of a highlighted annotation, in the highlight's color `tint`: a
+   * solid dot in a wider additive glow, as the ring is a tube in one, at
+   * `look` (highlight.js `highlightLook`), which the settling then carries on.
+   * `corePx`: the ring's tube radius on screen.  Only GraphApp shows it (`setLook`);
+   * null when the cell has no GraphApp dot for the annotation.
+   */
+  _highlightDot(item, tint, corePx, look) {
+    const node = this._graphNode(item.key, item.locationId);
+    if (!node) return null;
+    const group = new THREE.Group();
+    group.userData.graphOnly = true;
+    group.userData.corePx = corePx;
+    group.userData.base = this._dotBase(item.key, corePx);
+    group.visible = this.look === 'graph';
+    for (const [role, order, blending] of [['core', 22, THREE.NormalBlending], ['glow', 20, THREE.AdditiveBlending]]) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(node.xyz_um, 3));
+      const points = new THREE.Points(geometry, new THREE.PointsMaterial({
+        color: tint, map: this._dotTexture(), size: 1, sizeAttenuation: false,
+        transparent: true, depthTest: false, depthWrite: false, blending,
+      }));
+      points.userData.role = role;
+      points.renderOrder = order;
+      points.raycast = () => {};
+      group.add(points);
+    }
+    this._sizeHighlightDot(group, look);
+    return group;
+  }
+
+  /** A highlight dot at `look`: its core and glow as wide as the ring's, the glow as faint. */
+  _sizeHighlightDot(group, look) {
+    const dpr = this.webgl.getPixelRatio();
+    for (const points of group.children) {
+      const glow = points.userData.role === 'glow';
+      points.material.size = group.userData.base * (glow ? look.glow : look.core) * dpr;
+      if (glow) points.material.opacity = look.alpha;
+    }
+  }
+
+  /** The highlights of `key` drawn before its GraphApp dots were take theirs, settled. */
+  _dotHighlights(key) {
+    for (const object of this.highlightGroup.children) {
+      const item = object.userData.item;
+      if (object.userData.key !== key || item?.kind !== 'annotation' || !object.userData.tint) continue;
+      if (object.children.some((c) => c.userData.graphOnly)) continue;
+      const dot = this._highlightDot(item, object.userData.tint, object.userData.corePx,
+        highlightLook(1, 'annotation'));
+      if (dot) object.add(dot);
     }
   }
 
@@ -3728,9 +3824,15 @@ export class Renderer3D {
           if (settling) parts.push({ role, mesh: tube, ...tubeAnchors(geometry, curve, steps, 8, closed) });
         }
       }
+      // GraphApp's dot of the annotation, in the same color and chosen and settling
+      // with its ring (2026-10-22); shown while GraphApp is.
+      const dot = item.kind === 'annotation' ? this._highlightDot(item, tint, core / umpp, start) : null;
+      if (dot) object.add(dot);
       if (parts.length) {
-        object.userData.settle = { t0: performance.now(), kind: item.kind, from: start, parts };
+        object.userData.settle = { t0: performance.now(), kind: item.kind, from: start, parts, dot };
       }
+      object.userData.tint = tint;
+      object.userData.corePx = core / umpp;
       object.userData.umpp = umpp;
     }
     this._place(object, source);
@@ -3843,6 +3945,7 @@ export class Renderer3D {
         position.needsUpdate = true;
         if (part.role === 'glow') part.mesh.material.opacity = look.alpha;
       }
+      if (settle.dot) this._sizeHighlightDot(settle.dot, look);
       if (progress >= 1) delete object.userData.settle;
     }
   }

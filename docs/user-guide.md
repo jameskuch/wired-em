@@ -2723,9 +2723,17 @@ this browser:
 | **Color segments** | each unbranched segment, and its dots, in a color of its own from **Colormap**: a branch reads as one color, and an unexpected change of color shows a break in the links |
 | **Find ID** | a Location ID, or a synapse's structure ID, of a cell loaded in this volume; Enter flies there and rings it in yellow |
 
-A click names what is under the pointer: an annotation (its Location ID, section
-and Viking position, as in the 3D render) or a synapse (its ID, type and the cell
-it links to, read from Viking once per cell). The right-click menu is short:
+**One click selects** in GraphApp, as MATLAB's GraphApp named the node a click
+landed on (since 2.29.0; the 3D render keeps its triple click). It selects what is
+under the pointer and names it: an annotation (its Location ID, section and Viking
+position, as in the 3D render) or a synapse (its ID, type and the cell it links
+to, read from Viking once per cell). It takes the dot nearest the pointer, as
+MATLAB's Data Cursor snapped to the nearest node, and asks which only when dots lie
+on top of each other on screen (half a pixel apart, as down a process seen end-on);
+a click on the line between dots selects the branch, and a click on nothing lets go. The selected annotation's ring **and its
+dot** are drawn yellow, at full strength and then settling, and so are the red and
+blue markers' (a click on another annotation of the volume, above or below the
+yellow one, as a triple click does in the 3D render) and a z-slice's. The right-click menu is short:
 **Isolate cN** hides every other cell, and unticking it shows them again as they
 were; **Open in Viking** for an annotation; **Deselect**. The 3D render's own right
 click has **Open in GraphApp**, which goes to GraphApp with that cell alone; any cell

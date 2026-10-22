@@ -39,8 +39,9 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
 * ``hold`` -- Hold in the Display panel keeps a load from reframing the scene.
 * ``graphapp`` -- GraphApp, the 3D view's second look: drawn in the background, switched both ways in
   a frame with the camera and the shown cells kept, black, the 3D render's controls out of the way,
-  the cell list's GraphApp colors and sections, the controls, a synapse's readout, Find ID, Isolate
-  from GraphApp's right click, and Open in GraphApp from the 3D render's, each giving visibility back.
+  the cell list's GraphApp colors and sections, the controls, one click selecting an annotation at its
+  dot with the dot lit in the ring's color, a synapse's readout, Find ID, Isolate from GraphApp's right
+  click, and Open in GraphApp from the 3D render's, each giving visibility back.
 * ``blind`` -- a surface landing in a view that shows no cell frames it (a load into a list that
   already held a row did not, 2026-10-21); a view that shows a cell, or one Held, stays; ``m``
   resets the view with the focus on the Load button, not only after a click in the canvas.
@@ -837,6 +838,83 @@ def graphapp(c: Chrome, r: Report, ctx):
         const seen = new Set(); for (let i = 0; i < a.length; i += 3) seen.add(a.slice(i, i + 3).join());
         return seen.size; }})()""")
     r.check('Color segments gives the segments colors of their own', colors > 3, colors)
+
+    # One click selects in GraphApp, as MATLAB's Data Cursor named the node clicked (2026-10-22): the
+    # nearest dot, not the branch it lies on, and the annotation's dot is drawn in its ring's color.
+    def clicks(x: float, y: float, n: int) -> None:
+        c.move(x, y)
+        for count in range(1, n + 1):
+            c.send('Input.dispatchMouseEvent', type='mousePressed', x=x, y=y, button='left', buttons=1,
+                   clickCount=count)
+            c.send('Input.dispatchMouseEvent', type='mouseReleased', x=x, y=y, button='left', buttons=0,
+                   clickCount=count)
+
+    def lit() -> dict:
+        return js(c, f"""(() => {{ const R = {R}; const o = R.highlightGroup.children
+            .find((h) => h.userData.slot === 'primary' && !h.userData.extra);
+          const d = o?.children.find((k) => k.userData.graphOnly);
+          return {{ id: R.selection?.locationId ?? null,
+            menu: [...document.querySelectorAll('#ctx-menu .ctx-title, #ctx-menu .ctx-item')].map((b) => b.textContent),
+            status: document.querySelector('.status').textContent,
+            dot: d ? {{ visible: d.visible, color: d.children[0].material.color.getHex(),
+              ring: o.children.find((k) => k.isMesh).material.color.getHex() }} : null }}; }})()""")
+    js(c, f'{R}.clearSelection()')
+    spot = js(c, f"""(() => {{ const R = {R}; R.resetView(); R.webgl.render(R.scene, R.camera);
+        R.group.updateMatrixWorld(true);
+        const dots = [...R.graphs.get({json.dumps(second)}).children].find((p) => p.userData.part === 'nodes');
+        const canvas = R.webgl.domElement;
+        const rect = canvas.getBoundingClientRect();
+        for (const n of dots.userData.nodes) {{
+          const v = R.camera.position.clone().set(...n.xyz_um).applyMatrix4(dots.matrixWorld).project(R.camera);
+          const x = rect.left + (v.x + 1) / 2 * rect.width;
+          const y = rect.top + (1 - v.y) / 2 * rect.height;
+          if (document.elementFromPoint(x, y) !== canvas) continue;
+          const under = R.candidatesAt(x, y);
+          const rings = under.filter((k) => k.kind === 'annotation');
+          if (rings[0]?.locationId === n.id && rings.filter((k) => k.px <= rings[0].px + 1.5).length === 1
+              && under.some((k) => k.kind === 'skeleton')) {{
+            return {{ x, y, id: n.id, under: under.map((k) => `${{k.kind}} ${{k.key}} ${{k.locationId ?? k.segment ?? ''}} ${{k.px.toFixed(2)}}`) }};
+          }}
+        }}
+        return null; }})()""")
+    if spot:
+        c.click(spot['x'], spot['y'])
+        c.settle(1)
+        got = lit()
+        r.check('one click on a dot selects its annotation, not asking about the branch it lies on',
+                got['id'] == spot['id'] and not got['menu'], [got, spot['under']])
+        r.check('the selected annotation\'s dot is drawn in its ring\'s color',
+                bool(got['dot']) and got['dot']['visible'] and got['dot']['color'] == got['dot']['ring'], got)
+        js(c, "document.querySelector('.tab[data-view=\"render\"]:not([data-look])').click()")
+        hidden = lit()
+        js(c, "document.querySelector('.tab[data-look=\"graph\"]').click()")
+        r.check('the dot is GraphApp\'s: the 3D render hides it and GraphApp shows it again',
+                bool(hidden['dot']) and not hidden['dot']['visible'] and lit()['dot']['visible'], hidden)
+        # Found with the selection's overlays up: the marker table covers the top of the view.
+        empty = js(c, f"""(() => {{ const R = {R}; const canvas = R.webgl.domElement;
+            const rect = canvas.getBoundingClientRect();
+            for (let y = rect.bottom - 20; y > rect.top + 20; y -= 15) {{
+              for (let x = rect.left + 20; x < rect.right - 20; x += 15) {{
+                if (document.elementFromPoint(x, y) === canvas && !R.candidatesAt(x, y, {{ context: true }}).length) {{
+                  return {{ x, y }};
+                }}
+              }}
+            }}
+            return null; }})()""")
+        if empty:
+            c.click(empty['x'], empty['y'])
+            c.settle(1)
+            r.check('a click on nothing lets go of it', lit()['id'] is None)
+        else:
+            r.skip('a click on nothing lets go of it', 'no empty spot on the canvas')
+        clicks(spot['x'], spot['y'], 3)
+        c.settle(1)
+        got = lit()
+        r.check('a triple click there selects it once, as one click does',
+                got['id'] == spot['id'] and not got['menu'] and got['status'].startswith('Selected:'), got)
+        js(c, f'{R}.clearSelection()')
+    else:
+        r.skip('one click on a dot selects its annotation', 'no lone annotation dot on screen')
 
     # A synapse's dot names the synapse, its type and the cell it links to.
     js(c, "document.getElementById('graph-synapses').click()")
