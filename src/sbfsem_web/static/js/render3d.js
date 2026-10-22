@@ -940,7 +940,7 @@ export class Renderer3D {
     this.discs.set(key, object);
     this._reachDirty = true;
     this._applyZHide(key);
-    this._refreshBoundsIfBare();
+    this._refreshBounds(this.discs, key);
   }
 
   /**
@@ -1279,7 +1279,7 @@ export class Renderer3D {
     this.annoWires.set(key, object);
     this._reachDirty = true;
     this._applyZHide(key);
-    this._refreshBoundsIfBare();
+    this._refreshBounds(this.annoWires, key);
   }
 
   /** Annotation wireframe color, opacity and depth behavior, without a rebuild. */
@@ -1772,7 +1772,7 @@ export class Renderer3D {
     this.points.set(key, object);
     this._reachDirty = true;
     this._applyZHide(key);
-    this._refreshBoundsIfBare();
+    this._refreshBounds(this.points, key);
   }
 
   removePoints(key) { this._dispose(this.points, key); }
@@ -1815,7 +1815,7 @@ export class Renderer3D {
     this.lines.set(key, object);
     this._reachDirty = true;
     this._applyZHide(key);
-    this._refreshBoundsIfBare();
+    this._refreshBounds(this.lines, key);
     return object;
   }
 
@@ -1930,28 +1930,20 @@ export class Renderer3D {
   }
 
   /**
-   * Point the camera at a cell's shown layers (those `seesAnything` judges) and
-   * whatever surfaces are already in the scene, as `framePoints` does for a cloud.
-   * A cell whose build made no surface is drawn as its rings, nodes or skeleton,
-   * and next to another cell's surface its rings are not in the scene's bounds: Reset
-   * view framed the other cell and left this one out of sight.  False, moving
-   * nothing, when the cell shows nothing.
+   * Whether a cell shows anything: a shown layer of it (of those `seesAnything`
+   * judges) with something in it.  A cell whose build made no surface may be
+   * drawn as its rings, nodes or skeleton, which the scene's bounds then hold
+   * (`_recomputeBounds`), or as nothing at all.
    */
-  frameCell(key) {
+  showsCell(key) {
     const box = new THREE.Box3();
     for (const map of [this.meshes, this.skeletons, this.discs, this.annoWires, this.lines, this.points,
       this.graphs]) {
       const object = map.get(key);
       if (!object || !object.visible || object.parent?.visible === false) continue;
-      object.updateMatrixWorld(true);
-      box.union(new THREE.Box3().setFromObject(object));
+      if (!box.setFromObject(object).isEmpty()) return true;
     }
-    if (box.isEmpty()) return false;
-    const kept = this.bounds.clone();
-    this.bounds.union(box);
-    this.resetView();
-    this.bounds.copy(kept);
-    return true;
+    return false;
   }
 
   /** Skeleton color and opacity, independent of the cell's mesh. */
@@ -2063,17 +2055,24 @@ export class Renderer3D {
     object.parent?.remove(object);
     map.delete(key);
     this._reachDirty = true;
-    this._refreshBoundsIfBare();
+    this._refreshBounds(map, key);
   }
 
   /**
-   * Re-measure the scene when no surface or skeleton is in it: then its bounds
-   * are those of the rings, lines and points (`_recomputeBounds`), and they
-   * change as those come and go.  With a surface present nothing here runs,
-   * so a cell's rings changing never moves the bounds the surface set.
+   * Re-measure the scene when a layer that counts in its bounds came or went
+   * (`_recomputeBounds`): a surface or skeleton; any layer while no surface or
+   * skeleton is in the scene; and a cell's rings, annotation wireframe or
+   * GraphApp drawing while it shows no surface or skeleton of its own.  A
+   * cell's rings changing beside its own surface never move the bounds the
+   * surface set.
    */
-  _refreshBoundsIfBare() {
-    if (!this.meshes.size && !this.skeletons.size) this._recomputeBounds();
+  _refreshBounds(map, key) {
+    const own = (layer) => layer.get(key)?.visible;
+    if (map === this.meshes || map === this.skeletons || (!this.meshes.size && !this.skeletons.size)
+        || ([this.discs, this.annoWires, this.graphs].includes(map)
+          && !own(this.meshes) && !own(this.skeletons))) {
+      this._recomputeBounds();
+    }
   }
 
   // -- volume offsets -------------------------------------------------------
@@ -2753,26 +2752,37 @@ export class Renderer3D {
     // Only what is on screen: hiding every neuron but one should let "Reset
     // view" frame that one.
     this.bounds.makeEmpty();
+    const drawn = new Set();
     for (const map of [this.meshes, this.skeletons]) {
-      for (const object of map.values()) {
-        if (object.visible) this.bounds.expandByObject(object);
+      for (const [key, object] of map) {
+        if (!object.visible) continue;
+        this.bounds.expandByObject(object);
+        drawn.add(key);
       }
     }
-    if (this.bounds.isEmpty()) {
-      for (const map of [this.meshes, this.skeletons]) {
-        for (const object of map.values()) this.bounds.expandByObject(object);
-      }
-    }
-    // No surface or skeleton at all: a scene of annotation rings, lines or
-    // points alone (a Render compare pane showing only its annotations, a
-    // load whose mesh has not arrived) frames on those, shown ones first.
+    // A cell that shows no surface or skeleton of its own (its build made no
+    // surface) counts by its shown rings, annotation wireframe or GraphApp
+    // drawing.  Left out, Reset view framed the cells beside it that had a
+    // surface, shown or hidden, and not this one: c10912 built empty beside c943
+    // and c21768 stayed out of view (2026-10-22).  A scene with no surface or
+    // skeleton at all (a Render compare pane showing only its annotations, a
+    // load whose mesh has not arrived) counts its lines and points too.
     // Without this, Reset view and the viewpoint buttons did nothing for it.
-    for (const shownOnly of [true, false]) {
+    const bare = !this.meshes.size && !this.skeletons.size;
+    const layers = [this.discs, this.annoWires, this.graphs];
+    if (bare) layers.push(this.lines, this.points);
+    for (const map of layers) {
+      for (const [key, object] of map) {
+        if (object.visible && !drawn.has(key)) this.bounds.expandByObject(object);
+      }
+    }
+    // Nothing shown: the hidden surfaces and skeletons, and failing those the
+    // hidden rings, lines and points.
+    for (const maps of [[this.meshes, this.skeletons],
+      [this.discs, this.annoWires, this.lines, this.points, this.graphs]]) {
       if (!this.bounds.isEmpty()) break;
-      for (const map of [this.discs, this.annoWires, this.lines, this.points, this.graphs]) {
-        for (const object of map.values()) {
-          if (!shownOnly || object.visible) this.bounds.expandByObject(object);
-        }
+      for (const map of maps) {
+        for (const object of map.values()) this.bounds.expandByObject(object);
       }
     }
     if (this.bounds.isEmpty()) return;
@@ -3165,7 +3175,7 @@ export class Renderer3D {
     this._dotHighlights(key);
     this._reachDirty = true;
     this._applyZHide(key);
-    this._refreshBoundsIfBare();
+    this._refreshBounds(this.graphs, key);
   }
 
   removeGraphCell(key) { this._dispose(this.graphs, key); }

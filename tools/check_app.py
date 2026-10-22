@@ -49,7 +49,8 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   already held a row did not, 2026-10-21); a view that shows a cell, or one Held, stays; ``m``
   resets the view with the focus on the Load button, not only after a click in the canvas; a build
   answered empty (every fallback too) draws the cell as its rings and frames them in a view that showed
-  nothing, beside two cells with surfaces, unless Held.
+  nothing, beside two cells with surfaces, unless Held; Reset view, ``m`` and a viewpoint button on a
+  view never framed frame those rings with the two surfaces, and with the surfaces hidden, the rings alone.
 * ``orbit`` -- a plain drag turns the view while cells come in: during a Restore of a session saved in
   Orthographic view (a fresh page's camera sat on its own target at the origin until the last cell was in,
   so the cells zoomed and panned but would not turn, 2026-10-20) and during a first load; the end of
@@ -1172,15 +1173,16 @@ def blind(c: Chrome, r: Report, ctx):
     def rings(key: str) -> str:
         return f'window.sbfsem.renderer.discs.has({json.dumps(key)})'
 
-    def ring_view(key: str) -> str:
-        return """(() => { const R = window.sbfsem.renderer; const o = R.discs.get(%s); if (!o) return null;
+    def ring_view(key: str, layer: str = 'discs') -> str:
+        """Whether every corner of the box of a cell's rings (or another `layer`) is in view; null without one."""
+        return """(() => { const R = window.sbfsem.renderer; const o = R[%s].get(%s); if (!o) return null;
             R.camera.updateMatrixWorld(); o.updateMatrixWorld(true);
             const b = new (R.bounds.constructor)().setFromObject(o); if (b.isEmpty()) return null;
             const corners = [];
             for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
               const p = R.camera.position.clone().set(x, y, z).project(R.camera); corners.push([p.x, p.y, p.z]); }
             return corners.every(([x, y, z]) => Math.abs(x) <= 1 && Math.abs(y) <= 1 && Math.abs(z) < 1); })()""" \
-            % json.dumps(key)
+            % (json.dumps(layer), json.dumps(key))
     js(c, """(() => { for (const r of %s.neurons.values()) r.display = { ...r.display, showDiscs: true };
         const api = window.sbfsem.api; if (!api.__beforeEmpty) api.__beforeEmpty = api.mesh;
         window.__empty = new Set([%d]);
@@ -1207,6 +1209,53 @@ def blind(c: Chrome, r: Report, ctx):
             js(c, 'window.sbfsem.api.__calls.filter((x) => x.id === %d).length' % ctx.third))
     r.check('and frames a view that showed nothing', js(c, sees) is True)
     r.check('on the cell: its rings are in view', js(c, ring_view(third)) is True, js(c, ring_view(third)))
+
+    # Reset view, m and a viewpoint button frame it too (2.30.3): the scene's bounds left a cell drawn
+    # only as its rings out whenever another cell had a surface, shown or hidden, so only the load
+    # framed it (2.30.2's frameCell) and Reset view framed the other two.
+    surfaces = [js(c, f'[...{STATE}.neurons.keys()][0]'), second]
+
+    def framed_all() -> list:
+        return [js(c, ring_view(third))] + [js(c, ring_view(key, 'meshes')) for key in surfaces]
+
+    js(c, away)
+    c.settle(1)
+    js(c, "document.getElementById('reset-view').click()")
+    c.settle(1)
+    r.check('Reset view frames the cell drawn only as its rings, and the two surfaces beside it',
+            all(x is True for x in framed_all()), framed_all())
+    js(c, away)
+    js(c, "document.querySelector('#load-form button[type=submit]').focus()")
+    c.key('m')
+    c.settle(1)
+    r.check('so does m', all(x is True for x in framed_all()), framed_all())
+    # A viewpoint button fits the scene's bounds when the view was never framed (a fresh page's camera).
+    js(c, away)
+    js(c, 'window.sbfsem.renderer.framed = false')
+    js(c, """document.querySelector('[data-viewpoint="xy1"]').click()""")
+    c.settle(1)
+    r.check('so does a viewpoint button on a view never framed', all(x is True for x in framed_all()),
+            framed_all())
+    # The two surfaces hidden: the cell left is framed on its rings alone.  The scene fell back on the
+    # hidden surfaces' bounds, since no shown surface or skeleton was left.
+    for key in surfaces:
+        js(c, f"{row(key, '.vis')}.click()")
+    c.settle(1)
+    js(c, away)
+    js(c, "document.getElementById('reset-view').click()")
+    c.settle(1)
+    alone = js(c, """(() => { const R = window.sbfsem.renderer; const o = R.discs.get(%s); o.updateMatrixWorld(true);
+        const b = new (R.bounds.constructor)().setFromObject(o);
+        const ratio = R.bounds.getSize(b.min.clone()).length() / b.getSize(b.min.clone()).length();
+        return { contains: R.bounds.containsBox(b), ratio, hidden: %s.map((k) => R.meshes.get(k).visible) }; })()"""
+               % (json.dumps(third), json.dumps(surfaces)))
+    r.check('with the two surfaces hidden, Reset view frames the rings alone',
+            js(c, ring_view(third)) is True and alone['contains'] and alone['ratio'] < 1.05
+            and alone['hidden'] == [False, False], alone)
+    for key in surfaces:
+        js(c, f"{row(key, '.vis')}.click()")
+    c.settle(1)
+
     js(c, """(() => { document.getElementById('toggle-display').click();
         const box = document.getElementById('lim-hold'); box.checked = true;
         box.dispatchEvent(new Event('change', { bubbles: true })); })()""")

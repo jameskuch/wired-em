@@ -1636,6 +1636,13 @@ dots) is never moved, nor one Held in Display. Since 2.30.2 a build that makes n
 what it does draw the same way: a cell whose rings, nodes or skeleton are shown, built empty into
 a view that shows no cell, is framed on them.
 
+Since 2.31.1 **Reset view** (and `m`, and a viewpoint button on a view not yet framed) frames such
+a cell too. A cell that shows no surface or skeleton of its own counts by its shown rings,
+annotation wireframe or GraphApp drawing, beside other cells' surfaces or with them hidden. Before,
+the scene's extent left it out whenever any cell had a surface, so Reset view framed the others and
+left it out of sight. A cell with a surface is still framed on that surface alone: its rings never
+widen the view.
+
 **Stop**, at the right of the strip, ends the load at once: no further cells
 start, and every cell of the load that is not drawn yet — still fetching its
 annotations, or queued or building on the server — is dropped from the list

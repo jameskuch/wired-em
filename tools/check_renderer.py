@@ -431,9 +431,24 @@ def layers(c: Chrome, r: Report):
       x.removeLines('L'); out.afterLines = x.bounds.max.toArray().map((n) => +n.toFixed(1));
       x.setPoints('P', [0, 0, 0, 50, 50, 50], [1, 0, 0, 1, 0, 0]); out.points = x.bounds.max.toArray();
       x.removePoints('P'); x.removeDiscs('A'); out.gone = x.bounds.isEmpty();
-      x.setMesh('M', window.__sheet(10), { color: '#ffd400' }); const withMesh = x.bounds.max.toArray();
-      x.setDiscs('A2', [{ id: 1, z_section: 1, type_code: 1, radius_um: 500, xyz_um: [0, 0, 0] }]);
-      out.meshWins = JSON.stringify(withMesh) === JSON.stringify(x.bounds.max.toArray());
+      x.setMesh('M', window.__sheet(10), { color: '#ffd400' });
+      const box = () => [x.bounds.min.toArray(), x.bounds.max.toArray()].map((v) => v.map((n) => +n.toFixed(1)));
+      const withMesh = JSON.stringify(box());
+      x.setDiscs('M', [{ id: 1, z_section: 1, type_code: 1, radius_um: 500, xyz_um: [0, 0, 0] }]);
+      out.meshWins = JSON.stringify(box()) === withMesh;
+      // A cell with no surface of its own beside one: its rings count, and alone once the surface is hidden or gone.
+      x.setDiscs('A2', [{ id: 1, z_section: 1, type_code: 1, radius_um: 5, xyz_um: [1000, 1000, 0] }]);
+      const rings = new (x.bounds.constructor)().setFromObject(x.discs.get('A2'));
+      out.ringBox = [rings.min.toArray(), rings.max.toArray()].map((v) => v.map((n) => +n.toFixed(1)));
+      out.beside = box();
+      x.setStyle('M', { visible: false }); out.hidden = box();
+      x.setStyle('M', { visible: true }); x.removeDiscs('A2'); out.back = JSON.stringify(box()) === withMesh;
+      x.setDiscs('A2', [{ id: 1, z_section: 1, type_code: 1, radius_um: 5, xyz_um: [1000, 1000, 0] }]);
+      // Its surface removed, M is drawn by its own rings alone, and they count with A2's.
+      x.removeMesh('M'); out.meshGone = box();
+      const both = new (x.bounds.constructor)().setFromObject(x.discs.get('M'))
+        .union(new (x.bounds.constructor)().setFromObject(x.discs.get('A2')));
+      out.bothRings = [both.min.toArray(), both.max.toArray()].map((v) => v.map((n) => +n.toFixed(1)));
       x.dispose(); x.__div.remove(); return out;
     })()""")
     r.check('a scene of rings alone has bounds and Reset view frames it',
@@ -441,7 +456,12 @@ def layers(c: Chrome, r: Report):
     r.check('lines and points widen those bounds while there is no surface, and shrink them again',
             bare['lines'] == [100, 100, 100] and bare['afterLines'] == bare['rings']['max']
             and bare['points'] == [50, 50, 50] and bare['gone'], bare)
-    r.check('with a surface the rings do not move the bounds', bare['meshWins'], bare)
+    r.check('a cell\'s own rings do not move the bounds its surface set', bare['meshWins'], bare)
+    r.check('a cell with no surface of its own counts by its rings beside another cell\'s surface, '
+            'and leaves the bounds when they go (2.30.3)',
+            bare['beside'][0][:2] == [0.0, 0.0] and bare['beside'][1][:2] == bare['ringBox'][1][:2] and bare['back'], bare)
+    r.check('with the surface hidden, the bounds are those rings alone; with it removed, they are those and '
+            'the cell\'s own rings', bare['hidden'] == bare['ringBox'] and bare['meshGone'] == bare['bothRings'], bare)
 
     follow = js(c, """(() => {
       const x = window.__make(); x.setPaused(true);
