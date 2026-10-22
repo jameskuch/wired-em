@@ -145,6 +145,13 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   Compare builds each from its own copy, named on its chip and in its build's request; an error map is measured
   against its own copy; the report dialog says each rendering's registration, and "Across registrations" ticks their
   three pairs.
+* ``flatten`` -- Display → Flatten IPL 1:1 (2.33.0), on Inferior Monkey c943 with its rings, skeleton and the INL and
+  GCL sheets shown: ticked, the INL sheet lies flat at Z = 0 and the GCL at the volume's median IPL thickness along the
+  normals (27.66 µm, the note under the box says so), the surface and skeleton move in Z with their X and Y unchanged to
+  the bit, and the rings are not drawn; a click on the surface writes its depth from the INL and no Viking place;
+  Export → OBJ asks for ``ipl_flatten=true`` and its ``ipl_method`` and names the file ``-ipl-flat-<µm>um.obj``
+  (``api.download`` caught: nothing is fetched or saved); unticked, every Z comes back to the bit and the rings with
+  them; opening GraphApp turns it off; a reload starts it unticked, before and after Restore; in Cped the box is greyed.
 """
 
 # ruff: noqa: UP031
@@ -156,6 +163,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 import time
 import urllib.parse
@@ -3922,6 +3930,224 @@ def hover(c: Chrome, r: Report, ctx):
             r.check('moving off the view onto the readout leaves it as it was', js(c, READOUT) == before)
 
 
+# -- flatten ----------------------------------------------------------------------------------
+
+#: The Z of a layer's geometry in its volume's own frame (the buffers as the server sent them, before
+#: the volume's offset and Flip Z): least, greatest, how many and their sum, and the sums of X and Y;
+#: null with no geometry.
+ZSPAN = """((object) => { if (!object) return null; let lo = Infinity, hi = -Infinity, n = 0, sum = 0, x = 0, y = 0;
+  object.traverse((m) => { const p = m.geometry && m.geometry.getAttribute('position'); if (!p) return;
+    for (let i = 0; i < p.array.length; i += 3) { const z = p.array[i + 2];
+      if (z < lo) lo = z; if (z > hi) hi = z; sum += z; x += p.array[i]; y += p.array[i + 1]; n += 1; } });
+  return n ? { min: lo, max: hi, n, sum, x, y } : null; })"""
+
+#: A point of the canvas whose first hit is the cell's surface, and that hit's Z in the volume's frame.
+SURFACE_SPOT = """((key) => { const R = window.sbfsem.renderer; R.webgl.render(R.scene, R.camera);
+  R.group.updateMatrixWorld(true);
+  const solid = R._meshPart(key, 'surface'); if (!solid) return null;
+  const source = window.sbfsem.state.neurons.get(key).source;
+  const p = solid.geometry.getAttribute('position'); const canvas = R.webgl.domElement;
+  const rect = canvas.getBoundingClientRect(); const v = new (R.camera.position.constructor)();
+  const step = Math.max(1, Math.floor(p.count / 400));
+  for (let i = 0; i < p.count; i += step) {
+    v.fromBufferAttribute(p, i).applyMatrix4(solid.matrixWorld).project(R.camera);
+    const x = Math.round(rect.left + (v.x + 1) / 2 * rect.width);
+    const y = Math.round(rect.top + (1 - v.y) / 2 * rect.height);
+    if (x < rect.left + 4 || y < rect.top + 140 || x > rect.right - 140 || y > rect.bottom - 4) continue;
+    if (document.elementFromPoint(x, y) !== canvas) continue;
+    const hit = R._hitsAt(x, y)[0];
+    if (hit && hit.object === solid) return { x, y, z: R.toVolume(hit.point, source)[2] };
+  }
+  return null; })"""
+
+#: Every export the page asks for, caught before anything is fetched or saved.
+CATCH_EXPORTS = """(() => { const api = window.sbfsem.api; window.__exports = [];
+  if (!api.__download) api.__download = api.download;
+  api.download = async (path, filename) => { window.__exports.push({ path, filename });
+    return { bytes: 0, archive: null }; }; })()"""
+
+
+def flatten(c: Chrome, r: Report, ctx):
+    r.start('flatten: Display → Flatten IPL 1:1 draws a cell on IPL depth, and gives it back')
+    R = 'window.sbfsem.renderer'
+    box = "document.getElementById('ctx-flatten')"
+    status = "document.getElementById('status').textContent"
+    boot(c, ctx.url)
+    if not js(c, f'!!{box}'):
+        r.check('the Display panel has Flatten IPL 1:1', False, 'no #ctx-flatten on this page')
+        return
+    r.check('Flatten IPL starts unticked, and can be ticked in this volume',
+            js(c, f'{box}.checked') is False and js(c, f'{box}.disabled') is False)
+    key = load(c, ctx.cell)
+    k = json.dumps(key)
+    thickness = js(c, "fetch('/api/volumes/%s/ipl-thickness').then((x) => x.json()).then((t) => t.normal_um.median)"
+                   % ctx.source, wait=True)
+
+    def span(layer: str):
+        part = {'surface': f"{R}._meshPart({k}, 'surface')", 'skeleton': f'{R}.skeletons.get({k})',
+                'rings': f'{R}.discs.get({k})', 'INL': f"{R}.context?.get('boundary:INL')",
+                'GCL': f"{R}.context?.get('boundary:GCL')"}[layer]
+        return js(c, f'({ZSPAN})({part})')
+
+    def rings_drawn() -> bool:
+        return bool(js(c, f'{R}.discs.has({k}) && {R}.discs.get({k}).visible'))
+
+    def tick(ident: str, on: bool) -> None:
+        js(c, """(() => { const b = document.getElementById(%s); b.checked = %s;
+            b.dispatchEvent(new Event('change', { bubbles: true })); })()""" % (json.dumps(ident), json.dumps(on)))
+
+    def flat_to(on: bool, why: str = '') -> bool:
+        """Tick or untick Flatten IPL (or do `why`, a script that turns it off) and wait for every cell drawn."""
+        js(c, "document.getElementById('status').textContent = ''")
+        if why:
+            js(c, why)
+        else:
+            tick('ctx-flatten', on)
+        done = c.wait_for(f"{status}.includes(%s)" % json.dumps('IPL flattened' if on else 'IPL no longer flattened'),
+                          240)
+        c.settle(3)
+        return done
+
+    def exported() -> dict | None:
+        js(c, CATCH_EXPORTS)
+        if not menu_item(c, key, 'Wavefront OBJ (.obj)') or not c.wait_for('window.__exports.length > 0', 30):
+            return None
+        got = js(c, 'window.__exports[0]')
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(got['path']).query)
+        return {'filename': got['filename'], 'query': {q: v[0] for q, v in query.items()}}
+
+    # The cell's rings and skeleton from its panel, and the volume's INL and GCL sheets.
+    chev = c.center(f'.neuron-item[data-key="{key}"] .chev')
+    c.click(chev[0], chev[1])
+    c.wait_for("!!document.querySelector('.cell-panel')", 10)
+    for name in ('Annotations', 'Skeleton'):
+        js(c, """(() => { document.querySelectorAll('.cell-panel .section-head[aria-expanded="false"]')
+            .forEach((e) => e.click()); const s = [...document.querySelectorAll('.cell-panel .cell-section')]
+            .find((x) => x.querySelector('.sec-name').textContent === %s);
+            const b = s && s.querySelector('input[type=checkbox]'); if (b && !b.checked) b.click(); })()"""
+           % json.dumps(name))
+        time.sleep(0.6)
+    js(c, "document.getElementById('toggle-display').click()")
+    tick('ctx-inl', True)
+    tick('ctx-gcl', True)
+    ready = c.wait_for(f"{R}.discs.has({k}) && {R}.skeletons.has({k}) && !!{R}.context"
+                       f" && {R}.context.has('boundary:INL') && {R}.context.has('boundary:GCL')", 90)
+    c.settle(3)
+    if not ready:
+        r.check('the rings, skeleton and both boundary sheets are drawn before flattening', False,
+                js(c, f"[{R}.discs.has({k}), {R}.skeletons.has({k}), [...({R}.context?.keys() ?? [])]]"))
+        return
+    before = {layer: span(layer) for layer in ('surface', 'skeleton', 'INL', 'GCL')}
+    r.check('unflattened, the INL sheet follows the retina: its Z spans more than 1 µm',
+            before['INL']['max'] - before['INL']['min'] > 1, before['INL'])
+    plain = exported()
+    r.check('unflattened, Export → OBJ asks for the cell as Viking has it',
+            plain is not None and plain['filename'] == f'c{ctx.cell}.obj' and 'ipl_flatten' not in plain['query'],
+            plain)
+
+    # Flattened.
+    r.check('ticking Flatten IPL draws every cell again', flat_to(True), js(c, status))
+    note = js(c, "(() => { const n = document.getElementById('ctx-flatten-note');"
+                 " return n.hidden ? null : n.textContent; })()") or ''
+    r.check(f'the note under the box gives the volume\'s median thickness ({thickness:.2f} µm)',
+            f'GCL at Z = {thickness:.2f} µm' in note, note)
+    flat = {layer: span(layer) for layer in ('surface', 'skeleton', 'INL', 'GCL')}
+    inl, gcl = flat['INL'], flat['GCL']
+    r.check('the INL sheet lies flat at Z = 0', inl and max(abs(inl['min']), abs(inl['max'])) < 1e-3, inl)
+    r.check(f'the GCL sheet lies flat at Z = {thickness:.4f} µm, the median thickness',
+            gcl and max(abs(gcl['min'] - thickness), abs(gcl['max'] - thickness)) < 1e-3, gcl)
+
+    def moved(a, b) -> bool:
+        return bool(a and b) and max(abs(a['min'] - b['min']), abs(a['max'] - b['max'])) > 1
+
+    # c943 lies past the INL, at -50 to -39 µm: its depth, not the IPL's 0 to the thickness.
+    for layer in ('surface', 'skeleton'):
+        now, was = flat[layer], before[layer]
+        r.check(f'the {layer}\'s Z range moves by more than 1 µm, its X and Y to the bit where they were (1:1)',
+                moved(now, was) and now['n'] == was['n'] and (now['x'], now['y']) == (was['x'], was['y']),
+                (was, now))
+    r.check('the rings are not drawn while flattened', not rings_drawn())
+
+    # A click on the flattened surface: its depth, and no Viking place.
+    spot = js(c, f'({SURFACE_SPOT})({k})')
+    if spot:
+        c.click(spot['x'], spot['y'])
+        c.wait_for("document.getElementById('pick-text').textContent.includes('from the INL')", 10)
+        text = js(c, "document.getElementById('pick-text').textContent")
+        viking = js(c, "document.getElementById('pick-viking').textContent")
+        found = [float(x) for x in re.findall(r'depth (-?\d+\.\d+) µm from the INL', text)]
+        r.check('a click on the flattened surface writes its depth from the INL, in µm',
+                len(found) == 1 and abs(found[0] - spot['z']) < 0.006, (text, spot))
+        r.check('and no Viking place', viking == 'Viking — (the IPL is flattened)', viking)
+    else:
+        r.skip('a click on the flattened surface writes its depth', 'no point of the canvas has the surface first')
+    got = exported()
+    tag = None
+    if got:
+        m = re.fullmatch(r'c%d-ipl-flat-(\d+(?:\.\d+)?)um\.obj' % ctx.cell, got['filename'])
+        tag = float(m.group(1)) if m else None
+    r.check('Export → OBJ asks for the flattened surface, by its depth method',
+            got is not None and got['query'].get('ipl_flatten') == 'true' and bool(got['query'].get('ipl_method')),
+            got)
+    r.check(f'and names the file -ipl-flat-<µm>um.obj, the µm the thickness ({thickness:.4f})',
+            tag is not None and abs(tag - thickness) < 1e-4, got and got['filename'])
+
+    # Unflattened: everything back as it was, to the bit.
+    r.check('unticking it draws every cell again', flat_to(False), js(c, status))
+    back = {layer: span(layer) for layer in ('surface', 'skeleton', 'INL', 'GCL')}
+    for layer in ('surface', 'skeleton', 'INL', 'GCL'):
+        r.check(f'unticked, the {layer}\'s Z come back exactly', back[layer] == before[layer],
+                (before[layer], back[layer]))
+    r.check('and the rings are drawn again', rings_drawn())
+    r.check('and the note is hidden', js(c, "document.getElementById('ctx-flatten-note').hidden") is True)
+    again = exported()
+    r.check('and Export → OBJ asks for the cell as Viking has it again',
+            again is not None and again['filename'] == f'c{ctx.cell}.obj' and 'ipl_flatten' not in again['query'],
+            again)
+
+    # GraphApp draws the annotations where they are: opening it turns flattening off.
+    flat_to(True)
+    r.check('flattened again', js(c, f'{box}.checked') is True and moved(span('surface'), before['surface']))
+    turned = flat_to(False, "document.querySelector('.tab[data-look=\"graph\"]').click()")
+    r.check('opening GraphApp turns Flatten IPL off', turned and js(c, f'{box}.checked') is False,
+            js(c, status))
+    r.check('and the cell is drawn in its own Z again', span('surface') == before['surface'])
+    js(c, "document.querySelector('.tab[data-view=\"render\"]:not([data-look])').click()")
+    c.settle(3)
+    r.check('back in the 3D render, its rings are drawn', rings_drawn())
+
+    # A reload: the box is the page's, off at every load, Restore included.
+    flat_to(True)
+    time.sleep(1.0)
+    boot(c, ctx.url, keep=True)
+    c.wait_for("!document.getElementById('restore-banner').hidden", 30)
+    r.check('after a reload of a flattened page the box is unticked, before Restore', js(c, f'{box}.checked') is False)
+    js(c, "document.getElementById('restore-yes').click()")
+    c.wait_for(f'{R}.meshes.has({k})', 240)
+    c.settle(3)
+    r.check('and after it, the cell restored in its own Z',
+            js(c, f'{box}.checked') is False and span('surface') == before['surface'],
+            (js(c, f'{box}.checked'), before['surface'], span('surface')))
+
+    # A volume with no IPL boundary markers: the box is greyed, with why.
+    has_cped = js(c, "[...document.getElementById('volume').options].some((o) => o.value === 'NeitzCped')")
+    if has_cped:
+        js(c, """(() => { const v = document.getElementById('volume'); v.value = 'NeitzCped';
+            v.dispatchEvent(new Event('change', { bubbles: true })); })()""")
+        c.settle(3)
+        field = js(c, """(() => { const f = document.getElementById('ctx-flatten-field');
+            return { disabled: document.getElementById('ctx-flatten').disabled, inert: f.classList.contains('inert'),
+              title: f.title }; })()""")
+        r.check('in Cped the box is disabled, saying it has no IPL boundary markers',
+                field['disabled'] is True and field['inert'] and 'no IPL boundary markers' in field['title'], field)
+        js(c, """(() => { const v = document.getElementById('volume'); v.value = %s;
+            v.dispatchEvent(new Event('change', { bubbles: true })); })()""" % json.dumps(ctx.source))
+        c.settle(3)
+        r.check('and back in this volume it can be ticked again', js(c, f'{box}.disabled') is False)
+    else:
+        r.skip('in Cped the box is disabled', 'NeitzCped is not in this server\'s volume list')
+
+
 SECTIONS = {
     'notice': notice, 'waiting': waiting, 'draws': draws, 'undo': undo, 'idle': idle,
     'picker': picker, 'save': save, 'analysis': analysis, 'strata': strata, 'strataexport': strataexport, 'twod': twod, 'sheets': sheets, 'volume': volume,
@@ -3945,6 +4171,7 @@ SECTIONS = {
     'visualizations': visualizations,
     'locate': locate,
     'hover': hover,
+    'flatten': flatten,
     'narrow': narrow,
     'registrations': registrations,
     'viewcube': viewcube,
