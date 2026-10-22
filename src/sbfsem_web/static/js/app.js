@@ -592,13 +592,20 @@ async function boot() {
   renderer = new Renderer3D($('viewport'), {
     onPick: async (pick) => {
       pickedRing(pick);
-      await showPick(pick);
+      // The readout names what the pointer is nearest (hoverReadout); a click still
+      // names its cell in the list, and leaves the readout to the pointer.
+      if (hovered && !pick.copied) {
+        if (pick.key) selectNeuron(pick.key);
+      } else {
+        await showPick(pick);
+      }
       // A synapse's dot in GraphApp: which synapse, and what it links to.
       const record = pick.synapse ? state.neurons.get(pick.key) : null;
       if (record) await showSynapsePick(record, pick.synapse, pick.locationId);
     },
   });
   renderer.onContextMenu = contextMenuFor;
+  renderer.onHover = hoverReadout;
   renderer.onSelectRequest = onSelectRequest;
   renderer.onSelectionChange = onSelectionChange;
   renderer.onMarkerChange = onMarkerChange;
@@ -3618,6 +3625,71 @@ async function showPick({ point, key, copied }) {
   }
 }
 
+/**
+ * The readout follows the pointer (asked for 2026-10-22): over the 3D render or
+ * GraphApp it names the annotation nearest the pointer (`Renderer3D.nearestAnnotation`,
+ * hoverpick.js), its cell, Viking X Y Z and Location ID, and nothing is drawn to
+ * show which -- selecting is for that.  It is written again only when that
+ * annotation changes, so what a click wrote (a selection, a synapse) stays until
+ * the pointer reaches another.  The pointer leaving the view leaves the readout as
+ * it was, so its fields can be clicked to copy; `c` copies it with the pointer on
+ * the view.  A cell's annotations are fetched the first time the pointer is over
+ * the view with the cell shown, once for each load of it.
+ */
+let hovered = null;                 // { key, node } the readout names from the pointer
+const hoverAsked = new Map();       // key -> the load of the cell a fetch was sent for
+
+function hoverReadout(clientX, clientY) {
+  const cells = [];
+  for (const record of state.neurons.values()) {
+    if (!record.visible) continue;
+    const nodes = nodesCache.get(record.key);
+    if (nodes) {
+      cells.push({ key: record.key, nodes });
+      continue;
+    }
+    const gen = loadGeneration(record.key);
+    if (hoverAsked.get(record.key) === gen) continue;
+    hoverAsked.set(record.key, gen);
+    // A fetch that fails is not sent again for this load: the pointer moves every frame.
+    nodesFor(record).then(() => {
+      hoverAsked.delete(record.key);
+      renderer.hoverAgain?.();
+    }).catch(() => {});
+  }
+  const found = renderer.nearestAnnotation(clientX, clientY, cells);
+  if (!found || (hovered?.key === found.key && hovered.node === found.node)) return;
+  const record = state.neurons.get(found.key);
+  if (!record) return;
+  hovered = { key: found.key, node: found.node };
+  showNearestAnnotation(record, found.node);
+}
+
+/** Write an annotation into the readout as the one nearest the pointer. */
+function showNearestAnnotation(record, node) {
+  const [x, y, z] = node.xyz_um;
+  const point = { x, y, z };
+  const scale = pickScale(record);
+  // The Viking numbers are Viking's place: the annotation's correction and manual
+  // move taken back, as for a selected annotation.
+  const pick = {
+    point, key: record.key, scale, source: record.source,
+    viking: vikingFromUm(vikingPoint(node, point), scale), downsample: downsampleAt(point, scale, record.source),
+    locationId: node.id, locationSource: record.source,
+  };
+  lastPick = pick;
+  writeGroups($('pick-text'), `${volumeLongName(record.source)} c${record.id}`,
+    `µm ${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}`);
+  $('pick-viking').textContent = `Viking ${vikingText(pick)}`;
+  const field = $('pick-location');
+  writeLocationField(field, node.id, record.source);
+  field.title = `The annotation nearest the pointer, ${node.id} of c${record.id} in `
+    + `${volumeLongName(record.source)}, section ${node.z_section}. `
+    + 'Click: copy the ID for Viking → Annotation → Goto Location ID. '
+    + 'Right-click: type or paste a Location ID, Enter takes the view there.';
+  showPickShift(node, record);
+}
+
 /** Put a Viking field on the clipboard and say so. */
 function copyPickField(kind) {
   if (kind === 'viking') refreshDownsample();
@@ -3626,7 +3698,7 @@ function copyPickField(kind) {
     : (lastPick?.locationId ? String(lastPick.locationId) : '');
   if (!text) {
     statusEl.textContent = kind === 'viking'
-      ? 'Click a render first to pick a point' : 'No annotation at the picked point';
+      ? 'Point at a cell first' : 'No annotation near the pointer';
     statusEl.className = 'status error';
     return;
   }

@@ -205,12 +205,13 @@
           <ul class="load-cells"></ul>
         </div>
         <div class="viewport-overlay">
-          <!-- The readout of the last pick, and under it, whenever something is
+          <!-- The readout of the annotation nearest the pointer (app.js
+               hoverReadout) or of the last pick, and under it, whenever something is
                selected, a row for each marker: red above the yellow selection,
                blue below it (app.js renderMarkerTable). -->
           <div class="readouts">
           <div class="picked">
-            <span id="pick-text">Click a render to pick a point</span>
+            <span id="pick-text">Point at a cell: the nearest annotation shows here</span>
             <span class="pick-sep" aria-hidden="true">|</span>
             <button id="pick-viking" class="pick-field" type="button"
                     title="Click: copy “X Y Z downsample” for Viking → Commands → Goto Location. Right-click: type or paste a Viking location, Enter takes the view there.">Viking —</button>

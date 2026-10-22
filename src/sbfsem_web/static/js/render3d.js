@@ -23,6 +23,7 @@ import {
   BEHIND, nearestSegment, nearestTriangle, projectPositions,
 } from './pickgeom.js';
 import { ContextGesture, SURFACE_REACH_PX, listCandidates, pickOf } from './contextmenu.js';
+import { nearestAnnotation as nearestOnRay } from './hoverpick.js';
 import {
   FAT_FRAGMENT_SHADER, FAT_VERTEX_SHADER, TAIL_ALPHA, WIDTH_DEFAULT, fatArrows, fatColors, fatRange,
   fatSegments, headSize, ringWidth, arrowReach, shaftRange, shaftSegments,
@@ -121,6 +122,36 @@ const MAX_DRAW_INDICES = 12_000_000;
 
 /** How near the pointer, in screen pixels, an item must pass to be selectable. */
 const SELECT_PX = 6;
+/** A surface at least this opaque is what the pick readout's pointer is on, not what is behind it. */
+const HOVER_SOLID_OPACITY = 0.5;
+/**
+ * The pick readout's one-pixel pass (`_surfaceDepth`): each fragment of a surface
+ * writes how far along the pointer's ray it is, over `span`, packed into the pixel's
+ * four bytes as three packs a depth; the crop and a cell's Z range cut it as they
+ * cut the surface.
+ */
+const HOVER_DEPTH_VERTEX = `
+#include <common>
+#include <clipping_planes_pars_vertex>
+varying vec3 vWorld;
+void main() {
+  #include <begin_vertex>
+  #include <project_vertex>
+  #include <clipping_planes_vertex>
+  vWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;
+}`;
+const HOVER_DEPTH_FRAGMENT = `
+#include <common>
+#include <packing>
+#include <clipping_planes_pars_fragment>
+uniform vec3 origin;
+uniform vec3 direction;
+uniform float span;
+varying vec3 vWorld;
+void main() {
+  #include <clipping_planes_fragment>
+  gl_FragColor = packDepthToRGBA(clamp(dot(vWorld - origin, direction) / span, 0.0, 1.0));
+}`;
 /** The most rings of a z-slice drawn as just chosen, settling; a bigger one is drawn settled. */
 const SLICE_PULSE_MAX = 60;
 /** The least a highlighted annotation's GraphApp dot is across, CSS px, before its glow. */
@@ -430,6 +461,30 @@ export class Renderer3D {
       });
     }, { signal });
 
+    // The pick readout follows the pointer (2026-10-22): over the view with no
+    // button down, the app hears where the pointer is once a frame (`onHover`,
+    // which asks `nearestAnnotation`), and again when the view moves under a
+    // pointer that stays (a wheel turn, a key, the end of a drag).  A drag moves
+    // the view, not the pointer's place in it, so it waits for the drag's end.
+    this.onHover = null;
+    let hoverAt = null;
+    let hoverFrame = 0;
+    const hoverSoon = () => {
+      if (hoverFrame || !hoverAt || !this.onHover) return;
+      hoverFrame = requestAnimationFrame(() => {
+        hoverFrame = 0;
+        if (hoverAt && !this._disposed) this.onHover?.(hoverAt.x, hoverAt.y);
+      });
+    };
+    this.webgl.domElement.addEventListener('pointermove', (e) => {
+      hoverAt = { x: e.clientX, y: e.clientY };
+      if (e.buttons === 0) hoverSoon();
+    }, { signal });
+    this.webgl.domElement.addEventListener('pointerleave', () => { hoverAt = null; }, { signal });
+    this.controls.addEventListener('end', hoverSoon);
+    /** Look again where the pointer is (annotations came in under it); nothing once it has left. */
+    this.hoverAgain = hoverSoon;
+
     // A right CLICK (as opposed to the right-drag pan) opens the context menu.
     // What counts as a click, and when the menu opens, is ContextGesture's: on
     // macOS the browser asks for the menu as the button goes DOWN, which used to
@@ -649,6 +704,7 @@ export class Renderer3D {
     this.controls.dispose();
     // Whatever the app wired in stops hearing from a renderer that is gone.
     this.onPick = null;
+    this.onHover = null;
     this.onSelectRequest = null;
     this.onSelectionChange = null;
     this.onMarkerChange = null;
@@ -3603,6 +3659,142 @@ export class Renderer3D {
     }
     return (2 * Math.max(depth, 1e-6)
       * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2)) / h;
+  }
+
+  /**
+   * The annotation the pick readout names with the pointer at a screen point
+   * (hoverpick.js): in the 3D render the annotation nearest the surface drawn under
+   * the pointer (`_opaqueSurface`), or a ring in front of it, else the nearest on the screen;
+   * in GraphApp the nearest dot.  `cells` is the app's `{ key, nodes }` for each
+   * loaded cell, its annotations as /nodes lists them in the volume's frame; only
+   * cells the look draws count, and only annotations the crop and the cell's Z range
+   * leave.  `{ key, node, hit, px }`, or null.  Draws nothing on screen: what is
+   * chosen is shown by selecting it.
+   */
+  nearestAnnotation(clientX, clientY, cells) {
+    const h = this.container.clientHeight;
+    if (!h || !this.container.clientWidth) return null;
+    this._aim(clientX, clientY);
+    const cam = this.camera;
+    const { origin, direction } = this.raycaster.ray;
+    const perspective = !cam.isOrthographicCamera;
+    // Microns a pixel: a perspective camera's at a depth along the view, and a
+    // point t along the ray is t times the ray's cosine with the view that deep.
+    const scale = perspective
+      ? ((2 * Math.tan(THREE.MathUtils.degToRad(cam.fov) / 2)) / h)
+        * direction.dot(cam.getWorldDirection(new THREE.Vector3()))
+      : (cam.top - cam.bottom) / cam.zoom / h;
+    const from = origin.toArray();
+    const tip = origin.clone().add(direction).toArray();
+    const drawn = [];
+    const solids = new Map();
+    for (const c of cells) {
+      if (!c.nodes?.length || !this._cellDrawn(c.key)) continue;
+      const source = this._sourceOf(c.key);
+      const o = this.toVolume(from, source);
+      const d = this.toVolume(tip, source);
+      const solid = this.look === 'render' ? this._opaqueSurface(c.key) : null;
+      if (solid) solids.set(c.key, solid);
+      drawn.push({ ...c, source, solid: !!solid, origin: o, dir: [d[0] - o[0], d[1] - o[1], d[2] - o[2]] });
+    }
+    const surface = solids.size ? this._surfaceDepth(clientX, clientY, [...solids.values()]) : null;
+    const found = nearestOnRay(drawn, { look: this.look, perspective, scale, near: cam.near, surface },
+      (c, node) => this._shown(c.key, this.toWorld(node.xyz_um, c.source)));
+    return found && { key: found.cell.key, node: found.node, hit: found.hit, px: found.px };
+  }
+
+  /**
+   * A cell's surface when it is drawn and what is seen there is it rather than what
+   * is behind it (the 3D render's surfaces are 0.92 opaque by default), else null.
+   */
+  _opaqueSurface(key) {
+    const solid = this._meshPart(key, 'surface');
+    if (!solid?.visible || !(solid.material.opacity >= HOVER_SOLID_OPACITY)) return null;
+    for (let node = solid; node; node = node.parent) if (node.visible === false) return null;
+    return solid;
+  }
+
+  /**
+   * How far along the pointer's ray (`_aim` first) the nearest of `solids` is drawn
+   * at the pointer's pixel, microns, or null where none is.  Read back from the GPU:
+   * the surfaces alone are drawn again into one pixel, with their own Z range and the
+   * crop, each fragment writing its distance along the ray (HOVER_DEPTH_FRAGMENT), so
+   * the answer is what the picture shows there.  A ray cast against a surface costs a
+   * pass over its triangles on the CPU (19 ms for 1.8 million), too much for every
+   * frame of a moving pointer, and a ray goes between the triangles of a thin process
+   * the pixel shows; this costs 0.7 ms on 3 million triangles (median of 25).  The
+   * distance is written rather than the window depth, whose float precision falls
+   * with the near plane: unprojected, it was 3.5 um out at 100 um with the 0.0001 um
+   * near plane of a view with nothing in it.
+   */
+  _surfaceDepth(clientX, clientY, solids) {
+    const cam = this.camera;
+    const rect = this.webgl.domElement.getBoundingClientRect();
+    const x = Math.floor(clientX - rect.left);
+    const y = Math.floor(clientY - rect.top);
+    if (cam.view?.enabled || x < 0 || y < 0 || x >= rect.width || y >= rect.height) return null;
+    const pick = this._depthPick ??= {
+      target: new THREE.WebGLRenderTarget(1, 1),
+      material: new THREE.ShaderMaterial({
+        vertexShader: HOVER_DEPTH_VERTEX,
+        fragmentShader: HOVER_DEPTH_FRAGMENT,
+        uniforms: {
+          origin: { value: new THREE.Vector3() }, direction: { value: new THREE.Vector3() }, span: { value: 1 },
+        },
+        clipping: true,
+      }),
+      pixel: new Uint8Array(4),
+    };
+    const { origin, direction } = this.raycaster.ray;
+    // Everything drawn lies within `span` of the ray's origin: a distance over it reads as nothing.
+    const reach = this._reachSphere();
+    const span = reach ? origin.distanceTo(reach.center) + reach.radius + 1 : cam.far * 2;
+    const uniforms = pick.material.uniforms;
+    uniforms.origin.value.copy(origin);
+    uniforms.direction.value.copy(direction);
+    uniforms.span.value = span;
+    const gl = this.webgl;
+    const kept = {
+      target: gl.getRenderTarget(), autoClear: gl.autoClear,
+      color: gl.getClearColor(new THREE.Color()), alpha: gl.getClearAlpha(),
+    };
+    try {
+      cam.setViewOffset(rect.width, rect.height, x, y, 1, 1);
+      gl.setRenderTarget(pick.target);
+      gl.setClearColor(0xffffff, 1);   // packs 1: nothing drawn
+      gl.clear(true, true, false);
+      gl.autoClear = false;
+      for (const solid of solids) {
+        const material = solid.material;
+        pick.material.side = material.side;
+        pick.material.clippingPlanes = material.clippingPlanes;
+        solid.material = pick.material;
+        try { gl.render(solid, cam); } finally { solid.material = material; }
+      }
+      gl.readRenderTargetPixels(pick.target, 0, 0, 1, 1, pick.pixel);
+    } finally {
+      gl.setRenderTarget(kept.target);
+      gl.autoClear = kept.autoClear;
+      gl.setClearColor(kept.color, kept.alpha);
+      cam.clearViewOffset();
+    }
+    const [r, g, b, a] = pick.pixel;
+    if (r === 255 && g === 255 && b === 255 && a === 255) return null;
+    // three's unpackRGBAToDepth.
+    const down = 255 / 256;
+    return ((r * down + (g * down) / 256 + (b * down) / 65536 + a / 16777216) / 255) * span;
+  }
+
+  /** Whether the look on show draws any part of the cell `key`. */
+  _cellDrawn(key) {
+    const maps = this.look === 'graph' ? [this.graphs]
+      : [this.meshes, this.skeletons, this.discs, this.annoWires, this.lines, this.points];
+    return maps.some((map) => {
+      let node = map.get(key);
+      if (!node) return false;
+      for (; node; node = node.parent) if (node.visible === false) return false;
+      return true;
+    });
   }
 
   /**

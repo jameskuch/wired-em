@@ -2306,17 +2306,29 @@ and undoing a Hide above/below restores the cell's Z range. The shortcuts work w
 a checkbox, slider or dropdown has the focus (not in a text box, where they undo
 typing), take one step per key press, and wait for a step that is still being applied.
 
-**The pick readout** at the top left of the render names the point you last
-clicked in microns (on a cell, a few pixels' tolerance: a thin process a pixel or
-two wide is picked wherever it is drawn, and a line drawn in front of a cell takes a
-click only within a few pixels of it; on an annotation ring, its center), then, after a separator, **Viking X Y Z downsample** —
-the pixel and section coordinates plus the downsample the view corresponds to
-(image pixels per screen pixel at that point; it follows the view as you zoom)
-— and after another separator
-the **Location ID** of the nearest annotation of that cell (within 5 µm).
+**The pick readout** at the top left of the render follows the pointer, in the
+3D render and in GraphApp alike: as the pointer moves over the view it names the
+annotation nearest it, and changes as soon as another one is nearer. Nothing is
+drawn to show which annotation that is; selecting (below) is for that. In the 3D
+render it is the annotation nearest the point of the surface under the pointer (a
+surface at least half opaque; the surfaces are 0.92 by default), or a ring drawn in
+front of that surface, of a cell shown as rings or a skeleton; over no cell, the
+annotation nearest the pointer on the screen. In GraphApp it is the dot nearest the
+pointer, the one a click there selects (of dots within half a pixel of each other,
+the one nearest you). A cell's annotations are fetched the first time the pointer
+crosses the view with that cell shown. The readout names the cell and the
+annotation's position in microns, then, after a separator, **Viking X Y Z
+downsample** — the annotation's pixel and section coordinates as Viking stores it
+(the section correction and any manual move taken back) plus the downsample the
+view corresponds to (image pixels per screen pixel at that point; it follows the
+view as you zoom) — and after another separator its **Location ID**, with the
+volume it is numbered in. A click on the render leaves the readout to the pointer
+(it still makes the clicked cell the selected row of the list). Moving the pointer
+off the view leaves the readout as it was.
 Left-click the Viking field to copy the four numbers for Viking's *Commands →
 Goto Location*, or the Location ID field to copy the ID for *Annotation →
-Goto Location ID*; `c` copies the Viking field too. The numbers are
+Goto Location ID*; `c`, with the pointer on the view, copies the Viking field of
+the annotation under it. The numbers are
 space-separated (`5120 3810 371 2`): Viking's paste parser treats a comma as
 a digit-group separator, so a comma-separated string arrived as `5120,` and
 was refused. Right-click either field
@@ -2348,16 +2360,16 @@ item up as the mouse passes over it, and a click selects it. Items behind an
 opaque surface are left out, except annotations drawn *Through the surface*.
 A skeleton is selected one branch at a time.
 
-**A selected annotation fills the pick readout.** The readout at the top left
-of the render switches to the annotation you selected: *Location ID N
-(volume)*, and the µm and *Viking X Y Z downsample* of that annotation's own
-position as Viking stores it — so a click on the ID, or `c`, copies exactly
-what Viking's *Goto Location ID* and *Goto Location* take. (Each click of a
-triple click is also an ordinary pick, which names the annotation *nearest the
-clicked surface point*; the selection overrides it, including when you choose
-a different annotation from the menu.) With markers (below), the readout names
-whichever was chosen or moved last, in any color. Deselecting leaves the readout
-as it is.
+**A selected annotation fills the pick readout** until the pointer reaches
+another annotation. The readout at the top left of the render switches to the
+annotation you selected: *Location ID N (volume)*, and the µm and *Viking X Y Z
+downsample* of that annotation's own position as Viking stores it — so a click on
+the ID, or `c`, copies exactly what Viking's *Goto Location ID* and *Goto
+Location* take. When you choose a different annotation from the menu, the readout
+names the one chosen. With markers (below), the readout names whichever was chosen
+or moved last, in any color; the marker table keeps every marked annotation's
+Location ID and Viking X Y Z, each a click to copy, while the readout follows the
+pointer. Deselecting leaves the readout as it is.
 
 **Deselecting.** Any of: press `Esc` (from anywhere on the 3D render tab; with
 a menu open the first `Esc` closes the menu, and with red or blue markers each

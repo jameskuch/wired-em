@@ -3767,6 +3767,102 @@ def comparereport(c: Chrome, r: Report, ctx):
     r.check('and it is saved when it is done', saved and 'Report saved' in (status or ''), status)
 
 
+# -- hover ------------------------------------------------------------------------------------
+
+#: The annotation the pick readout names: its Location ID (null while it names none), and the two other fields.
+READOUT = r"""(() => { const m = document.getElementById('pick-location').textContent.match(/Location ID (\d+)/);
+  return { id: m ? Number(m[1]) : null, text: document.getElementById('pick-text').textContent,
+    viking: document.getElementById('pick-viking').textContent }; })()"""
+
+#: In the page: points of the canvas over the cell `key`, each with the annotations an independent measure
+#: accepts there.  3D render: the first surface a ray meets (`_hitsAt`, rings passed over; points it meets none
+#: are left out) and
+#: the annotations whose discs come within 1 um of the nearest to that point.  GraphApp: every dot projected
+#: with three.js, and those within 0.6 px of the nearest (hoverpick.js ties at 0.5 px, measured along its ray).
+HOVER_SPOTS = """(async (key, look) => {
+  const R = window.sbfsem.renderer; const V = R.camera.position.constructor;
+  R.webgl.render(R.scene, R.camera); R.group.updateMatrixWorld(true);
+  const source = key.split('/')[0];
+  const nodes = await fetch('/api/neurons/' + key + '/nodes?cell_only=true').then((x) => x.json());
+  const rect = R.webgl.domElement.getBoundingClientRect();
+  const screen = nodes.map((n) => { const v = new V(...R.toWorld(n.xyz_um, source)).project(R.camera);
+    return { n, x: rect.left + (v.x + 1) / 2 * rect.width, y: rect.top + (1 - v.y) / 2 * rect.height }; });
+  const disc = (n, p) => Math.hypot(Math.max(Math.hypot(n.xyz_um[0] - p[0], n.xyz_um[1] - p[1]) - n.radius_um, 0),
+    n.xyz_um[2] - p[2]);
+  const out = [];
+  for (let i = 0; out.length < 12 && i < 600; i += 1) {
+    const s = screen[(i * 97) % screen.length];
+    const x = Math.round(s.x + ((i * 7) % 5) - 2); const y = Math.round(s.y + ((i * 11) % 5) - 2);
+    if (x < rect.left + 4 || y < rect.top + 140 || x > rect.right - 140 || y > rect.bottom - 4) continue;
+    let ok;
+    if (look === 'graph') {
+      const px = screen.map((t) => Math.hypot(t.x - x, t.y - y));
+      const least = Math.min(...px);
+      ok = screen.filter((t, k) => px[k] <= least + 0.6).map((t) => t.n.id);
+    } else {
+      const hit = R._hitsAt(x, y).find((h) => h.object.userData.part === 'surface');
+      if (!hit) continue;
+      const p = R.toVolume(hit.point, source);
+      const d = nodes.map((n) => disc(n, p));
+      const least = Math.min(...d);
+      ok = nodes.filter((n, k) => d[k] <= least + 1).map((n) => n.id);
+    }
+    out.push({ x, y, ok });
+  }
+  return out; })"""
+
+
+def hover(c: Chrome, r: Report, ctx):
+    r.start('hover: the pick readout follows the pointer, in the 3D render and in GraphApp')
+    R = 'window.sbfsem.renderer'
+    boot(c, ctx.url)
+    key = load(c, ctx.cell)
+    js(c, f'{R}.resetView()')
+    c.settle(3)
+    marks = js(c, f'{R}.highlightGroup.children.length')
+    for look, word in (('render', '3D render'), ('graph', 'GraphApp')):
+        if look == 'graph':
+            js(c, "document.querySelector('.tab[data-look=\"graph\"]').click()")
+            c.wait_for(f'{R}.graphs.has({json.dumps(key)})', 60)
+            c.settle(3)
+        spots = js(c, f'({HOVER_SPOTS})({json.dumps(key)}, {json.dumps(look)})', wait=True) or []
+        if spots:
+            # The first time over the view the cell's annotations may still be on their way.
+            c.move(spots[0]['x'], spots[0]['y'])
+            c.wait_for(f'({READOUT}).id !== null', 30)
+        named, wrong, cells = set(), [], set()
+        for s in spots:
+            c.move(s['x'], s['y'])
+            c.settle(3)
+            got = js(c, READOUT)
+            named.add(got['id'])
+            cells.add(f'c{ctx.cell}' in got['text'] and got['viking'].startswith('Viking ') and '—' not in got['viking'])
+            if got['id'] not in s['ok']:
+                wrong.append({'x': s['x'], 'y': s['y'], 'named': got['id'], 'ok': s['ok'][:6]})
+        r.check(f'{word}: over {len(spots)} points of the cell the readout changes with the pointer, '
+                'with no click', len(spots) >= 6 and len(named - {None}) >= 3, sorted(n for n in named if n))
+        r.check(f'{word}: each time it names the annotation under the pointer (on a surface, the one nearest '
+                'the surface point; in GraphApp the nearest dot)', not wrong, wrong[:3])
+        r.check(f'{word}: with its cell and its Viking X Y Z', cells == {True}, cells)
+        r.check(f'{word}: and nothing is drawn or selected to show which',
+                js(c, f'{R}.selection') is None and js(c, f'{R}.highlightGroup.children.length') == marks)
+        if look == 'render' and spots:
+            s = spots[len(spots) // 2]
+            c.move(s['x'], s['y'])
+            c.settle(3)
+            before = js(c, READOUT)
+            c.press(s['x'], s['y'])
+            c.release(s['x'], s['y'])
+            c.settle(3)
+            r.check('a click leaves the readout naming what the pointer is on', js(c, READOUT) == before,
+                    [before, js(c, READOUT)])
+            corner = js(c, """(() => { const b = document.getElementById('pick-text').getBoundingClientRect();
+                return [b.left + 4, b.top + b.height / 2]; })()""")
+            c.move(*corner)
+            c.settle(3)
+            r.check('moving off the view onto the readout leaves it as it was', js(c, READOUT) == before)
+
+
 SECTIONS = {
     'notice': notice, 'waiting': waiting, 'draws': draws, 'undo': undo, 'idle': idle,
     'picker': picker, 'save': save, 'analysis': analysis, 'strata': strata, 'strataexport': strataexport, 'twod': twod, 'sheets': sheets, 'volume': volume,
@@ -3789,6 +3885,7 @@ SECTIONS = {
     'shiftpulls': shiftpulls,
     'visualizations': visualizations,
     'locate': locate,
+    'hover': hover,
     'narrow': narrow,
     'registrations': registrations,
     'viewcube': viewcube,
