@@ -15,6 +15,11 @@ count, then the statistics, then the settings) and a sheet per cell with every
 annotation's depth and whether the chart counts it
 (:func:`sbfsem.analysis.stratification.annotation_depths`).
 
+Both say how the depths were measured (``StrataSettings.method``): along the
+layers' normals, or along Z as MATLAB did, so a figure made one way is never
+read as the other; each annotation's depth in µm and the IPL's thickness through
+it are measured the same way.
+
 Depths are written in percent of the IPL (0 at the INL border, 100 at the GCL
 border), as the chart's axis is.  Each cell's bins span its own depths
 (``numpy.histogram`` over the cell's range), so bins are matched by number,
@@ -67,8 +72,17 @@ class StrataSettings:
     omit_outliers: bool = True
     ipl_margin: float = 0.2
     tick_pct: float = 20.0
+    #: How the depths were measured (``sbfsem.analysis.boundary.IPL_METHODS``).
+    method: str = "column"
     version: str = ""
     made: datetime | None = None
+
+
+#: How each depth method is named on the chart's line and in the workbook.
+METHOD_WORDS = {
+    "normal": "depth along the layers' normals",
+    "column": "depth along Z (MATLAB's column)",
+}
 
 
 def ipl_ticks(step_pct: float) -> list[tuple[float, str]]:
@@ -104,13 +118,15 @@ def labeled_ticks(ticks: Sequence[tuple[float, str]], gap: float, min_gap: float
 
 
 def settings_line(settings: StrataSettings) -> str:
-    """One line under the chart: the bins, the soma, the outliers, the ticks, the version and when."""
+    """One line under the chart: the bins, the soma, the outliers, the ticks, how
+    depth was measured, the version and when."""
     parts = [
         f"{settings.num_bins} bins per cell",
         "soma included" if settings.include_soma else "soma left out (annotations over 80 % of the largest radius)",
         f"outliers beyond {settings.ipl_margin * 100:g} % of the IPL omitted" if settings.omit_outliers
         else "outliers kept",
         f"gridlines every {settings.tick_pct:g} %",
+        METHOD_WORDS.get(settings.method, settings.method),
     ]
     if settings.version:
         parts.append(f"SBFSEM-tools {settings.version}")
@@ -219,6 +235,9 @@ def stratification_xlsx(cells: Sequence[StrataCell], settings: StrataSettings) -
          else "kept"),
         ("gridlines every (%)", settings.tick_pct),
         ("depth", "percent of the IPL: 0 at the INL border, 100 at the GCL border"),
+        ("depth measured", METHOD_WORDS.get(settings.method, settings.method)
+         + ("; depth (µm) from the INL border and the IPL's thickness through each annotation "
+            "the same way")),
         ("bins", "each cell's own: its range cut into equal bins (numpy.histogram); matched here by number"),
         ("SBFSEM-tools", settings.version),
     ]:
@@ -230,6 +249,7 @@ def stratification_xlsx(cells: Sequence[StrataCell], settings: StrataSettings) -
     columns = {
         "location_id": "Location ID", "section": "section", "x_um": "X (µm)", "y_um": "Y (µm)",
         "z_um": "Z (µm)", "radius_um": "radius (µm)", "ipl_depth": "IPL depth (%)",
+        "depth_um": "depth (µm)", "ipl_thickness_um": "IPL thickness (µm)",
         "counted": "counted", "left_out": "left out because",
     }
     for cell, name in zip(cells, _sheet_names(cells), strict=True):
@@ -237,7 +257,7 @@ def stratification_xlsx(cells: Sequence[StrataCell], settings: StrataSettings) -
         table = cell.annotations.copy()
         table["ipl_depth"] = [_pct(v) for v in table["ipl_depth"]]
         table = table[list(columns)].rename(columns=columns)
-        sheet.append([f"{cell.label} · {cell.volume}"])
+        sheet.append([f"{cell.label} · {cell.volume} · {METHOD_WORDS.get(settings.method, settings.method)}"])
         sheet["A1"].font = bold
         sheet.append(list(table.columns))
         for col in range(1, len(table.columns) + 1):
@@ -245,7 +265,7 @@ def stratification_xlsx(cells: Sequence[StrataCell], settings: StrataSettings) -
         for values in table.itertuples(index=False):
             sheet.append([_cell_value(v) for v in values])
         sheet.freeze_panes = "A3"
-        for col, width in enumerate([13, 9, 11, 11, 11, 11, 13, 9, 18], start=1):
+        for col, width in enumerate([13, 9, 11, 11, 11, 11, 13, 11, 17, 9, 18], start=1):
             sheet.column_dimensions[get_column_letter(col)].width = width
 
     out = io.BytesIO()
@@ -379,15 +399,21 @@ def _data_pages(cells: Sequence[StrataCell], settings: StrataSettings, *, statis
             y = page.table(page.left, y, cols, rows, size=6.6) + 0.25
 
     if annotations:
-        cols = [Column("Location ID", 0.95, "right"), Column("section", 0.65, "right"),
-                Column("X µm", 0.8, "right"), Column("Y µm", 0.8, "right"), Column("Z µm", 0.8, "right"),
-                Column("radius µm", 0.8, "right"), Column("IPL depth %", 0.9, "right"),
-                Column("left out because", 1.6)]
+        cols = [Column("Location ID", 0.85, "right"), Column("section", 0.55, "right"),
+                Column("X µm", 0.7, "right"), Column("Y µm", 0.7, "right"), Column("Z µm", 0.7, "right"),
+                Column("radius µm", 0.7, "right"), Column("IPL depth %", 0.75, "right"),
+                Column("depth µm", 0.75, "right"), Column("IPL µm", 0.75, "right"),
+                Column("left out because", 0.95)]
+
+        def um(value) -> str:
+            return f"{value:.3f}" if math.isfinite(float(value)) else ""
+
         for cell in cells:
             table = cell.annotations
             rows = [[int(r.location_id), int(r.section) if math.isfinite(float(r.section)) else "",
                      f"{r.x_um:.3f}", f"{r.y_um:.3f}", f"{r.z_um:.3f}", f"{r.radius_um:.3f}",
-                     "" if _pct(r.ipl_depth) is None else f"{_pct(r.ipl_depth):.2f}", r.left_out]
+                     "" if _pct(r.ipl_depth) is None else f"{_pct(r.ipl_depth):.2f}",
+                     um(r.depth_um), um(r.ipl_thickness_um), r.left_out]
                     for r in table.itertuples(index=False)]
             dim = [None if r[-1] == "" else "#8a919b" for r in rows]
             done = 0
@@ -395,7 +421,8 @@ def _data_pages(cells: Sequence[StrataCell], settings: StrataSettings, *, statis
             while done < len(rows) or done == 0:
                 page, y = new_page(f"IPL depth of each annotation: {cell.label}",
                                    f"{cell.volume} · {len(rows):,} annotations, "
-                                   f"{int(table['counted'].sum()):,} counted"
+                                   f"{int(table['counted'].sum()):,} counted · "
+                                   f"{METHOD_WORDS.get(settings.method, settings.method)}"
                                    + (f" · part {part}" if part > 1 else ""))
                 per = annotation_rows_per_page(size[1])
                 chunk = rows[done:done + per]

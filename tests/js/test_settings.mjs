@@ -21,6 +21,7 @@ const {
   savedRatio, pullTitle, cellPullsView, PULLS_HELP,
   EXPERT_RENDER_KEY, EXPERT_RENDER_HELP, expertRender, setExpertRender,
   STALE_RELOAD_KEY, fromBrowserCache, staleStart,
+  IPL_METHOD_KEY, IPL_METHOD_CHOICES, IPL_METHOD_DEFAULT, IPL_METHOD_HELP, iplMethod, setIplMethod,
 } = await load('settings.js');
 
 const cases = [];
@@ -205,6 +206,27 @@ test('expert render mode is off unless this browser keeps it on, and is listed w
   // The hover says both settings.
   assert.match(EXPERT_RENDER_HELP, /^On: render settings are applied verbatim/);
   assert.match(EXPERT_RENDER_HELP, /Off \(the default\)/);
+});
+
+test('IPL depth is measured along the normals unless this browser keeps the column', () => {
+  // The schema's choices and the app's default (render_schema.py ipl_method, 2026-10-22).
+  assert.deepEqual(IPL_METHOD_CHOICES.map(([value]) => value), ['normal', 'column']);
+  assert.equal(IPL_METHOD_DEFAULT, 'normal');
+  const store = new FakeStorage();
+  assert.equal(iplMethod(store), 'normal');
+  assert.equal(iplMethod(null), 'normal');
+  assert.equal(iplMethod(new BlockedStorage()), 'normal');
+  assert.equal(setIplMethod(store, 'column'), true);
+  assert.equal(store.getItem(IPL_METHOD_KEY), 'column');
+  assert.equal(iplMethod(store), 'column');
+  assert.equal(setIplMethod(store, 'normal'), true);
+  assert.equal(store.getItem(IPL_METHOD_KEY), null, 'the default is no entry at all');
+  // A value an older or newer page left is read as the default, never sent on.
+  assert.equal(iplMethod(new FakeStorage({ [IPL_METHOD_KEY]: 'vertical' })), 'normal');
+  assert.equal(setIplMethod(new BlockedStorage(), 'column'), false);
+  assert.equal(groupOf(IPL_METHOD_KEY).id, 'ipl-method');
+  assert.match(IPL_METHOD_HELP, /Along the layers’ normals \(the default\)/);
+  assert.match(IPL_METHOD_HELP, /Straight along Z \(MATLAB’s column\)/);
 });
 
 test('a ratio is written as the log shows it', () => {

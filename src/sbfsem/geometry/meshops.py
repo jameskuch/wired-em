@@ -58,29 +58,31 @@ def clip_mesh(mesh: Mesh, cutoff: float, keep_above: bool = True, axis: int = 2)
 
 
 def clip_mesh_by_stratification(
-    mesh: Mesh, boundaries, cutoff: float, keep_above: bool = True
+    mesh: Mesh, boundaries, cutoff: float, keep_above: bool = True, method: str = "column"
 ) -> Mesh:
     """Clip by IPL depth rather than by raw Z.
 
-    ``boundaries`` is an :class:`~sbfsem.analysis.boundary.IPLBoundaries`.
+    ``boundaries`` is an :class:`~sbfsem.analysis.boundary.IPLBoundaries`;
+    ``method`` how the depth is measured (``"column"``, MATLAB's, or ``"normal"``).
     """
     if mesh.is_empty:
         return mesh
-    depth = boundaries.micron2ipl(mesh.vertices)
+    depth = boundaries.micron2ipl(mesh.vertices, method)
     remove = depth < cutoff if keep_above else depth > cutoff
     remove = np.where(np.isnan(depth), True, remove)
     return clip_mesh_by_vertices(mesh, remove)
 
 
-def flatten_render(mesh: Mesh, boundaries) -> Mesh:
+def flatten_render(mesh: Mesh, boundaries, method: str = "column") -> Mesh:
     """Replace each vertex's Z with its IPL depth.
 
     Ports the ``flattenRender`` helper referenced from ``RenderApp``; the file
     itself is missing from the repository, but ``getStrataCData`` and
-    ``stratificationMap`` establish exactly what it computed.
+    ``stratificationMap`` establish exactly what it computed.  ``method`` as
+    :func:`clip_mesh_by_stratification`'s.
     """
     out = mesh.copy()
-    depth = boundaries.micron2ipl(mesh.vertices)
+    depth = boundaries.micron2ipl(mesh.vertices, method)
     out.vertices = np.column_stack([mesh.vertices[:, 0], mesh.vertices[:, 1], depth])
     out.vertex_data = depth
     return out

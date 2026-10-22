@@ -155,10 +155,11 @@ def test_the_route_dependencies_return_what_they_declare():
 
 def test_field_keys_are_unique_and_in_default_render_order():
     keys = [f.key for f in schema.FIELDS]
-    assert len(keys) == len(set(keys)) == 38
+    assert len(keys) == len(set(keys)) == 39
     assert [f.key for f in schema.FIELDS if f.in_render] == DEFAULT_RENDER_ORDER
-    assert [f.key for f in schema.FIELDS if not f.in_render] == ["clip_z"]
-    assert keys[:-1] == DEFAULT_RENDER_ORDER, "clip_z comes last"
+    # The page's one IPL depth method is not a cell's render option either.
+    assert [f.key for f in schema.FIELDS if not f.in_render] == ["clip_z", "ipl_method"]
+    assert keys[:-2] == DEFAULT_RENDER_ORDER, "clip_z and ipl_method come last"
 
 
 def test_wire_and_scope_agree():
@@ -190,18 +191,22 @@ def test_defaults_agree_on_every_surface_and_the_schema():
             ), f"{surface}: {key} is a {type(info['default']).__name__}, the schema's a {type(want).__name__}"
 
 
-def test_the_apps_different_defaults_are_the_pathway_and_join_bodies():
+def test_the_apps_different_defaults_are_the_pathway_join_bodies_and_ipl_depth():
     """Ground rule 1: parity first in the library, product defaults in the app.
-    The app starts on the Voxel remesh pathway, and joins a Closed curve
-    surface's bodies up to 5 um apart (the user's choice, 2026-10-16); the
-    library and the API keep MATLAB's. A third silent product default fails here."""
-    assert [f.key for f in schema.FIELDS if f.app_default is not schema.SAME] == ["pathway", "curve_tie_um"]
+    The app starts on the Voxel remesh pathway, joins a Closed curve surface's
+    bodies up to 5 um apart (the user's choice, 2026-10-16) and measures IPL
+    depth along the layers' normals (James Anderson's request, 2026-10-22); the
+    library and the API keep MATLAB's. A fourth silent product default fails here."""
+    assert [f.key for f in schema.FIELDS if f.app_default is not schema.SAME] == [
+        "pathway", "curve_tie_um", "ipl_method"]
     assert schema.api_defaults()["pathway"] == "original"
     assert schema.app_defaults()["pathway"] == "voxel2"
     assert schema.api_defaults()["curve_tie_um"] == 0.0
     assert schema.app_defaults()["curve_tie_um"] == 5.0
+    assert schema.api_defaults()["ipl_method"] == "column"
+    assert schema.app_defaults()["ipl_method"] == "normal"
     differing = {k for k in schema.api_defaults() if schema.api_defaults()[k] != schema.app_defaults()[k]}
-    assert differing == {"pathway", "curve_tie_um"}
+    assert differing == {"pathway", "curve_tie_um", "ipl_method"}
 
 
 # -- 3. the same bounds -------------------------------------------------------

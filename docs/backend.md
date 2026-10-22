@@ -1068,7 +1068,28 @@ profile.stats.median, profile.mode, profile.n_omitted_outlier
 # "soma", "outside surfaces", "outlier"); the counted depths are profile.depth.
 from sbfsem.analysis.stratification import annotation_depths
 table = annotation_depths(c, boundaries=boundaries)
+
+# Along the layers' normals instead of along Z (2.31.0): every function above takes
+# method="column" (the default, MATLAB's) or method="normal".
+d = boundaries.depth(c.get_cell_xyz(), "normal")   # IPLDepth
+d.fraction, d.depth_um, d.thickness_um             # fraction = depth_um / thickness_um
+ipl_depth(c, boundaries=boundaries, method="normal").meta["method"]
+table = annotation_depths(c, boundaries=boundaries, method="normal")  # + depth_um, ipl_thickness_um
+
+# The volume's IPL thickness along the normals and along Z, where it thins, each
+# layer's tilt and the angle between their normals, and a 60 x 60 map.
+from sbfsem.analysis.boundary import thickness_summary
+thickness_summary(boundaries)["normal_um"]["median"]
 ```
+
+`"column"` evaluates both fits at the point's own X/Y; `"normal"` takes the
+nearest point of each fit (`BoundarySurface.nearest`, a Newton solve on the same
+heights, with slopes and curvatures from the bicubic spline through the nodes),
+so its depth is the distance from the INL, its thickness the sum of the two
+distances, and its fraction their ratio. A point whose nearest point on a layer
+lies beyond that layer's fitted rectangle gets NaN that way. `clip_mesh_by_stratification`,
+`flatten_render` and `strata_cdata` take `method` too; DEVIATIONS.md §5.17 has the
+measurements.
 
 `sbfsem.export.stratification` writes the Stratification tab's files from these:
 `stratification_pdf` (the chart as vectors, then optional data pages) and

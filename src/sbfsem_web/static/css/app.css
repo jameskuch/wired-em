@@ -578,6 +578,13 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 10%, transparent);
   font-size: 13px; cursor: pointer;
 }
 .settings-check input { margin: 0; padding: 0; flex: none; }
+/* Under the Stratification chart: how its depths were measured, and each volume's IPL thickness. */
+.strata-method { white-space: pre-line; font-size: 12px; margin: 6px 12px 10px; }
+/* A label and its dropdown, side by side (how IPL depth is measured). */
+.settings-field {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 12px; font-size: 13px;
+}
+.settings-field select { max-width: 100%; }
 .row input.settings-ratio { flex: 0 0 5.5em; width: 5.5em; }
 .settings-actions .settings-unit { align-self: center; margin-right: 6px; }
 .settings-scroll { overflow-x: auto; }

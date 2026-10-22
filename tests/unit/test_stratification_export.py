@@ -86,12 +86,18 @@ def test_the_workbook_has_a_summary_column_per_cell_and_a_sheet_per_cell(c943, f
     assert any(r and r[0] == "SBFSEM-tools" and r[1] == "9.9.9" for r in summary)
 
     sheet = [[cell.value for cell in row] for row in book["c944 Inferior Monkey"].iter_rows()]
+    assert sheet[0][0] == "c944 test · Inferior Monkey · depth along Z (MATLAB's column)"
     assert sheet[1] == ["Location ID", "section", "X (µm)", "Y (µm)", "Z (µm)", "radius (µm)",
-                        "IPL depth (%)", "counted", "left out because"]
+                        "IPL depth (%)", "depth (µm)", "IPL thickness (µm)", "counted", "left out because"]
     body = sheet[2:]
     assert len(body) == len(c943.get_cell_nodes())
-    assert sum(1 for r in body if r[7]) == b.result.stats.n
-    assert {r[8] for r in body if not r[7]} == {"soma"}
+    assert sum(1 for r in body if r[9]) == b.result.stats.n
+    assert {r[10] for r in body if not r[9]} == {"soma"}
+    # The flat IPL is 20 µm thick everywhere: the depth in µm is the fraction of it.
+    inside = [r for r in body if r[6] is not None]
+    assert inside and all(r[8] == pytest.approx(20.0) for r in inside)
+    assert all(r[7] == pytest.approx(r[6] / 100 * 20.0, abs=1e-3) for r in inside)
+    assert any(r and r[0] == "depth measured" and r[1].startswith("depth along Z") for r in summary)
 
 
 def test_the_pdf_is_the_chart_as_vectors_then_the_data_when_asked(c943, flat):

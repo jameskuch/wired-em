@@ -112,10 +112,13 @@ test('DEFAULT_RENDER has the old 29 keys in the old order with the six closed-cu
   assert.deepEqual(Object.keys(normalizeRender({ stale: 1 })), [...BASELINE_KEYS, 'stale']);
 });
 
-test('the app default differs from the API default only in the pathway and Join bodies', () => {
+test('the app default differs from the API default only in the pathway, Join bodies and IPL depth', () => {
   assert.equal(DEFAULT_RENDER.pathway, 'voxel2');
   assert.equal(DEFAULT_RENDER.curve_tie_um, 5);
-  assert.deepEqual(RENDER_FIELDS.filter((f) => f.hasAppDefault).map((f) => f.key), ['pathway', 'curve_tie_um']);
+  // The IPL depth method is the page's (Settings), never a cell's render: in no record's defaults.
+  assert.deepEqual(RENDER_FIELDS.filter((f) => f.hasAppDefault).map((f) => f.key),
+    ['pathway', 'curve_tie_um', 'ipl_method']);
+  assert.ok(!('ipl_method' in DEFAULT_RENDER));
   for (const f of RENDER_FIELDS) {
     if (!f.inRender || f.key === 'pathway' || f.key === 'curve_tie_um') continue;
     assert.deepEqual(DEFAULT_RENDER[f.key], f.default === null ? undefined : f.default, f.key);
@@ -598,6 +601,24 @@ test('estimateBuildSeconds: a closed-curve raster that was not timed costs by it
   for (let i = 1; i < rasters.length; i += 1) assert.ok(est(rasters[i - 1]) < est(rasters[i]), String(rasters[i]));
   // A pixel the 3D render's box clamps (0.01 to 1) still gives a finite, positive estimate.
   for (const pixel of [0.01, 0.37, 1]) assert.ok(Number.isFinite(est(pixel)) && est(pixel) > 0);
+});
+
+test('a render cut or colored by IPL depth carries the page\'s depth method, and no other does', () => {
+  const plain = ro.normalizeRender({});
+  assert.equal(ro.withIplMethod(plain, 'normal'), plain, 'the same object: the same request and cache entry');
+  assert.equal(ro.drawsIplDepth(plain), false);
+  const colored = ro.normalizeRender({ color_by_strata: true });
+  assert.equal(ro.withIplMethod(colored, 'normal').ipl_method, 'normal');
+  assert.ok(!('ipl_method' in colored), 'the cell\'s own options are left alone');
+  for (const clip of [0, 0.5]) {
+    assert.equal(ro.withIplMethod(ro.normalizeRender({ clip_ipl: clip }), 'column').ipl_method, 'column');
+  }
+  // The mesh cache tells the two methods apart.
+  assert.notEqual(ro.effectiveSignature(ro.withIplMethod(colored, 'normal')),
+    ro.effectiveSignature(ro.withIplMethod(colored, 'column')));
+  // Not a cell's render option: it is in no record's defaults.
+  assert.ok(!('ipl_method' in ro.DEFAULT_RENDER));
+  assert.equal(ro.FIELD_BY_KEY.ipl_method.inRender, false);
 });
 
 // -- run -------------------------------------------------------------------------

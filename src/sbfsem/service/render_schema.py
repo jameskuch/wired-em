@@ -349,7 +349,7 @@ _HELP: dict[str, str] = {
         "Wrap (cube fit) only. How many reject-and-refit rounds each cube runs. 0 disables outlier rejection."
     ),
     "clip_ipl": (
-        "Cuts every mesh at a stratification depth (0 = INL border, 1 = GCL border), keeping the side above or below — for isolating ON vs OFF arbors. It lives with the render settings because the cut is applied on the server when the mesh is built; applied by Apply to selected / all. Needs the volume to have IPL boundary markers."
+        "Cuts every mesh at a stratification depth (0 = INL border, 1 = GCL border), keeping the side above or below — for isolating ON vs OFF arbors. The depth is measured as the Settings tab says: along the layers' normals (the default), or straight along Z as MATLAB did. It lives with the render settings because the cut is applied on the server when the mesh is built; applied by Apply to selected / all. Needs the volume to have IPL boundary markers."
     ),
 }
 
@@ -687,6 +687,15 @@ FIELDS: tuple[Field, ...] = (
         in_render=False,
         ui_reason="API-only: a cut by section depth, which the app does by Hide above/below "
                   "(a view change, not a rebuild)",
+    ),
+    # 2026-10-22: James Anderson's request; one method for every volume.  The
+    # library and the API keep MATLAB's column; the app measures along the normals.
+    Field(
+        "ipl_method", "enum", "IPL depth", "column", app_default="normal",
+        choices=(("normal", "along the layers' normals"), ("column", "straight along Z (MATLAB)")),
+        server_enum=True, scope="view", wire=_VIEW, ui=False, in_render=False,
+        ui_reason="one choice for the whole page, the Settings tab's: how Clip IPL and depth "
+                  "coloring measure depth, as the Stratification tab does",
     ),
 )
 

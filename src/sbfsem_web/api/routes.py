@@ -88,6 +88,9 @@ from ..saves import MAX_CELL_ID, CellRenderStore, LibraryStore, QuotaError, Save
 
 log = logging.getLogger(__name__)
 
+#: How an IPL depth is measured (``sbfsem.analysis.boundary.IPL_METHODS``).
+IplMethod = Literal["column", "normal"]
+
 
 def _require_volume(request: Request, source: str) -> None:
     """403 unless a signed-in Viking user may open ``source``.
@@ -445,6 +448,23 @@ def boundary_mesh(request: Request, source: str, layer: str,
     """The fitted INL or GCL surface, for context under or over a render."""
     try:
         return service(request).boundary_mesh(_source(source), layer, decimate=decimate)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/volumes/{source}/ipl-thickness")
+def ipl_thickness(request: Request, source: str,
+                  grid: int = Query(60, ge=10, le=200),
+                  near_um: float = Query(25.0, gt=0, le=500)):
+    """How thick the volume's IPL is, measured along the INL and GCL surfaces'
+    normals and along Z: on a ``grid`` x ``grid`` lattice of columns over the
+    two fits' overlap, counting only columns with a marker of each layer within
+    ``near_um`` in XY.  The median, 5th and 95th percentiles and range of each
+    (µm), their ratio, where it is thinnest and thickest, each layer's tilt and
+    the angle between their normals (degrees), and the thickness map.  400 for a
+    volume with no boundary markers (Cped, RPC1, RPC2)."""
+    try:
+        return service(request).ipl_thickness(_source(source), grid=grid, near_um=near_um)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -852,6 +872,7 @@ def mesh_params(
     clip_ipl: float | None = None,
     keep_above: bool = True,
     color_by_strata: bool = False,
+    ipl_method: str = Query("column", pattern="^(normal|column)$"),
 ) -> dict:
     """Every render option, shared verbatim by the mesh and mesh-job routes."""
     return {
@@ -870,6 +891,7 @@ def mesh_params(
         "clip_ipl": clip_ipl,
         "keep_above": keep_above,
         "color_by_strata": color_by_strata,
+        "ipl_method": ipl_method,
         "pathway": pathway,
         "post_order": post_order,
         "voxel_detail": voxel_detail,
@@ -990,7 +1012,7 @@ def start_grid_job(request: Request, source: str, neuron_id: int,
 
 
 #: The mesh route's options that cut or color a built mesh: nothing an estimate weighs.
-_VIEW_OPTIONS = ("clip_z", "clip_ipl", "keep_above", "color_by_strata")
+_VIEW_OPTIONS = ("clip_z", "clip_ipl", "keep_above", "color_by_strata", "ipl_method")
 
 
 @router.get("/neurons/{source}/{neuron_id}/render-estimate")
@@ -1313,6 +1335,9 @@ class AttachedRenderBody(MeshOptionsBody):
     clip_ipl: float | None = None
     keep_above: bool = True
     color_by_strata: bool = False
+    #: Taken as the mesh route takes it, and never stored: how depth is measured
+    #: is one setting for the whole page (its Settings tab), not a cell's.
+    ipl_method: str = Field(default="column", pattern="^(normal|column)$")
 
 
 @router.put("/neurons/{source}/{neuron_id}/render-prefs")
@@ -1322,6 +1347,7 @@ def put_render_prefs(request: Request, source: str, neuron_id: CellId,
     # A cut that is off is left out, not stored as null: the browser reads a
     # missing option as its default and a null as a value.
     render = body.model_dump(exclude_none=True)
+    render.pop("ipl_method", None)
     try:
         _cell_renders(request).set(_source(source), neuron_id, render)
     except QuotaError as exc:
@@ -1711,14 +1737,18 @@ def stratification(
     include_soma: bool = True,
     omit_outliers: bool = True,
     ipl_margin: float = 0.2,
+    ipl_method: IplMethod = "column",
 ):
+    """The cell's IPL stratification.  ``ipl_method``: depth measured along Z
+    (``column``, MATLAB's, the API's default) or along the layers' normals
+    (``normal``, the viewer's)."""
     svc = service(request)
     src = _source(source)
     _neuron_or_404(svc, neuron_id, src)
     try:
         return svc.stratification(
             neuron_id, src, num_bins=num_bins, include_soma=include_soma,
-            omit_outliers=omit_outliers, ipl_margin=ipl_margin,
+            omit_outliers=omit_outliers, ipl_margin=ipl_margin, ipl_method=ipl_method,
         )
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1743,6 +1773,8 @@ class StrataExportBody(BaseModel):
     omit_outliers: bool = True
     ipl_margin: float = Field(0.2, ge=0.0, le=1.0)
     tick_pct: float = Field(20.0, ge=1.0, le=100.0)
+    #: How the depths are measured: along Z (MATLAB's) or along the layers' normals.
+    ipl_method: IplMethod = "column"
     #: The PDF only: the statistics and binned counts, and each annotation's depth, on the pages after the chart.
     statistics: bool = True
     annotations: bool = False
@@ -1765,7 +1797,8 @@ def _strata_export(request: Request, body: StrataExportBody):
             try:
                 result, table = svc.stratification_tables(
                     cell.id, src, num_bins=body.num_bins, include_soma=body.include_soma,
-                    omit_outliers=body.omit_outliers, ipl_margin=body.ipl_margin)
+                    omit_outliers=body.omit_outliers, ipl_margin=body.ipl_margin,
+                    ipl_method=body.ipl_method)
             except NeuronNotLoadedError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             except (ValueError, FileNotFoundError) as exc:
@@ -1775,7 +1808,8 @@ def _strata_export(request: Request, body: StrataExportBody):
                                 result=result, annotations=table))
     settings = StrataSettings(num_bins=body.num_bins, include_soma=body.include_soma,
                               omit_outliers=body.omit_outliers, ipl_margin=body.ipl_margin,
-                              tick_pct=body.tick_pct, version=__version__, made=datetime.now(UTC))
+                              tick_pct=body.tick_pct, method=body.ipl_method, version=__version__,
+                              made=datetime.now(UTC))
     names = "-".join(c.name for c in cells[:4]) + ("-and-more" if len(cells) > 4 else "")
     return cells, settings, f"stratification-{names}"
 
@@ -1812,12 +1846,14 @@ def stratification_export_xlsx(request: Request, body: StrataExportBody):
 @router.get("/neurons/{source}/{neuron_id}/synapse-stratification/{synapse_type}",
             response_model=StratificationDTO)
 def synapse_stratification(request: Request, source: str, neuron_id: int,
-                           synapse_type: str, num_bins: int = Query(25, ge=2, le=200)):
+                           synapse_type: str, num_bins: int = Query(25, ge=2, le=200),
+                           ipl_method: IplMethod = "column"):
     svc = service(request)
     src = _source(source)
     _neuron_or_404(svc, neuron_id, src)
     try:
-        return svc.synapse_stratification(neuron_id, src, synapse_type, num_bins=num_bins)
+        return svc.synapse_stratification(neuron_id, src, synapse_type, num_bins=num_bins,
+                                          ipl_method=ipl_method)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2179,18 +2215,22 @@ def _export_clip(
                           "(0 = INL border, 1 = GCL border), as the viewer's Clip IPL does"),
     keep_above: bool = Query(True, description="Which side of the cut to keep"),
     clip_z: float | None = Query(None, description="Cut the exported mesh at this Z, in microns"),
+    ipl_method: str = Query("column", pattern="^(normal|column)$",
+                            description="How the IPL clip measures depth: along Z (column, "
+                                        "MATLAB's) or along the layers' normals (normal)"),
 ) -> dict:
     """The viewer's clip, so an export of a clipped render is the surface on screen.
 
-    A fifth declaration of three schema fields, beside the four the schema lists:
-    ``render_schema`` marks ``clip_ipl``, ``keep_above`` and ``clip_z`` as the
-    mesh route's (``wire=('mesh',)``), and the export routes take the same three
-    here, with ``_geometry_options`` carrying only the geometry.  The export
-    link the browser builds (``exportQuery``) adds the first two by hand.
+    A fifth declaration of four schema fields, beside the four the schema lists:
+    ``render_schema`` marks ``clip_ipl``, ``keep_above``, ``clip_z`` and
+    ``ipl_method`` as the mesh route's (``wire=('mesh',)``), and the export
+    routes take the same four here, with ``_geometry_options`` carrying only the
+    geometry.  The export link the browser builds (``exportQuery``) adds
+    ``clip_ipl``, ``keep_above`` and ``ipl_method`` by hand.
     ``tests/unit/test_web.py`` holds this to the mesh route's type, default and
     bounds, and ``tests/js/test_exports.mjs`` holds the link's names to the schema's.
     """
-    return {"clip_z": clip_z, "clip_ipl": clip_ipl, "keep_above": keep_above}
+    return {"clip_z": clip_z, "clip_ipl": clip_ipl, "keep_above": keep_above, "ipl_method": ipl_method}
 
 
 #: Formats the wireframe exporter can express edges in.  SWC is the

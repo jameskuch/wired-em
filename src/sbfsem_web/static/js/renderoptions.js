@@ -65,6 +65,24 @@ export function normalizeRender(options) {
   return merged;
 }
 
+/**
+ * `options` as a mesh request carries them, with the IPL depth `method` (the
+ * page's one setting: `normal` or `column`) when the render clips or colors by
+ * IPL depth, which is when the server reads it; otherwise `options` itself, so
+ * a surface that neither clips nor colors is the same request and cache entry
+ * whichever the method.  Never stored on a cell: the depth method is not one
+ * of its render options (the schema's `inRender: false`).
+ */
+export function withIplMethod(options, method) {
+  return drawsIplDepth(options) ? { ...options, ipl_method: method } : options;
+}
+
+/** Whether a render is cut or colored by IPL depth: Clip IPL set (0 included), or Color by strata. */
+export function drawsIplDepth(options) {
+  const clipped = options.clip_ipl !== undefined && options.clip_ipl !== null;
+  return !!options.color_by_strata || clipped;
+}
+
 /** Stable key for the mesh cache: same options -> same string. */
 export function renderSignature(options) {
   const full = normalizeRender(options);

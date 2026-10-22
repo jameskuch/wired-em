@@ -10,15 +10,17 @@ import { EXPORT_KEYS, pick, normalizeRender } from './renderoptions.js';
  * screen: every geometry option (EXPORT_KEYS: the closed-curve raster
  * included, without which a Closed curve or Hybrid cell shown at 0.25 um was
  * exported at the 0.05 um default), and the IPL clip when the render has one
- * (a cell clipped to isolate its ON or OFF arbors was exported whole).  Depth
+ * (a cell clipped to isolate its ON or OFF arbors was exported whole), with
+ * `iplMethod`, how the page measures the clip's depth, when it is given.  Depth
  * coloring is a look, not geometry, and stays out.
  */
-export function exportQuery(render) {
+export function exportQuery(render, iplMethod = undefined) {
   const full = normalizeRender(render);
   const clipped = full.clip_ipl !== undefined && full.clip_ipl !== null;
   return {
     ...pick(full, EXPORT_KEYS),
     ...(clipped ? { clip_ipl: full.clip_ipl, keep_above: full.keep_above } : {}),
+    ...(clipped && iplMethod ? { ipl_method: iplMethod } : {}),
   };
 }
 

@@ -1,7 +1,8 @@
 // The Settings tab: debug tools kept out of the way of the work.
 //
 // Expert render mode (whether a failed render is rebuilt with settings that work,
-// or left failed with its settings marked), three cards for this browser (which build the page is, clearing its cached
+// or left failed with its settings marked), how IPL depth is measured (along the
+// layers' normals, or straight along Z as MATLAB did), three cards for this browser (which build the page is, clearing its cached
 // files, resetting what it saved), the Correction log (annotations Viking's
 // curve fit pulled toward a much wider linked one, in every loaded cell this
 // account may see: /api/correction-log), and one for the server (its state,
@@ -12,6 +13,7 @@
 // SettingsPanel is the view, and touches the page only when it is shown.
 
 import { MODE_LABELS } from './regstatus.js';
+import { FIELD_BY_KEY } from './renderoptions.js';
 
 /**
  * Everything this site keeps in the browser, by what it is for.  `keys` are
@@ -30,6 +32,11 @@ export const STORAGE_GROUPS = [
     id: 'expert-render', label: 'Expert render mode',
     help: 'Whether render settings are built exactly as set, even when a cell cannot be built with them',
     keys: ['sbfsem:expert-render'],
+  },
+  {
+    id: 'ipl-method', label: 'IPL depth measured',
+    help: 'Whether IPL depth is measured along the layers’ normals (the default) or straight along Z',
+    keys: ['sbfsem:ipl-method'],
   },
   {
     id: 'render', label: 'Render defaults',
@@ -288,6 +295,43 @@ export const EXPERT_RENDER_HELP = 'On: render settings are applied verbatim, eve
   + "technique's defaults, Voxel remesh, Hybrid, then Closed curve), the cell keeps the first that "
   + 'draws it until its annotations change, and a notice says what changed.';
 
+// -- how IPL depth is measured ------------------------------------------------------
+
+/** Where the IPL depth method is kept in this browser (nothing: the default). */
+export const IPL_METHOD_KEY = 'sbfsem:ipl-method';
+
+/** The methods, as the schema names them (`[value, label]`), and the viewer's default. */
+export const IPL_METHOD_CHOICES = FIELD_BY_KEY.ipl_method.choices;
+export const IPL_METHOD_DEFAULT = FIELD_BY_KEY.ipl_method.appDefault;
+
+/** The control's hover help: what each method measures, and what it changes. */
+export const IPL_METHOD_HELP = 'How a depth in the IPL is measured, for the Stratification tab and its '
+  + 'files, Color by IPL depth and Clip IPL.\n\n'
+  + 'Along the layers’ normals (the default): from the nearest point of the fitted INL surface and of '
+  + 'the GCL surface, so the depth is a distance from the INL and the IPL’s thickness is measured '
+  + 'square to the layers, wherever they tilt.\n\n'
+  + 'Straight along Z (MATLAB’s column): between the two surfaces’ heights above and below the point, '
+  + 'as SBFSEM-tools did before 2.31.0. A tilted IPL reads thicker this way by 1/cos(tilt); the '
+  + 'depth as a percent of the IPL moves by about 1 % or less for 95 % of points.';
+
+/** The IPL depth method kept in this browser, or the default (`store`: localStorage, or null). */
+export function iplMethod(store) {
+  let kept = null;
+  try { kept = store?.getItem(IPL_METHOD_KEY) ?? null; } catch { kept = null; }
+  return IPL_METHOD_CHOICES.some(([value]) => value === kept) ? kept : IPL_METHOD_DEFAULT;
+}
+
+/** Keep the IPL depth method (the default is kept as nothing); false when this browser will not keep it. */
+export function setIplMethod(store, method) {
+  try {
+    if (method === IPL_METHOD_DEFAULT) store.removeItem(IPL_METHOD_KEY);
+    else store.setItem(IPL_METHOD_KEY, method);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Whether expert render mode is on in this browser (`store`: localStorage, or null: off). */
 export function expertRender(store) {
   try { return store?.getItem(EXPERT_RENDER_KEY) === '1'; } catch { return false; }
@@ -455,10 +499,11 @@ export class SettingsPanel {
    * `{ loaded(source, cellId), select(source, cellId, locationId), load(source, cellId),
    * viking(source), openInViking(source, cellId, locationId), volumeName(source) }`.
    * `onRatioChange(ratio)`: the log's ratio was changed (the cell panels list by it too).
+   * `onIplMethodChange(method)`: the IPL depth method was switched (the page measures again).
    */
   constructor({
     root, api, assets, beforeReload = () => {}, stopSaving = () => {}, annotations = null, onRatioChange = null,
-    onExpertChange = null,
+    onExpertChange = null, onIplMethodChange = null,
   }) {
     this.root = root;
     this.api = api;
@@ -468,6 +513,7 @@ export class SettingsPanel {
     this.annotations = annotations;
     this.onRatioChange = onRatioChange;
     this.onExpertChange = onExpertChange;
+    this.onIplMethodChange = onIplMethodChange;
     this.built = false;
   }
 
@@ -530,13 +576,37 @@ export class SettingsPanel {
       onchange: () => this._expertChanged(),
     });
     this.expertStatus = el('p', { class: 'settings-text muted', role: 'status' });
+    this.iplSelect = el('select', { id: 'ipl-method', onchange: () => this._iplMethodChanged() },
+      IPL_METHOD_CHOICES.map(([value, label]) => el('option', {
+        value, text: value === IPL_METHOD_DEFAULT ? `${label} (default)` : label,
+      })));
+    this.iplSelect.value = iplMethod(store);
+    this.iplStatus = el('p', { class: 'settings-text muted', role: 'status' });
     this.root.append(el('section', { class: 'card' }, [
       el('h3', { text: 'Rendering' }),
       el('label', { class: 'settings-check', 'data-help': EXPERT_RENDER_HELP }, [
         this.expertBox, 'Enable expert render mode',
       ]),
       this.expertStatus,
+      el('label', { class: 'settings-field', 'data-help': IPL_METHOD_HELP }, [
+        'IPL depth measured ', this.iplSelect,
+      ]),
+      this.iplStatus,
     ]));
+  }
+
+  _iplMethodChanged() {
+    const method = this.iplSelect.value;
+    const kept = setIplMethod(browserStore('localStorage'), method);
+    this.iplStatus.textContent = kept ? ''
+      : 'This browser will not keep site data (a private window, or storage turned off): '
+        + 'the choice holds until the page is reloaded.';
+    this.onIplMethodChange?.(method);
+  }
+
+  /** The IPL depth method chosen: what this page uses even when the browser would not keep it. */
+  get iplMethod() {
+    return this.iplSelect ? this.iplSelect.value : iplMethod(browserStore('localStorage'));
   }
 
   _expertChanged() {

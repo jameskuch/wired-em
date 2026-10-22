@@ -773,6 +773,57 @@ several cells and switching keeps the view. What it draws, and how it differs:
   Neuron button (the list's ↻), the broken Table tab, and the off-edge delete
   that read the wrong tag.
 
+### 5.17 IPL depth along the layers' normals, and the IPL's thickness
+
+An addition, not a parity change (2.31.0, James Anderson's request of 2026-10-22).
+MATLAB measures IPL depth along a vertical column: `micron2ipl` evaluates both
+fitted surfaces at the point's own X/Y and returns `(z - INL(x,y)) / (GCL(x,y) -
+INL(x,y))` (§3.1 is the fix of its axis typo; the method is MATLAB's). Every
+library function that measures IPL depth now takes `method`: `"column"`, the
+default and MATLAB's, unchanged to the bit, or `"normal"`, which measures from the
+nearest point of each fitted surface, along that surface's normal
+(`IPLBoundaries.depth`, `BoundarySurface.nearest`):
+
+- the fraction is `d_inl / (d_inl + d_gcl)`, the depth from the INL `d_inl` µm,
+  and the IPL's thickness through the point `d_inl + d_gcl` µm. The column's
+  depth and thickness in µm are measured along Z, so a tilted IPL reads
+  1/cos(tilt) too thick that way;
+- both read the same fitted surfaces at the same heights (bilinear between the
+  200 × 200 nodes, as `xyEval`); only the direction differs. The slopes and
+  curvatures come from the bicubic spline through the nodes, and the nearest
+  point is a Newton solve started below the point (exact in one step on a plane;
+  against a 0.15 µm sampling of Inferior Monkey's INL, never farther, and within
+  1 nm at the median);
+- a point whose nearest point on a layer lies beyond that layer's fitted
+  rectangle has no normal depth (NaN, counted as outside the surfaces), where the
+  column, which looks straight down, may still have one. On the five marked
+  volumes, among columns with both layers' markers within 25 µm, that is 1 to 4 %
+  of points near the fits' edges; on 11 cells of four volumes, at most 15 of
+  10,518 annotations (RC2 c74420; the column 9).
+
+The library and the bare API keep the column (ground rule 1); the web app measures
+along the normals for every volume (the Stratification tab, its PDF and workbook,
+Color by IPL depth, Clip IPL and a clipped export), with the column one switch away
+in Settings. Measured (60 × 60 columns at five depths, both layers' markers within
+25 µm):
+
+| Volume | Depth fraction moved, % of the IPL (median / 95 % / most) | Thickness along Z over along the normal (median / most) | IPL along the normals, µm (median, 5 to 95 %) |
+|---|---|---|---|
+| RC1 | 0.02 / 0.13 / 0.38 | 1.001 / 1.017 | 15.6 (11.8 to 17.3) |
+| Nasal Monkey | 0.05 / 0.99 / 3.9 | 1.004 / 1.145 | 28.7 (24.3 to 30.1) |
+| Temporal Monkey | 0.08 / 0.89 / 1.5 | 1.016 / 1.071 | 23.8 (19.8 to 26.3) |
+| Inferior Monkey | 0.13 / 0.49 / 1.5 | 1.024 / 1.088 | 27.7 (22.6 to 30.4) |
+| RC2 | 0.21 / 1.09 / 3.6 | 1.023 / 1.153 | 42.1 (35.3 to 47.3) |
+
+On 11 cells' annotations (Inferior c1178, c16137, c21768; Temporal c118, c106;
+RC1 c606, c410, c476; RC2 c74420, c5597, c5624; stored positions), the median
+depth moved 0.0 to 0.2 % of the IPL and the 95th percentile of the shift was at
+most 0.8 %, except Inferior c21768 (3.3 %). A histogram's mode can move by a bin
+where two bins are nearly equal (Inferior c16137 in the app: 56.1 % along Z, 52.4 % along the normals).
+Cost: 0.13 s for 200,000 mesh vertices and 0.81 s for 1.5 million (the column
+0.04 and 0.30 s); a cell's annotations, under 15 ms. Cped, RPC1 and RPC2 have no
+boundary markers, so neither method measures there.
+
 ---
 
 ## 6. Changes that need a decision

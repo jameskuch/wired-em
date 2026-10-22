@@ -28,7 +28,8 @@ import { buildRenderForm } from './renderform.js';
 import {
   TECH_KNOBS, loadTechDefaults, storeTechDefaults, techKey, techniqueDefaults,
   curvePixelFor, CURVE_METHODS, curvePixelSeed, estimateBuildSeconds,
-  RENDER_PRESETS, RENDER_REQUIRES, matchPreset, presetOptions, knobSummary,
+  RENDER_PRESETS, RENDER_REQUIRES, matchPreset, presetOptions, knobSummary, withIplMethod,
+  drawsIplDepth,
 } from './renderoptions.js';
 import {
   EstimateCache, estimateChip, estimateQuery, fittedPixel, fitStillWanted, interim, mainReason,
@@ -58,6 +59,7 @@ import { NetworkView, SYNAPSE_COLORS } from './network.js';
 import { ConnectivityView } from './connectivity.js';
 import {
   SettingsPanel, pageAssets, savedRatio, expertRender, STALE_RELOAD_KEY, fromBrowserCache, staleStart,
+  iplMethod, IPL_METHOD_CHOICES,
 } from './settings.js';
 import { fillLinkedNeuronsCard, sortableHead, sortRows } from './linkedneurons.js';
 import { stratificationChart, barChart, STRATA_TICK_PCT } from './charts.js';
@@ -742,6 +744,7 @@ async function boot() {
     onRatioChange: () => renderNeuronList(),
     // The render panel's note on settings that will not build says what Apply will do.
     onExpertChange: () => updateMethodControls(),
+    onIplMethodChange: () => iplMethodChanged(),
   });
 
   try {
@@ -2801,6 +2804,38 @@ function isExpert() {
 }
 
 /**
+ * How IPL depth is measured (Settings): `normal`, along the layers' normals (the
+ * default), or `column`, straight along Z as MATLAB did.  One choice for the
+ * whole page: the Stratification tab, its files, Color by IPL depth, Clip IPL
+ * and a clipped export all measure the same way.
+ */
+function currentIplMethod() {
+  if (settings) return settings.iplMethod;
+  try { return iplMethod(window.localStorage); } catch { return iplMethod(null); }
+}
+
+/** The method's words, as the Settings tab names it. */
+function iplMethodWords(method = currentIplMethod()) {
+  return IPL_METHOD_CHOICES.find(([value]) => value === method)?.[1] ?? method;
+}
+
+/**
+ * The IPL depth method was switched: what it measured is measured again, the
+ * Stratification chart (now, or when its tab is next shown) and every cell
+ * drawn with Color by IPL depth or Clip IPL.
+ */
+async function iplMethodChanged() {
+  strataFor = null;
+  if (state.view === 'strata') drawStratification();
+  const depthDrawn = [...state.neurons.values()].filter((r) => drawsIplDepth(normalizeRender(r.render)));
+  for (const record of depthDrawn) await rebuildOne(record);
+  if (depthDrawn.length) {
+    statusEl.textContent = `IPL depth ${iplMethodWords()}: redrew ${describeCells(depthDrawn)}`;
+    statusEl.className = 'status';
+  }
+}
+
+/**
  * Build (or fetch from this tab's cache) a cell's surface and put it, its
  * extras and its styling on screen.  Answers `'drawn'`, `'failed'` (the error
  * is on screen) or `'skipped'` (the cell went, was loaded again, or a newer
@@ -2855,7 +2890,9 @@ async function addToScene(record, {
    */
   const obtain = async (asked) => {
     let opts = asked;
-    let cacheKey = meshCacheKey(record, effectiveSignature(opts));
+    // A surface cut or colored by IPL depth is the page's depth method's (never the cell's option).
+    const depthMethod = currentIplMethod();
+    let cacheKey = meshCacheKey(record, effectiveSignature(withIplMethod(opts, depthMethod)));
     let mesh = meshCache.get(cacheKey);
     if (!mesh && !verbatim && CURVE_METHODS.has(opts.method)) {
       // Held to the server's estimate before anything is built: a Voxel size too
@@ -2864,7 +2901,7 @@ async function addToScene(record, {
       if (await fitPixelFor(record, opts, current)) {
         if (!current()) return null;
         opts = normalizeRender(state.neurons.get(record.key).render);
-        cacheKey = meshCacheKey(record, effectiveSignature(opts));
+        cacheKey = meshCacheKey(record, effectiveSignature(withIplMethod(opts, depthMethod)));
         mesh = meshCache.get(cacheKey);
       }
       if (!current()) return null;
@@ -2872,7 +2909,7 @@ async function addToScene(record, {
     if (mesh) return { mesh, options: opts, fetched: false };
     waiting ??= showWaitingPoints(record, current, framing);
     progress?.stage('queued on the server');
-    mesh = await api.mesh(record.source, record.id, opts, {
+    mesh = await api.mesh(record.source, record.id, withIplMethod(opts, depthMethod), {
       alive: current,
       onSubmitted: askExtras,
       onStatus: progress ? (job) => progress.stage(stageText(job)) : undefined,
@@ -2995,14 +3032,14 @@ async function addToScene(record, {
     // came back empty and was then built (Temporal c162392, 2026-10-21: built, in
     // the scene, out of sight until Reset view).  A view that shows anything stays
     // where it is, so does one Held (Display), and a restore decides its own.
-    // A build that made no surface frames what it left shown (the cell's rings,
-    // nodes or skeleton) with the scene, and nothing when it left nothing: built
-    // empty, a cell loaded beside another stayed off screen with only those drawn,
-    // and Reset view's bounds leave rings out beside a surface.
-    if (record.visible && !restoring && !display?.holdLimits && renderer.seesAnything() === false) {
-      if (mesh.n_faces) renderer.resetView();
-      const framed = !!mesh.n_faces || renderer.frameCell(record.key);
-      if (framed && framing) {
+    // A build that made no surface is framed the same way on what it left shown
+    // (the cell's rings, nodes or skeleton, which Reset view's bounds hold), and
+    // nothing moves when it left nothing: built empty, a cell loaded beside another
+    // stayed off screen with only those drawn.
+    if (record.visible && !restoring && !display?.holdLimits && renderer.seesAnything() === false
+        && (mesh.n_faces || renderer.showsCell(record.key))) {
+      renderer.resetView();
+      if (framing) {
         framing.done = true;
         framing.camera = renderer.cameraState();
       }
@@ -6508,7 +6545,7 @@ function exportAnnoWire(record, fmt) {
 
 /** The options of the mesh on screen, so exports match it (see exportQuery). */
 function exportOptions(record) {
-  return exportQuery(record.render);
+  return exportQuery(record.render, currentIplMethod());
 }
 
 document.addEventListener('pointerdown', (event) => {
@@ -8079,6 +8116,7 @@ async function drawStratification({ cell = null } = {}) {
     num_bins: Number($('strata-bins').value),
     include_soma: $('strata-soma').checked,
     omit_outliers: $('strata-outliers').checked,
+    ipl_method: currentIplMethod(),
   };
   const series = [];
   const stats = [];
@@ -8107,6 +8145,52 @@ async function drawStratification({ cell = null } = {}) {
   strataDrawn = { series, records: stats.map((s) => s.record), opts };
   stratificationChart($('strata-chart'), series, { tickPct: strataTickPct() });
   renderStrataStats(stats);
+  showStrataMethod(records, opts.ipl_method, run);
+}
+
+/** Each volume's IPL thickness (GET /api/volumes/{source}/ipl-thickness), asked once per volume. */
+const iplThickness = new Map();
+
+/**
+ * Under the chart: how its depths were measured (the Settings tab's choice), and
+ * for each volume of the cells shown, how thick its IPL is along the layers'
+ * normals and along Z, and where it is thinnest.
+ */
+async function showStrataMethod(records, method, run) {
+  const note = $('strata-method');
+  if (!note) return;
+  const lines = [`IPL depth measured ${iplMethodWords(method)} (Settings).`];
+  const sources = [...new Set(records.map((r) => r.source))].filter((src) => volumeHasBoundary(src));
+  for (const source of sources) {
+    if (!iplThickness.has(source)) {
+      iplThickness.set(source, api.iplThickness(source).catch((error) => {
+        iplThickness.delete(source);
+        throw error;
+      }));
+    }
+  }
+  note.textContent = lines[0];
+  for (const source of sources) {
+    let t;
+    try { t = await iplThickness.get(source); } catch { continue; }
+    if (run !== strataRun) return;
+    lines.push(iplThicknessText(volumeLongName(source), t));
+  }
+  note.textContent = lines.join('\n');
+}
+
+/** One volume's IPL thickness in a line: the normals' median and range, Z's excess, the thinnest place. */
+function iplThicknessText(name, t) {
+  const n = t.normal_um;
+  if (n?.median == null) return `${name}: no column has a marker of each layer nearby.`;
+  const excess = (t.column_over_normal.median - 1) * 100;
+  const where = t.thinnest
+    ? `; thinnest ${t.thinnest.thickness_um.toFixed(1)} µm at X ${t.thinnest.x_um.toFixed(0)}, `
+      + `Y ${t.thinnest.y_um.toFixed(0)} µm` : '';
+  return `${name} IPL: ${n.median.toFixed(1)} µm thick along the normals (median; `
+    + `${n.p5.toFixed(1)} to ${n.p95.toFixed(1)} µm for 90 % of it${where}); `
+    + `along Z it reads ${excess.toFixed(1)} % thicker at the median, up to `
+    + `${((t.column_over_normal.max - 1) * 100).toFixed(0)} %.`;
 }
 
 // -- the Stratification chart's gridlines and its files ----------------------------------

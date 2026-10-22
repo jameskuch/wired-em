@@ -994,7 +994,8 @@ an export (OBJ, PLY, STL, GLB) takes the file and not the page's copy.
 **Color by IPL depth** shades each vertex by its stratification depth: blue at
 the INL border, red at the GCL border. **Clip IPL depth** cuts the mesh at a
 depth fraction, keeping the ON or OFF side. Both need the volume to have cached
-IPL boundary markers.
+IPL boundary markers, and both measure depth as Settings says (*IPL depth
+measured*): along the layers' normals unless it is switched to the column.
 
 ### Settings that will not build as set
 
@@ -3403,6 +3404,25 @@ IPL depth histograms for every visible neuron, overlaid. 0 is the INL/IPL border
 and 1 the IPL/GCL border; the shaded margins beyond them hold annotations outside
 the IPL.
 
+**How depth is measured** (since 2.31.0). Each annotation's depth is measured
+along the layers' normals: from the nearest point of the fitted INL surface and
+of the fitted GCL surface, so a depth is a distance from the INL and the IPL's
+thickness is measured square to the layers wherever they tilt. Before 2.31.0 it
+was measured straight along Z, as MATLAB does: between the two surfaces' heights
+above and below the annotation. No volume's layers are flat or parallel, and a
+tilted IPL reads 1/cos(tilt) too thick along Z (on the five volumes with markers,
+0.1 to 2.4 % at the median and up to 15 % in places); the depth as a percent of
+the IPL moves by about 1 % or less for 95 % of points, and a cell's median by
+0.2 % or less on the cells measured. *IPL depth measured* in Settings switches
+back to the column, for comparing with a figure made before; the line under the
+chart, the PDF and the workbook say which made their numbers. Under the
+statistics, the tab gives each shown volume's IPL thickness along the normals
+(the median, the range of 90 % of it and where it is thinnest) and how much
+thicker it reads along Z (`GET /api/volumes/{source}/ipl-thickness` has the
+whole map). An annotation whose nearest point on a layer lies past the edge of
+that layer's fit has no depth along the normal and counts as outside the
+surfaces.
+
 **Omit outliers** drops annotations more than 20% of IPL thickness outside the
 layer. Turn it off to see where a neuron actually sits — a cell whose entire
 profile is off-scale is usually outside the region where the boundary markers
@@ -3428,15 +3448,16 @@ settings:
   by cell (it says about how many pages; past 20,000 annotations it points to the
   workbook instead). The first page is the chart itself, drawn as vectors with its text
   kept as text, on a page the size of the figure (8 × 4.6 in) so it can go straight into
-  a figure, with one line under it: the bins, the soma, the outliers, the gridlines, the
-  version and when. The last choice is kept in this browser.
+  a figure, with one line under it: the bins, the soma, the outliers, the gridlines, how
+  depth was measured, the version and when. The last choice is kept in this browser.
 - **Data .xlsx** saves an Excel workbook. Its **Summary** sheet has a column pair per
   cell, each bin's center (percent of the IPL) and count, matched by bin number (each
   cell's bins span its own depths), then the statistics in percent (n, median, mean,
   SEM, the mode's bin center, outliers, outside the surfaces, soma left out), then the
   settings. A sheet per cell lists every annotation: Location ID, section, X, Y and Z
-  (µm), radius, IPL depth (%), and whether the chart counts it or why not (soma,
-  outside surfaces, outlier).
+  (µm), radius, IPL depth (%), its depth from the INL border and the IPL's thickness
+  through it (µm, measured the same way as the percent), and whether the chart counts
+  it or why not (soma, outside surfaces, outlier).
 
 ## Saving a workspace on the server
 
@@ -3623,7 +3644,11 @@ looks wrong rather than for the work itself.
 - **Rendering**: *Enable expert render mode* builds render settings as set, even when a
   cell cannot be built with them, and marks the settings to change; off (the default), a
   render that fails is built again with settings that work, which the cell keeps (*When a
-  render fails*). Kept in this browser; its hover says both.
+  render fails*). Kept in this browser; its hover says both. *IPL depth measured*: along
+  the layers' normals (the default) or straight along Z (MATLAB's column), for the
+  Stratification tab and its files, Color by IPL depth, Clip IPL and a clipped export
+  (*Stratification*). Switching it measures again at once: the chart, and every cell
+  colored or clipped by depth. Kept in this browser.
 - **Cached files**: *Clear cached files and reload* has the browser drop what it cached of
   the site (the page, its scripts and styles) and reloads. Your sessions, saved settings
   and sign-in stay, and the page comes back to this tab saying it was done.

@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import copy
+import functools
 import hashlib
 import itertools
 import logging
@@ -38,7 +39,7 @@ from pydantic import BaseModel, TypeAdapter
 from .. import progress
 from ..analysis import dendrite as dendrite_analysis
 from ..analysis import synapse as synapse_analysis
-from ..analysis.boundary import IPLBoundaries, load_ipl_boundaries
+from ..analysis.boundary import IPLBoundaries, load_ipl_boundaries, thickness_summary
 from ..analysis.correction_checks import DEFAULT_RATIO, FIT_MODES, PullScan, scan_neuron
 from ..analysis.stats import Stats
 from ..analysis.stratification import (
@@ -1004,7 +1005,7 @@ class SbfsemService:
         smooth = int(params.pop("smooth_iterations", 1))
         reduce = float(params.pop("reduce_fraction", 1.0))
         pixel = float(params.pop("pixel_size_um", 0.05))
-        for view in ("clip_z", "clip_ipl", "keep_above", "color_by_strata"):
+        for view in ("clip_z", "clip_ipl", "keep_above", "color_by_strata", "ipl_method"):
             params.pop(view, None)
         options = self._mesh_options(**params)
         key = self._grid_key(neuron, method, smooth, reduce, pixel, options)
@@ -2403,6 +2404,7 @@ class SbfsemService:
         clip_ipl: float | None = None,
         keep_above: bool = True,
         color_by_strata: bool = False,
+        ipl_method: str = "column",
         pathway: str = "original",
         post_order: str = "smooth_first",
         voxel_detail: float = 1.0,
@@ -2442,7 +2444,7 @@ class SbfsemService:
         """
         return self.render_buffers(
             neuron_id, source, neuron=neuron, clip_z=clip_z, clip_ipl=clip_ipl,
-            keep_above=keep_above, color_by_strata=color_by_strata,
+            keep_above=keep_above, color_by_strata=color_by_strata, ipl_method=ipl_method,
             method=method, smooth_iterations=smooth_iterations,
             reduce_fraction=reduce_fraction, pixel_size_um=pixel_size_um,
             pathway=pathway, post_order=post_order,
@@ -2471,6 +2473,7 @@ class SbfsemService:
         clip_ipl: float | None = None,
         keep_above: bool = True,
         color_by_strata: bool = False,
+        ipl_method: str = "column",
         **options: Any,
     ) -> MeshBuffers:
         """:meth:`render_mesh`'s render as its arrays (:class:`MeshBuffers`): the
@@ -2481,7 +2484,9 @@ class SbfsemService:
         :meth:`render_mesh`'s render options, an unknown one refused
         (:meth:`mesh_for`).  The cached mesh is read and never changed: a cut or a
         coloring makes a new mesh over its arrays, where :meth:`render_mesh` once
-        copied the whole surface first.
+        copied the whole surface first.  ``ipl_method`` is how the IPL clip and
+        coloring measure depth: ``"column"`` (MATLAB's) or ``"normal"``
+        (:meth:`~sbfsem.analysis.boundary.IPLBoundaries.depth`).
         """
         if neuron is None:
             neuron = self.neuron(neuron_id, source)
@@ -2491,14 +2496,15 @@ class SbfsemService:
             mesh = clip_mesh(mesh, clip_z, keep_above=keep_above)
         if clip_ipl is not None:
             mesh = clip_mesh_by_stratification(
-                mesh, self.boundaries(neuron.source), clip_ipl, keep_above=keep_above
+                mesh, self.boundaries(neuron.source), clip_ipl, keep_above=keep_above,
+                method=ipl_method,
             )
         colored = color_by_strata and not mesh.is_empty
         if cut or colored:
             # A cut surface is not the cached render its id names (and a clip that
             # removes nothing hands back the cached mesh itself).
             meta = {key: value for key, value in mesh.meta.items() if not (cut and key == "mesh_id")}
-            vertex_data = (self.boundaries(neuron.source).strata_cdata(mesh.vertices)
+            vertex_data = (self.boundaries(neuron.source).strata_cdata(mesh.vertices, method=ipl_method)
                            if colored else mesh.vertex_data)
             mesh = Mesh(mesh.vertices, mesh.faces, vertex_data, meta)
         return self.mesh_buffers(f"c{neuron.id}", mesh)
@@ -3156,10 +3162,11 @@ class SbfsemService:
         clip_z: float | None = None,
         clip_ipl: float | None = None,
         keep_above: bool = True,
+        ipl_method: str = "column",
     ) -> Mesh:
         """``mesh`` cut the way :meth:`render_mesh` cuts a render, for an export
         of a render that is clipped on screen (``clip_z`` along Z, then
-        ``clip_ipl`` by stratification depth).
+        ``clip_ipl`` by stratification depth, measured by ``ipl_method``).
 
         The mesh handed in is the cached one and is never changed; with no clip
         it comes back as it is.  Raises :class:`ValueError` for ``clip_ipl`` in a
@@ -3169,7 +3176,7 @@ class SbfsemService:
             mesh = clip_mesh(mesh, clip_z, keep_above=keep_above)
         if clip_ipl is not None:
             mesh = clip_mesh_by_stratification(
-                mesh, self.boundaries(source), clip_ipl, keep_above=keep_above
+                mesh, self.boundaries(source), clip_ipl, keep_above=keep_above, method=ipl_method
             )
         return mesh
 
@@ -3873,32 +3880,47 @@ class SbfsemService:
             trim_memory()
         return result
 
-    def stratification(self, neuron_id: int, source, **kwargs) -> StratificationDTO:
+    def stratification(self, neuron_id: int, source, *, ipl_method: str = "column",
+                       **kwargs) -> StratificationDTO:
+        """The cell's stratification (:func:`ipl_depth`), its depth measured by
+        ``ipl_method``: ``"column"`` (MATLAB's) or ``"normal"``."""
         neuron = self.neuron(neuron_id, source)
-        result = ipl_depth(neuron, boundaries=self.boundaries(neuron.source), **kwargs)
+        result = ipl_depth(neuron, boundaries=self.boundaries(neuron.source), method=ipl_method, **kwargs)
         return self._stratification_dto(neuron, result, neuron.label)
 
     def stratification_tables(self, neuron_id: int, source, *, num_bins: int = 20,
                               include_soma: bool = True, omit_outliers: bool = True,
-                              ipl_margin: float = 0.2) -> tuple[StratificationResult, pd.DataFrame]:
+                              ipl_margin: float = 0.2,
+                              ipl_method: str = "column") -> tuple[StratificationResult, pd.DataFrame]:
         """What the Stratification tab draws for this copy of the cell (its
         histogram, as :meth:`stratification`) and every annotation's depth with
         whether the histogram counts it, for the tab's PDF and Excel exports."""
         neuron = self.neuron(neuron_id, source)
         boundaries = self.boundaries(neuron.source)
         result = ipl_depth(neuron, boundaries=boundaries, num_bins=num_bins, include_soma=include_soma,
-                           omit_outliers=omit_outliers, ipl_margin=ipl_margin)
+                           omit_outliers=omit_outliers, ipl_margin=ipl_margin, method=ipl_method)
         return result, annotation_depths(neuron, boundaries=boundaries, include_soma=include_soma,
-                                         omit_outliers=omit_outliers, ipl_margin=ipl_margin)
+                                         omit_outliers=omit_outliers, ipl_margin=ipl_margin,
+                                         method=ipl_method)
 
     def synapse_stratification(
-        self, neuron_id: int, source, synapse_type: str, **kwargs
+        self, neuron_id: int, source, synapse_type: str, *, ipl_method: str = "column", **kwargs
     ) -> StratificationDTO:
         neuron = self.neuron(neuron_id, source)
         result = synapse_stratification(
-            neuron, synapse_type, boundaries=self.boundaries(neuron.source), **kwargs
+            neuron, synapse_type, boundaries=self.boundaries(neuron.source), method=ipl_method, **kwargs
         )
         return self._stratification_dto(neuron, result, synapse_type)
+
+    def ipl_thickness(self, source, *, grid: int = 60, near_um: float = 25.0) -> dict:
+        """How thick the volume's IPL is along the layers' normals, and along Z
+        (:func:`~sbfsem.analysis.boundary.thickness_summary`).  Raises
+        :class:`ValueError` for a volume with no boundary markers."""
+        volume = Volumes.from_str(source)
+        if not volume.has_boundary:
+            raise ValueError(f"{volume.source} has no IPL boundary markers")
+        self.boundaries(volume.source)  # fitted (and the arenas released) once
+        return _thickness_summary_cached(volume.source, int(grid), float(near_um))
 
     @staticmethod
     def _stratification_dto(neuron, result, label: str) -> StratificationDTO:
@@ -3912,6 +3934,7 @@ class SbfsemService:
             mode=result.mode,
             n_omitted_nan=result.n_omitted_nan,
             n_omitted_outlier=result.n_omitted_outlier,
+            method=result.meta.get("method", "column"),
         )
 
     def dendritic_field_hull(self, neuron_id: int, source) -> HullDTO:
@@ -4573,6 +4596,12 @@ class _ReportSource:
             by_copy[id(neuron)] = entry
             out.append(entry)
         return out
+
+
+@functools.lru_cache(maxsize=32)
+def _thickness_summary_cached(source: str, grid: int, near_um: float) -> dict:
+    """A volume's IPL thickness summary: the surfaces never change in a process."""
+    return thickness_summary(load_ipl_boundaries(source), grid=grid, near_um=near_um)
 
 
 def registration_quality(neuron: Neuron) -> dict:

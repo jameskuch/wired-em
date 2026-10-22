@@ -281,6 +281,17 @@ test('the clip an export link carries is named as the schema names its view fiel
   assert.ok(!('color_by_strata' in query));
 });
 
+test('a clipped export measures its depth as the page does, and an unclipped one says nothing of it', () => {
+  const clipped = asked({ clip_ipl: 0.5, keep_above: true }, 'obj');
+  assert.ok(!clipped.has('ipl_method'), 'without the page\'s method the server\'s default stands');
+  const query = X.exportQuery({ clip_ipl: 0.5, keep_above: true, color_by_strata: true }, 'normal');
+  assert.deepEqual(Object.keys(query).filter((k) => ['clip_ipl', 'keep_above', 'ipl_method'].includes(k)).sort(),
+    ['clip_ipl', 'ipl_method', 'keep_above']);
+  assert.equal(query.ipl_method, 'normal');
+  assert.ok(!('ipl_method' in X.exportQuery({ color_by_strata: true }, 'normal')), 'coloring is not exported');
+  assert.equal(X.exportQuery({ clip_ipl: 0 }, 'column').ipl_method, 'column', '0 is the INL border, a clip');
+});
+
 test('fileSize', () => {
   assert.equal(X.fileSize(3_200_000), '3.2 MB');
   assert.equal(X.fileSize(840 * 1024), '840 kB');

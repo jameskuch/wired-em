@@ -807,6 +807,8 @@ export const api = {
     getJSON(`/api/neurons/${source}/${id}/synapses/${encodeURIComponent(type)}/mesh`
       + q({ radius_um: opts.radius_um ?? 0.5, shape: opts.shape ?? 'circle' })),
 
+  /** How thick a volume's IPL is, along the layers' normals and along Z, and where it thins. */
+  iplThickness: (source) => getJSON(`/api/volumes/${source}/ipl-thickness`, 'IPL thickness…'),
   stratification: (source, id, opts = {}) =>
     getJSON(`/api/neurons/${source}/${id}/stratification${q(opts)}`, 'stratification…'),
   synapseStratification: (source, id, type, opts = {}) =>

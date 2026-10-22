@@ -678,6 +678,8 @@ class StratificationDTO(BaseModel):
     mode: float | None = None
     n_omitted_nan: int = 0
     n_omitted_outlier: int = 0
+    #: How the depths were measured: ``column`` (along Z, MATLAB's) or ``normal``.
+    method: str = "column"
 
     @field_validator("mode", mode="before")
     @classmethod
