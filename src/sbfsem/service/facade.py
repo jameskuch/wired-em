@@ -41,7 +41,12 @@ from ..analysis import synapse as synapse_analysis
 from ..analysis.boundary import IPLBoundaries, load_ipl_boundaries
 from ..analysis.correction_checks import DEFAULT_RATIO, FIT_MODES, PullScan, scan_neuron
 from ..analysis.stats import Stats
-from ..analysis.stratification import ipl_depth, synapse_stratification
+from ..analysis.stratification import (
+    StratificationResult,
+    annotation_depths,
+    ipl_depth,
+    synapse_stratification,
+)
 from ..core.moves import ManualMove, moved_copy, moves_token, normalize_moves
 from ..core.structure import Neuron
 from ..core.transforms import Transforms, viking2micron
@@ -3853,6 +3858,19 @@ class SbfsemService:
         neuron = self.neuron(neuron_id, source)
         result = ipl_depth(neuron, boundaries=self.boundaries(neuron.source), **kwargs)
         return self._stratification_dto(neuron, result, neuron.label)
+
+    def stratification_tables(self, neuron_id: int, source, *, num_bins: int = 20,
+                              include_soma: bool = True, omit_outliers: bool = True,
+                              ipl_margin: float = 0.2) -> tuple[StratificationResult, pd.DataFrame]:
+        """What the Stratification tab draws for this copy of the cell (its
+        histogram, as :meth:`stratification`) and every annotation's depth with
+        whether the histogram counts it, for the tab's PDF and Excel exports."""
+        neuron = self.neuron(neuron_id, source)
+        boundaries = self.boundaries(neuron.source)
+        result = ipl_depth(neuron, boundaries=boundaries, num_bins=num_bins, include_soma=include_soma,
+                           omit_outliers=omit_outliers, ipl_margin=ipl_margin)
+        return result, annotation_depths(neuron, boundaries=boundaries, include_soma=include_soma,
+                                         omit_outliers=omit_outliers, ipl_margin=ipl_margin)
 
     def synapse_stratification(
         self, neuron_id: int, source, synapse_type: str, **kwargs

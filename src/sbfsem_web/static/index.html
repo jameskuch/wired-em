@@ -663,6 +663,9 @@ Opening the editor changes nothing on screen; each edit previews on the depth-co
           <label class="check"><input type="checkbox" id="strata-soma" checked> Include soma</label>
           <label class="check"><input type="checkbox" id="strata-outliers" checked> Omit outliers</label>
           <button id="strata-refresh">Compute</button>
+          <label class="field" data-help="Where the gridlines and labels of the IPL depth axis go: from the INL (0 %) to the GCL (100 %), every this many percent. Redraws at once; kept in this browser. 20 by default.">Ticks every <input id="strata-ticks" type="number" min="1" max="100" step="any" value="20"> %</label>
+          <button id="strata-pdf" type="button" title="The chart as a vector PDF, with its data on the pages after it if you like">PDF…</button>
+          <button id="strata-xlsx" type="button" title="The chart's data as an Excel workbook: a Summary sheet with a column per cell, and a sheet per cell with every annotation's depth">Data .xlsx</button>
         </div>
         <div id="strata-stats" class="stats-grid"></div>
       </div>
@@ -755,6 +758,23 @@ Opening the editor changes nothing on screen; each edit previews on the depth-co
 
 <dialog id="compare-registrations-dialog" class="dlg dlg-registrations" aria-label="Registrations">
   <form method="dialog" class="dlg-body"></form>
+</dialog>
+
+<dialog id="strata-pdf-dialog" class="dlg" aria-label="Stratification PDF">
+  <form method="dialog" class="dlg-body">
+    <h2>Stratification as PDF</h2>
+    <p class="dlg-note">The first page is the chart as drawn, as vectors, on a page the size of
+      the figure, with a line under it saying how it was made. Include the data on the pages after it?</p>
+    <label class="check"><input type="checkbox" id="strata-pdf-stats" checked>
+      The statistics and each cell's binned counts <span class="muted" id="strata-pdf-stats-pages"></span></label>
+    <label class="check"><input type="checkbox" id="strata-pdf-annotations">
+      Every annotation's depth, cell by cell <span class="muted" id="strata-pdf-annotation-pages"></span></label>
+    <p class="dlg-error" id="strata-pdf-error" hidden></p>
+    <div class="dlg-actions">
+      <button type="button" data-dialog-cancel>Cancel</button>
+      <button id="strata-pdf-create" type="button" class="primary">Create PDF</button>
+    </div>
+  </form>
 </dialog>
 
 <dialog id="video-dialog" class="dlg">

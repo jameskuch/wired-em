@@ -91,3 +91,31 @@ def test_result_serialises(c943, flat):
     payload = ipl_depth(c943, boundaries=flat).as_dict()
     assert set(payload) >= {"depth", "counts", "centers", "edges", "stats", "mode"}
     assert isinstance(payload["counts"], list)
+
+
+@pytest.mark.parametrize("include_soma", [True, False])
+@pytest.mark.parametrize("omit_outliers", [True, False])
+def test_each_annotations_depth_is_what_ipl_depth_counts(c943, flat, include_soma, omit_outliers):
+    """The Stratification tab's export lists every annotation with its depth and
+    whether the chart counts it: the counted ones must be ipl_depth's, in order."""
+    from sbfsem.analysis.stratification import annotation_depths
+
+    kw = {"include_soma": include_soma, "omit_outliers": omit_outliers, "ipl_margin": 0.0}
+    result = ipl_depth(c943, boundaries=flat, **kw)
+    table = annotation_depths(c943, boundaries=flat, **kw)
+    nodes = c943.get_cell_nodes()
+    assert len(table) == len(nodes)
+    assert table["location_id"].tolist() == nodes["ID"].astype(int).tolist()
+    np.testing.assert_allclose(table.loc[table["counted"], "ipl_depth"].to_numpy(), result.depth)
+    assert (table["left_out"] == "outlier").sum() == result.n_omitted_outlier
+    assert (table["left_out"] == "outside surfaces").sum() == result.n_omitted_nan
+    assert ((table["left_out"] == "soma").sum() > 0) == (not include_soma)
+    assert set(table.loc[~table["counted"], "left_out"]) <= {"soma", "outlier", "outside surfaces"}
+
+
+def test_each_annotations_depth_outside_the_surfaces_is_left_out(c943):
+    from sbfsem.analysis.boundary import load_ipl_boundaries
+    from sbfsem.analysis.stratification import annotation_depths
+
+    table = annotation_depths(c943, boundaries=load_ipl_boundaries("i"))
+    assert not table["counted"].any()

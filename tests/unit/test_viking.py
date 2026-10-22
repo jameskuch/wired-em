@@ -1174,6 +1174,9 @@ def test_every_route_with_a_body_is_gated_by_the_guard_or_by_itself(signed_in):
         # only what a route decides for itself is the same on every spelling.
         *VOLUME_IN_BODY,
         ("POST", "/api/neurons/freshness"),
+        # The route checks each cell's volume (several in one body).
+        ("POST", "/api/stratification/export.pdf"),
+        ("POST", "/api/stratification/export.xlsx"),
         # The route checks, once the uploaded file says which volume it holds.
         ("POST", "/api/neurons/import"),
         # No volume: shared documents, shared libraries, and a job already started.
@@ -1214,6 +1217,30 @@ def test_a_body_that_names_a_volume_is_refused_however_it_is_spelled(signed_in, 
                     assert response.status_code == 403, f"{where} -> {response.status_code}"
                     assert "no access to" in response.json()["detail"], where
     assert reached == [], "a route ran for a volume the account was not granted"
+
+
+def test_a_stratification_export_is_refused_for_a_volume_not_granted(signed_in, monkeypatch):
+    """The export's body carries a volume per cell: one the account may not open is a
+    403 in every spelling of JSON, with a granted volume beside it or in the query
+    string, and the cells are never read; granted ones alone get through."""
+    client, app, _ = signed_in
+    reached = []
+    monkeypatch.setattr(app.state.service, "stratification_tables",
+                        lambda *a, **kw: reached.append(a) or (_ for _ in ()).throw(ValueError("stop")))
+    for path in ("/api/stratification/export.pdf", "/api/stratification/export.xlsx"):
+        for content_type in JSON_SPELLINGS[:-1]:
+            for ungranted in ("i", "RC2", "Inferior Monkey"):
+                for cells in ([{"source": ungranted, "id": 1178}],
+                              [{"source": "RC1", "id": 476}, {"source": ungranted, "id": 1178}]):
+                    reached.clear()
+                    response = _post_body(client, path + "?source=RC1", {"cells": cells}, content_type)
+                    where = f"POST {path} as {content_type!r} naming {ungranted!r}"
+                    assert response.status_code == 403, f"{where} -> {response.status_code}"
+                    assert "no access to" in response.json()["detail"], where
+                    assert reached == [], where
+            reached.clear()
+            granted = _post_body(client, path, {"cells": [{"source": "RC1", "id": 476}]}, content_type)
+            assert granted.status_code == 400 and len(reached) == 1, f"POST {path} as {content_type!r}"
 
 
 def test_a_body_that_names_a_granted_volume_still_gets_through(signed_in, monkeypatch):

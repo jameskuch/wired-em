@@ -507,6 +507,8 @@ kbd {
    of the bar, on whichever row the wrap leaves it. */
 #view-render .viewport-tools > #fullscreen-btn { margin-left: auto; }
 .viewport-tools .field, .table-tools .field { margin: 0; }
+/* The Stratification tab's number boxes (Bins, Ticks every): as wide as their numbers. */
+#view-strata .field input[type="number"] { width: 64px; min-width: 0; flex: none; }
 .tool-divider {
   width: 1px; align-self: stretch; margin: 0 2px;
   background: var(--line);

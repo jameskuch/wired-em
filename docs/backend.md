@@ -1063,7 +1063,17 @@ depth = boundaries.micron2ipl(c.get_cell_xyz())   # 0 at INL, 1 at GCL
 
 profile = ipl_depth(c, boundaries=boundaries, num_bins=20)
 profile.stats.median, profile.mode, profile.n_omitted_outlier
+
+# Every annotation, with its depth and whether ipl_depth counts it (and why not:
+# "soma", "outside surfaces", "outlier"); the counted depths are profile.depth.
+from sbfsem.analysis.stratification import annotation_depths
+table = annotation_depths(c, boundaries=boundaries)
 ```
+
+`sbfsem.export.stratification` writes the Stratification tab's files from these:
+`stratification_pdf` (the chart as vectors, then optional data pages) and
+`stratification_xlsx` (a Summary sheet and a sheet per cell); `ipl_ticks` and
+`labeled_ticks` are the axis rule `charts.js` uses (`iplTicks`, `labeledTicks`).
 
 NaN means the point falls outside the fitted surfaces, or the two surfaces
 coincide there. It is not silently filled in.

@@ -15,7 +15,9 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const jsDir = process.env.SBFSEM_JS_DIR
   || path.join(here, '..', '..', 'src', 'sbfsem_web', 'static', 'js');
-const { barLayout, niceTicks } = await import(pathToFileURL(path.join(jsDir, 'charts.js')).href);
+const {
+  barLayout, niceTicks, iplTicks, labeledTicks, STRATA_TICK_PCT,
+} = await import(pathToFileURL(path.join(jsDir, 'charts.js')).href);
 
 const cases = [];
 const test = (name, fn) => cases.push([name, fn]);
@@ -88,6 +90,30 @@ test('nothing to draw is an empty layout, not an error', () => {
   assert.deepEqual(layout([]).bars, []);
   assert.deepEqual(layout([{ distance: 2.5, mean: null }]).bars, []);
   assert.deepEqual(layout([{ distance: 2.5, mean: NaN }]).bars, []);
+});
+
+test('the stratification axis: INL, every step, GCL; 20 by default', () => {
+  assert.equal(STRATA_TICK_PCT, 20);
+  assert.deepEqual(iplTicks(), [[0, 'INL'], [0.2, '20'], [0.4, '40'], [0.6, '60'], [0.8, '80'], [1, 'GCL']]);
+  assert.deepEqual(iplTicks(25).map(([, l]) => l), ['INL', '25', '50', '75', 'GCL']);
+  assert.deepEqual(iplTicks(30).map(([, l]) => l), ['INL', '30', '60', '90', 'GCL']);
+  assert.deepEqual(iplTicks(12.5).slice(0, 3), [[0, 'INL'], [0.125, '12.5'], [0.25, '25']]);
+  assert.deepEqual(iplTicks(100), [[0, 'INL'], [1, 'GCL']]);
+  assert.deepEqual(iplTicks('nonsense'), iplTicks(20));
+  // 0.1 added ten times is not 1; the labels are the multiples, not a running sum.
+  assert.ok(iplTicks(1).every(([v, l], i) => i === 0 || i === 100 || l === String(i)));
+});
+
+test('labels are thinned when gridlines crowd, and none crowds the GCL', () => {
+  const ticks = iplTicks(20);
+  assert.deepEqual(labeledTicks(ticks, 86), [0, 1, 2, 3, 4, 5]);
+  const fine = iplTicks(2);                       // 51 lines, 8.6 px apart on a 650 px axis
+  const shown = labeledTicks(fine, 8.6);
+  assert.equal(shown[0], 0);
+  assert.equal(shown.at(-1), fine.length - 1);
+  for (let i = 1; i < shown.length; i += 1) assert.ok((shown[i] - shown[i - 1]) * 8.6 >= 26 - 1e-9);
+  // 30 % steps: 90 is 10 % from the GCL; at 43 px a step, 14 px apart, so 90 goes unlabeled.
+  assert.deepEqual(labeledTicks(iplTicks(30), 43).map((i) => iplTicks(30)[i][1]), ['INL', '30', '60', 'GCL']);
 });
 
 test('niceTicks', () => {

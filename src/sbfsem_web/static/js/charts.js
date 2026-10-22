@@ -10,13 +10,55 @@ const el = (name, attrs = {}, text) => {
   return node;
 };
 
+/** The Stratification chart's default gridline step, percent of the IPL (Andrea, 2026-10-21: 20, not 25). */
+export const STRATA_TICK_PCT = 20;
+
+/**
+ * The x axis' gridlines as `[fraction, label]`: the INL at 0, every `stepPct`
+ * percent up to the GCL at 100, which is always one (a step that does not
+ * divide 100 ends with a shorter interval).  The PDF draws the same
+ * (`sbfsem.export.stratification.ipl_ticks`).
+ */
+export function iplTicks(stepPct = STRATA_TICK_PCT) {
+  const step = Number(stepPct);
+  const s = Number.isFinite(step) && step > 0 ? step : STRATA_TICK_PCT;
+  const ticks = [[0, 'INL']];
+  for (let k = 1; k * s < 100 - 1e-9; k += 1) {
+    const value = Number((k * s).toPrecision(12));
+    ticks.push([value / 100, String(value)]);
+  }
+  ticks.push([1, 'GCL']);
+  return ticks;
+}
+
+/**
+ * Which gridlines get a label when they are `gap` pixels apart: every one when
+ * there is room (`minGap`), else every k-th counted from the INL, and never one
+ * crowding the GCL's.  Answers the indices to label.
+ */
+export function labeledTicks(ticks, gap, minGap = 26) {
+  const every = gap >= minGap ? 1 : Math.ceil(minGap / Math.max(gap, 1e-6));
+  const last = ticks.length - 1;
+  const out = [];
+  for (let i = 0; i <= last; i += 1) {
+    if (i === 0 || i === last) out.push(i);
+    else if (i % every === 0 && (ticks[last][0] - ticks[i][0]) * (gap / (ticks[1][0] - ticks[0][0])) >= minGap) {
+      out.push(i);
+    }
+  }
+  return out;
+}
+
 /**
  * Stratification profile: annotation counts against IPL depth.
  * 0 is the INL/IPL border and 1 the IPL/GCL border, so the shaded margins
  * outside [0, 1] are annotations beyond the IPL, exactly as the MATLAB
- * iplDepth plot shaded them.
+ * iplDepth plot shaded them.  Gridlines run from the INL to the GCL every
+ * `tickPct` percent (iplTicks).
  */
-export function stratificationChart(container, series, { width = 720, height = 340 } = {}) {
+export function stratificationChart(container, series, {
+  width = 720, height = 340, tickPct = STRATA_TICK_PCT,
+} = {}) {
   container.replaceChildren();
   const usable = series.filter((s) => s.centers.length);
   if (!usable.length) {
@@ -66,16 +108,19 @@ export function stratificationChart(container, series, { width = 720, height = 3
     stroke: 'currentColor', opacity: 0.35,
   }));
 
-  for (const [value, label] of [[0, 'INL'], [0.25, '25'], [0.5, '50'], [0.75, '75'], [1, 'GCL']]) {
+  const ticks = iplTicks(tickPct);
+  const labeled = new Set(labeledTicks(ticks, sx(ticks[1][0]) - sx(ticks[0][0])));
+  ticks.forEach(([value, label], i) => {
     svg.append(el('line', {
       x1: sx(value), y1: m.top, x2: sx(value), y2: m.top + h,
       stroke: 'currentColor', opacity: 0.12, 'stroke-dasharray': '3 3',
     }));
+    if (!labeled.has(i)) return;
     svg.append(el('text', {
       x: sx(value), y: m.top + h + 18, 'text-anchor': 'middle',
       'font-size': 11, fill: 'currentColor', opacity: 0.75,
     }, label));
-  }
+  });
   for (const value of [0, y1 / 2, y1]) {
     svg.append(el('text', {
       x: m.left - 8, y: sy(value) + 4, 'text-anchor': 'end',

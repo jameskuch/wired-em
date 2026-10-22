@@ -529,6 +529,21 @@ const postJSON = (path, body, label) => request(path, {
   body: JSON.stringify(body),
 }, label).then((r) => r.json());
 
+/**
+ * POST `body` as JSON and save the file the server answers, named as its
+ * Content-Disposition says (else `fallback`); rejects with the server's reason.
+ */
+async function postDownload(path, body, fallback, label = '') {
+  const response = await request(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }, label || `preparing ${fallback}…`);
+  const blob = await response.blob();
+  const named = /filename="([^"]+)"/.exec(response.headers.get('Content-Disposition') || '');
+  const filename = named ? named[1] : fallback;
+  saveBlob(blob, filename);
+  return { filename, bytes: blob.size };
+}
+
 export const api = {
   health: () => getJSON('/api/health'),
 
@@ -839,6 +854,9 @@ export const api = {
     withCopy(`/api/neurons/${source}/${id}/export/${fmt}${q(opts)}`),
   /** Fetch a file by its URL and save it (see downloadFile); rejects with the server's reason. */
   download: downloadFile,
+  /** The Stratification chart as `pdf` or its data as `xlsx` (routes.StrataExportBody), saved. */
+  stratificationExport: (format, body) => postDownload(`/api/stratification/export.${format}`, body,
+    `stratification.${format}`, format === 'pdf' ? 'drawing the PDF…' : 'writing the workbook…'),
   /** The annotation wireframe as a file; `params` are the ones it is drawn with. */
   annotationWireExportUrl: (source, id, fmt, params = {}) =>
     withCopy(`/api/neurons/${source}/${id}/annotation-wire/export/${fmt}${q(params)}`),

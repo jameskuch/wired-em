@@ -158,6 +158,8 @@ web process grows by 97 MB for 0.5 s for 1.70 M triangles and 263 MB for
 |---|---|
 | GET | `/api/neurons/{source}/{id}/stratification?num_bins=&include_soma=&omit_outliers=&ipl_margin=` |
 | GET | `/api/neurons/{source}/{id}/synapse-stratification/{type}?num_bins=` |
+| POST | `/api/stratification/export.pdf` — the Stratification chart as a vector PDF. Body `{cells: [{source, id, copy_tag?, label?, color?}], num_bins, include_soma, omit_outliers, ipl_margin, tick_pct, statistics, annotations}` (1 to 50 cells; `color` `#rrggbb`; `tick_pct` 1 to 100, 20 by default). Page 1 is the chart (8 × 4.6 in) and a settings line; `statistics` adds the statistics and binned counts, `annotations` every annotation's depth (at most 20,000 rows: 400 past it). 404 for a cell not loaded, 403 for a volume the account may not open |
+| POST | `/api/stratification/export.xlsx` — the same chart's data as an Excel workbook (the same body; `statistics` and `annotations` are not read): a Summary sheet (a center and count column per cell by bin number, the statistics in percent, the settings) and a sheet per cell with every annotation's Location ID, section, X/Y/Z, radius, IPL depth (%), and whether it is counted or why not |
 | GET | `/api/neurons/{source}/{id}/hull` |
 | GET | `/api/neurons/{source}/{id}/morphometrics` — cable length (3-D and in-plane, total and dendritic), longest path from the soma, branch points, tips, fragments, extent; `?soma_fraction=0.8` |
 | GET | `/api/neurons/{source}/{id}/ie-ratio` — `ratio`, `inhibitory_fraction`, `n_excitatory`, `n_inhibitory`, and of those `n_inferred` (typed from the linked partner) and `n_assumed`; `n_untagged` postsynapses are in neither count |

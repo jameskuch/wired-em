@@ -1713,6 +1713,91 @@ def stratification(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+class StrataExportCell(BaseModel):
+    """One cell of a Stratification export: which copy, and how the chart names and colors it."""
+
+    source: str
+    id: int = Field(gt=0, le=MAX_CELL_ID)
+    copy_tag: str | None = Field(None, max_length=200)
+    label: str = Field("", max_length=120)
+    color: str = Field("#4c78a8", pattern=r"^#[0-9a-fA-F]{6}$")
+
+
+class StrataExportBody(BaseModel):
+    """The Stratification tab's chart as the page draws it: its cells and settings."""
+
+    cells: list[StrataExportCell] = Field(min_length=1, max_length=50)
+    num_bins: int = Field(20, ge=2, le=200)
+    include_soma: bool = True
+    omit_outliers: bool = True
+    ipl_margin: float = Field(0.2, ge=0.0, le=1.0)
+    tick_pct: float = Field(20.0, ge=1.0, le=100.0)
+    #: The PDF only: the statistics and binned counts, and each annotation's depth, on the pages after the chart.
+    statistics: bool = True
+    annotations: bool = False
+
+
+def _strata_export(request: Request, body: StrataExportBody):
+    """The cells and settings of a Stratification export, read from the copies the page names."""
+    from sbfsem import __version__
+    from sbfsem.core.volumes import Volumes
+    from sbfsem.export.stratification import StrataCell, StrataSettings
+
+    svc = service(request)
+    # Every volume first: a body naming one the account may not open reads nothing.
+    sources = [_source(cell.source) for cell in body.cells]
+    for src in dict.fromkeys(sources):
+        _require_volume(request, src)
+    cells = []
+    for cell, src in zip(body.cells, sources, strict=True):
+        with requested_copy(cell.copy_tag):
+            try:
+                result, table = svc.stratification_tables(
+                    cell.id, src, num_bins=body.num_bins, include_soma=body.include_soma,
+                    omit_outliers=body.omit_outliers, ipl_margin=body.ipl_margin)
+            except NeuronNotLoadedError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            except (ValueError, FileNotFoundError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        cells.append(StrataCell(name=f"c{cell.id}", label=cell.label or f"c{cell.id}",
+                                volume=Volumes.from_str(src).display_name, color=cell.color,
+                                result=result, annotations=table))
+    settings = StrataSettings(num_bins=body.num_bins, include_soma=body.include_soma,
+                              omit_outliers=body.omit_outliers, ipl_margin=body.ipl_margin,
+                              tick_pct=body.tick_pct, version=__version__, made=datetime.now(UTC))
+    names = "-".join(c.name for c in cells[:4]) + ("-and-more" if len(cells) > 4 else "")
+    return cells, settings, f"stratification-{names}"
+
+
+@router.post("/stratification/export.pdf")
+def stratification_export_pdf(request: Request, body: StrataExportBody):
+    """The Stratification chart as a vector PDF, with ``statistics`` and
+    ``annotations`` the data on the pages after it (``sbfsem.export.stratification``)."""
+    from sbfsem.export.stratification import PDF_MAX_ANNOTATION_ROWS, stratification_pdf
+
+    cells, settings, name = _strata_export(request, body)
+    rows = sum(len(c.annotations) for c in cells)
+    if body.annotations and rows > PDF_MAX_ANNOTATION_ROWS:
+        raise HTTPException(status_code=400, detail=(
+            f"every annotation's depth would be {rows:,} rows, and the PDF takes at most "
+            f"{PDF_MAX_ANNOTATION_ROWS:,}; the Excel workbook (Data .xlsx) has them all"))
+    data = stratification_pdf(cells, settings, statistics=body.statistics, annotations=body.annotations)
+    return Response(data, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{name}.pdf"'})
+
+
+@router.post("/stratification/export.xlsx")
+def stratification_export_xlsx(request: Request, body: StrataExportBody):
+    """The Stratification chart's data as an Excel workbook: a Summary sheet with a
+    column per cell, and a sheet per cell with every annotation's depth."""
+    from sbfsem.export.stratification import stratification_xlsx
+
+    cells, settings, name = _strata_export(request, body)
+    data = stratification_xlsx(cells, settings)
+    return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{name}.xlsx"'})
+
+
 @router.get("/neurons/{source}/{neuron_id}/synapse-stratification/{synapse_type}",
             response_model=StratificationDTO)
 def synapse_stratification(request: Request, source: str, neuron_id: int,

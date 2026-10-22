@@ -52,6 +52,11 @@ export const STORAGE_GROUPS = [
     help: 'How many times wider a linked annotation must be for the Correction log to list a pull toward it',
     keys: ['sbfsem:correction-log-ratio'],
   },
+  {
+    id: 'strata', label: 'Stratification chart',
+    help: 'The Stratification tab’s gridline step and what its PDF includes, as last chosen',
+    keys: ['sbfsem:strata-ticks', 'sbfsem:strata-pdf'],
+  },
   { id: 'connectivity', label: 'Connectivity query', help: 'The last query on the Connectivity tab', keys: ['sbfsem.connectivity.query'] },
   {
     id: 'report', label: 'Report options',

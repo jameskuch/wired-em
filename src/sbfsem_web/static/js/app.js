@@ -58,7 +58,7 @@ import { NetworkView, SYNAPSE_COLORS } from './network.js';
 import { ConnectivityView } from './connectivity.js';
 import { SettingsPanel, pageAssets, savedRatio, expertRender } from './settings.js';
 import { fillLinkedNeuronsCard, sortableHead, sortRows } from './linkedneurons.js';
-import { stratificationChart, barChart } from './charts.js';
+import { stratificationChart, barChart, STRATA_TICK_PCT } from './charts.js';
 import * as session from './session.js';
 import { browserShortcut, toggleFullscreen, watchFullscreen } from './fullscreen.js';
 import { installColorPicker } from './colorpicker.js';
@@ -1435,6 +1435,7 @@ function bindEvents() {
   $('net-labels').addEventListener('change', drawNetwork);
 
   $('strata-refresh').addEventListener('click', () => drawStratification());
+  bindStrataExports();
   $('table-neuron').addEventListener('change', drawTable);
   $('table-cellonly').addEventListener('change', drawTable);
   $('table-filter').addEventListener('input', filterTable);
@@ -1457,6 +1458,7 @@ function bindEvents() {
 function bindDialogForms() {
   const primaries = {
     'save-dialog': 'save-confirm', 'open-dialog': 'open-confirm', 'video-dialog': 'video-start',
+    'strata-pdf-dialog': 'strata-pdf-create',
   };
   for (const [dialogId, primaryId] of Object.entries(primaries)) {
     const dialog = $(dialogId);
@@ -7746,8 +7748,125 @@ async function drawStratification({ cell = null } = {}) {
   }
   // Drawn again when this tab is next shown, rather than left looking complete.
   if (failed) strataFor = null;
-  stratificationChart($('strata-chart'), series);
+  strataDrawn = { series, records: stats.map((s) => s.record), opts };
+  stratificationChart($('strata-chart'), series, { tickPct: strataTickPct() });
   renderStrataStats(stats);
+}
+
+// -- the Stratification chart's gridlines and its files ----------------------------------
+// The tick step is the page's choice (kept in this browser, 20 % by default) and
+// redraws the chart without asking the server again; the PDF and the workbook are
+// made on the server from the cells and settings the chart was drawn with
+// (sbfsem/export/stratification.py), so they show what is on screen.
+
+const STRATA_TICKS_KEY = 'sbfsem:strata-ticks';
+const STRATA_PDF_KEY = 'sbfsem:strata-pdf';
+/** Annotation rows on one PDF page (stratification.annotation_rows_per_page, letter). */
+const STRATA_ROWS_PER_PAGE = 56;
+/** The most annotation rows the PDF writes (stratification.PDF_MAX_ANNOTATION_ROWS). */
+const STRATA_PDF_MAX_ROWS = 20000;
+/** What the chart was last drawn from: `{ series, records, opts }`. */
+let strataDrawn = null;
+
+/** The gridline step typed in the box, 1 to 100 %; the default for anything else. */
+function strataTickPct() {
+  const value = Number($('strata-ticks').value);
+  return Number.isFinite(value) && value >= 1 && value <= 100 ? value : STRATA_TICK_PCT;
+}
+
+function storedJSON(key) {
+  try { return JSON.parse(localStorage.getItem(key)); } catch { return null; }
+}
+
+function storeValue(key, value) {
+  try { localStorage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value)); }
+  catch { /* not kept: this page still uses it */ }
+}
+
+/** The cells and settings the chart was drawn with, as the export routes take them. */
+function strataExportBody() {
+  const records = (strataDrawn?.records || []).filter((r) => state.neurons.has(r.key));
+  if (!records.length) return null;
+  return {
+    cells: records.map((r) => ({
+      source: r.source, id: r.id, copy_tag: r.summary?.copy_tag ?? null, label: cellLabel(r),
+      color: /^#[0-9a-f]{6}$/i.test(r.color || '') ? r.color : '#4c78a8',
+    })),
+    ...strataDrawn.opts,
+    tick_pct: strataTickPct(),
+  };
+}
+
+async function exportStrata(format, extra = {}) {
+  const body = strataExportBody();
+  if (!body) {
+    statusEl.textContent = 'Compute the Stratification chart first';
+    statusEl.className = 'status error';
+    return false;
+  }
+  try {
+    const { filename } = await api.stratificationExport(format, { ...body, ...extra });
+    statusEl.textContent = `Saved ${filename}`;
+    statusEl.className = 'status';
+    return true;
+  } catch (error) {
+    fail(error);
+    return false;
+  }
+}
+
+function bindStrataExports() {
+  const ticks = $('strata-ticks');
+  const stored = Number(storedJSON(STRATA_TICKS_KEY));
+  ticks.value = String(Number.isFinite(stored) && stored >= 1 && stored <= 100 ? stored : STRATA_TICK_PCT);
+  ticks.addEventListener('change', () => {
+    ticks.value = String(strataTickPct());
+    storeValue(STRATA_TICKS_KEY, ticks.value);
+    if (strataDrawn) stratificationChart($('strata-chart'), strataDrawn.series, { tickPct: strataTickPct() });
+  });
+  $('strata-xlsx').addEventListener('click', () => exportStrata('xlsx'));
+
+  const dialog = $('strata-pdf-dialog');
+  const stats = $('strata-pdf-stats');
+  const every = $('strata-pdf-annotations');
+  $('strata-pdf').addEventListener('click', () => {
+    const body = strataExportBody();
+    if (!body) {
+      exportStrata('pdf');
+      return;
+    }
+    const chosen = storedJSON(STRATA_PDF_KEY) || {};
+    const records = strataDrawn.records.filter((r) => state.neurons.has(r.key));
+    const rows = records.reduce((sum, r) => sum + (r.summary?.n_nodes || 0), 0);
+    const pages = records.reduce(
+      (sum, r) => sum + Math.max(1, Math.ceil((r.summary?.n_nodes || 0) / STRATA_ROWS_PER_PAGE)), 0);
+    const tooMany = rows > STRATA_PDF_MAX_ROWS;
+    stats.checked = chosen.statistics ?? true;
+    every.checked = !tooMany && (chosen.annotations ?? false);
+    every.disabled = tooMany;
+    const blocks = Math.ceil(records.length / 5);
+    $('strata-pdf-stats-pages').textContent = blocks > 1 ? `(about ${1 + blocks} pages)` : '(1 or 2 pages)';
+    $('strata-pdf-annotation-pages').textContent = tooMany
+      ? `(${rows.toLocaleString('en-US')} annotations, more than a PDF takes: Data .xlsx has them all)`
+      : `(about ${pages.toLocaleString('en-US')} page${pages === 1 ? '' : 's'})`;
+    $('strata-pdf-error').hidden = true;
+    dialog.showModal();
+  });
+  $('strata-pdf-create').addEventListener('click', async () => {
+    const choice = { statistics: stats.checked, annotations: every.checked };
+    storeValue(STRATA_PDF_KEY, choice);
+    const button = $('strata-pdf-create');
+    button.disabled = true;
+    try {
+      if (await exportStrata('pdf', choice)) dialog.close('done');
+      else {
+        $('strata-pdf-error').textContent = statusEl.textContent;
+        $('strata-pdf-error').hidden = false;
+      }
+    } finally {
+      button.disabled = false;
+    }
+  });
 }
 
 /** A count prints as a whole number: `fmt` gives a count the precision of a measurement ("2202.0", "0.000"). */

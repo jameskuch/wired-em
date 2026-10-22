@@ -27,6 +27,9 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
 * ``analysis`` -- right-click Analysis > Connectivity acts on the cell clicked.
 * ``strata`` -- right-click Analysis > Stratification does too (a cell loaded after the
   chart, a hidden cell), and the tiles print counts as whole numbers.
+* ``strataexport`` -- the Stratification chart's gridlines every 20 % by default, every 10 % once typed
+  (redrawn without asking the server, kept across a reload), and its PDF (the dialog's page estimates
+  and choices) and Excel files.
 * ``twod`` -- the Display panel's 2D box survives a reload and Restore, and Discard leaves it off.
 * ``helpmovie`` -- a render option's hover help plays its movie (helpmovies.js): the shipped
   frames, the value set now marked, the measured numbers, the method's own movie, and a still
@@ -595,6 +598,64 @@ def strata(c: Chrome, r: Report, ctx):
     c.wait_for("!document.getElementById('strata-stats').textContent.includes('c%d')" % ctx.third, 60)
     r.check('and a plain visit leaves the hidden cell out again',
             f'c{ctx.third}' not in js(c, "document.getElementById('strata-stats').textContent"))
+    js(c, '__release()')
+
+
+# -- strataexport ------------------------------------------------------------------------------
+
+def strataexport(c: Chrome, r: Report, ctx):
+    r.start('strataexport: the Stratification chart\'s gridlines, PDF and workbook')
+    labels = """[...document.querySelectorAll('#strata-chart text')].map((t) => t.textContent)
+        .filter((t) => /^(INL|GCL|\\d+(\\.\\d+)?)$/.test(t))"""
+    asked = "performance.getEntriesByType('resource').filter((e) => e.name.includes('/stratification?')).length"
+    boot(c, ctx.url)
+    js(c, '__hold()')
+    load(c, ctx.second, mesh=False)
+    js(c, "document.querySelector('.tab[data-view=\"strata\"]').click()")
+    c.wait_for("document.querySelectorAll('#strata-stats dd').length > 0", 60)
+    shown = js(c, labels)
+    r.check('the gridlines run INL, 20, 40, 60, 80, GCL by default',
+            shown[:6] == ['INL', '20', '40', '60', '80', 'GCL'], shown)
+    before = js(c, asked)
+    js(c, """(() => { const t = document.getElementById('strata-ticks'); t.value = '10';
+        t.dispatchEvent(new Event('change', { bubbles: true })); })()""")
+    c.settle(2)
+    shown = js(c, labels)
+    r.check('ticks every 10 redraws every 10 %', shown[:11] == ['INL'] + [str(v) for v in range(10, 100, 10)]
+            + ['GCL'], shown)
+    r.check('without asking the server again', js(c, asked) == before, (before, js(c, asked)))
+
+    js(c, """window.__saved = []; HTMLAnchorElement.prototype.click = function () {
+        window.__saved.push({ name: this.download, href: this.href }); }""")
+    js(c, "document.getElementById('strata-xlsx').click()")
+    c.wait_for('window.__saved.length === 1', 30)
+    saved = js(c, """(async () => { const s = window.__saved[0]; const b = await (await fetch(s.href)).arrayBuffer();
+        return [s.name, b.byteLength, String.fromCharCode(...new Uint8Array(b.slice(0, 2)))]; })()""", wait=True)
+    r.check('Data .xlsx saves the workbook', saved[0] == f'stratification-c{ctx.second}.xlsx'
+            and saved[2] == 'PK' and saved[1] > 5000, saved)
+
+    js(c, "document.getElementById('strata-pdf').click()")
+    c.settle(2)
+    dialog = js(c, """({ open: document.getElementById('strata-pdf-dialog').open,
+        stats: document.getElementById('strata-pdf-stats').checked,
+        every: document.getElementById('strata-pdf-annotations').checked,
+        pages: document.getElementById('strata-pdf-annotation-pages').textContent })""")
+    r.check('PDF… asks whether to add the data, the statistics ticked, the annotations not',
+            dialog['open'] and dialog['stats'] and not dialog['every'] and 'page' in dialog['pages'], dialog)
+    js(c, "document.getElementById('strata-pdf-stats').click()")   # the chart alone
+    js(c, "document.getElementById('strata-pdf-create').click()")
+    c.wait_for('window.__saved.length === 2', 60)
+    pdf = js(c, """(async () => { const s = window.__saved[1]; const b = await (await fetch(s.href)).arrayBuffer();
+        const t = new TextDecoder('latin1').decode(new Uint8Array(b));
+        return [s.name, (t.match(/\\/Type \\/Page\\b/g) || []).length, t.startsWith('%PDF')]; })()""", wait=True)
+    r.check('Create PDF saves the chart alone, one page', pdf[0] == f'stratification-c{ctx.second}.pdf'
+            and pdf[1] == 1 and pdf[2], pdf)
+    r.check('and the dialog closes, keeping the choice',
+            not js(c, "document.getElementById('strata-pdf-dialog').open")
+            and js(c, "localStorage.getItem('sbfsem:strata-pdf')") == '{"statistics":false,"annotations":false}')
+
+    boot(c, ctx.url, keep=True)
+    r.check('the step is kept across a reload', js(c, "document.getElementById('strata-ticks').value") == '10')
     js(c, '__release()')
 
 
@@ -3290,7 +3351,7 @@ def comparereport(c: Chrome, r: Report, ctx):
 
 SECTIONS = {
     'notice': notice, 'waiting': waiting, 'draws': draws, 'undo': undo, 'idle': idle,
-    'picker': picker, 'save': save, 'analysis': analysis, 'strata': strata, 'twod': twod, 'sheets': sheets, 'volume': volume,
+    'picker': picker, 'save': save, 'analysis': analysis, 'strata': strata, 'strataexport': strataexport, 'twod': twod, 'sheets': sheets, 'volume': volume,
     'hold': hold,
     'blind': blind,
     'orbit': orbit,

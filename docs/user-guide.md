@@ -3335,6 +3335,31 @@ their data, are not the ones it was last drawn for, so right-clicking a cell and
 choosing **Analysis > Stratification** shows a chart that has that cell in it, even
 when it is hidden or was loaded after the chart; **Compute** draws it again on demand.
 
+**Ticks every** sets where the depth axis' gridlines and labels go: from the INL (0 %)
+to the GCL (100 %) every so many percent, 20 by default since 2.27.0 (it was 25). Any
+step from 1 to 100 is taken; one that does not divide 100 ends with a shorter interval
+(30 gives INL, 30, 60, 90, GCL), and when lines crowd, only every second or third is
+labeled. It redraws the chart at once, without computing it again, and is kept in this
+browser.
+
+Two buttons save what the chart shows, made on the server from the same cells and
+settings:
+
+- **PDF…** asks whether to add the data on the pages after the chart: the statistics
+  and each cell's binned counts (one or two pages), and every annotation's depth, cell
+  by cell (it says about how many pages; past 20,000 annotations it points to the
+  workbook instead). The first page is the chart itself, drawn as vectors with its text
+  kept as text, on a page the size of the figure (8 × 4.6 in) so it can go straight into
+  a figure, with one line under it: the bins, the soma, the outliers, the gridlines, the
+  version and when. The last choice is kept in this browser.
+- **Data .xlsx** saves an Excel workbook. Its **Summary** sheet has a column pair per
+  cell, each bin's center (percent of the IPL) and count, matched by bin number (each
+  cell's bins span its own depths), then the statistics in percent (n, median, mean,
+  SEM, the mode's bin center, outliers, outside the surfaces, soma left out), then the
+  settings. A sheet per cell lists every annotation: Location ID, section, X, Y and Z
+  (µm), radius, IPL depth (%), and whether the chart counts it or why not (soma,
+  outside surfaces, outlier).
+
 ## Saving a workspace on the server
 
 **Save…** writes the current workspace — which cells are loaded, their colors,

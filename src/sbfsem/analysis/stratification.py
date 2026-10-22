@@ -21,11 +21,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+import pandas as pd
 
 from .boundary import IPLBoundaries, load_ipl_boundaries
 from .stats import Stats, bin_centers, describe
 
-__all__ = ["StratificationResult", "ipl_depth", "synapse_stratification",
+__all__ = ["StratificationResult", "ipl_depth", "annotation_depths", "synapse_stratification",
            "branch_stratification"]
 
 
@@ -120,6 +121,52 @@ def ipl_depth(
         depth, bins, n_nan, n_outlier,
         {"neuron_id": getattr(neuron, "id", None), "include_soma": include_soma},
     )
+
+
+def annotation_depths(
+    neuron,
+    *,
+    boundaries: IPLBoundaries | None = None,
+    include_soma: bool = True,
+    omit_outliers: bool = True,
+    ipl_margin: float = 0.2,
+) -> pd.DataFrame:
+    """Every cell-body annotation's IPL depth, and whether :func:`ipl_depth`
+    with the same settings counts it: one row per annotation, in the order of
+    the cell's nodes.
+
+    Columns: ``location_id``, ``section`` (Viking's Z), ``x_um``, ``y_um``,
+    ``z_um``, ``radius_um``, ``ipl_depth`` (0 at the INL border, 1 at the GCL
+    border; NaN where the point is not between the fitted surfaces), ``counted``
+    and ``left_out``: ``""`` for a counted annotation, else why it is not,
+    ``"soma"`` (larger than 80 % of the largest radius, with the soma left out),
+    ``"outside surfaces"`` or ``"outlier"`` (beyond ``ipl_margin`` of the IPL).
+    The counted depths are :func:`ipl_depth`'s ``depth``, in the same order.
+    """
+    boundaries = boundaries or load_ipl_boundaries(neuron.source)
+    nodes = neuron.get_cell_nodes()
+    xyz = nodes[["Xum", "Yum", "Zum"]].to_numpy(dtype=float)
+    depth = boundaries.micron2ipl(xyz) if len(nodes) else np.empty(0, dtype=float)
+    left_out = np.full(len(nodes), "", dtype=object)
+    # In ipl_depth's order: the soma first, then no depth, then the margin.
+    if not include_soma and len(nodes):
+        left_out[nodes["Rum"].to_numpy(dtype=float) > 0.8 * float(nodes["Rum"].max())] = "soma"
+    left_out[(left_out == "") & np.isnan(depth)] = "outside surfaces"
+    if omit_outliers:
+        with np.errstate(invalid="ignore"):
+            beyond = (depth > 1 + ipl_margin) | (depth < -ipl_margin)
+        left_out[(left_out == "") & beyond] = "outlier"
+    return pd.DataFrame({
+        "location_id": nodes["ID"].to_numpy(dtype=np.int64),
+        "section": nodes["Z"].to_numpy(),
+        "x_um": xyz[:, 0],
+        "y_um": xyz[:, 1],
+        "z_um": xyz[:, 2],
+        "radius_um": nodes["Rum"].to_numpy(dtype=float),
+        "ipl_depth": depth,
+        "counted": left_out == "",
+        "left_out": left_out,
+    })
 
 
 def synapse_stratification(
