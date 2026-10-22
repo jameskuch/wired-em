@@ -746,7 +746,9 @@ several cells and switching keeps the view. What it draws, and how it differs:
 - **No "surface".** MATLAB's Show surface lofted each segment's rings into a
   translucent tube colored by Z. Here each annotation's ring is drawn flat in
   its own section plane (*Rings*), which is what an annotation is
-  (CLAUDE.md ground rule 2).
+  (CLAUDE.md ground rule 2), as a line one pixel wide at any zoom and from any
+  side (since 2.30.0; a 0.06 µm band before, which broke up zoomed out and
+  vanished edge-on).
 - **Dots at MATLAB's real sizes.** MATLAB draws a `.` marker at a third of the
   size it is given: Marker Size 2, 7 and 10 pt are 1.5, 3 and 4.5 px here; the
   flagged annotations' 12 pt and the synapses' 15 pt are 6 and 7 px.

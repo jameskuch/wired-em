@@ -2700,7 +2700,11 @@ SBFSEM-tools' GraphApp drew a neuron: on black, with no surface, each cell's
 skeleton in a near-white, a dot at every annotation and the annotations' rings
 (each in its own section plane) in a pastel of the same hue. Each cell takes the
 next hue of GraphApp's own palette, and the list's dot shows it; the 3D render's
-colors are left alone. Switching either way takes a frame: each cell's GraphApp
+colors are left alone. The first hue, the one a lone cell takes, is green, apart
+from the yellow, red and blue of the selection markers (since 2.30.0; it was a blue
+the blue marker could not be told from). The rings are lines, as thin as anything
+drawn: one pixel at any zoom, and still one from the side, where each is a short
+line at its section. Switching either way takes a frame: each cell's GraphApp
 drawing is made in the background once its 3D render is drawn, and the 3D render
 is never rebuilt, so going back shows it exactly as it was.
 
@@ -2714,7 +2718,7 @@ this browser:
 
 | Control | What it does |
 |---|---|
-| **Rings** | each annotation's ring in its section plane (on by default) |
+| **Rings** | each annotation's ring in its section plane, a line one pixel wide at any zoom and from any side (on by default) |
 | **Show synapses** | a dot at each synapse in its type's color |
 | **Show unfinished** | red: linked to exactly one other annotation and marked neither terminal nor off-edge, an end still to trace |
 | **Show terminals** | blue: marked Terminal in Viking |

@@ -813,6 +813,21 @@ def graphapp(c: Chrome, r: Report, ctx):
             and js(c, "document.getElementById('quick-technique').offsetParent === null"))
     parts = js(c, f"""[...{R}.graphs.get({json.dumps(second)}).children].map((p) => p.userData.part)""")
     r.check('a cell is its skeleton, rings and a dot per annotation', {'skeleton', 'discs', 'nodes'} <= set(parts), parts)
+    # The rings as lines, a pixel at any zoom and from the side, where the 3D render keeps its bands (2026-10-22).
+    kinds = js(c, f"""(() => {{ const g = [...{R}.graphs.get({json.dumps(first)}).children]
+        .find((p) => p.userData.part === 'discs'); const d = {R}.discs.get({json.dumps(first)});
+        return {{ graph: g ? g.type : null, render: d ? d.type : null,
+          closed: g ? g.geometry.index.count === 2 * g.geometry.getAttribute('position').count : null }}; }})()""")
+    r.check('GraphApp draws the rings as lines, every one closed; the 3D render\'s are still bands',
+            kinds.get('graph') == 'LineSegments' and kinds.get('closed') is True
+            and kinds.get('render') in (None, 'Mesh'), kinds)
+    hue = js(c, f"""(() => {{ const c = {R}.graphs.get({json.dumps(first)}).userData.colors.annotation;
+        const [r, g, b] = [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) / 255);
+        const max = Math.max(r, g, b); const d = max - Math.min(r, g, b);
+        const h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+        return (h * 60 + 360) % 360; }})()""")
+    r.check('the first cell\'s GraphApp color is not the blue marker\'s (hue 205)',
+            hue is not None and min(abs(hue - 205), 360 - abs(hue - 205)) >= 45, hue)
     dot = js(c, f"{row(first, '.row-dot')}.style.background")
     r.check('the list\'s dot is the cell\'s GraphApp color, not its 3D render color',
             dot and dot != js(c, f"{STATE}.neurons.get({json.dumps(first)}).color"), dot)

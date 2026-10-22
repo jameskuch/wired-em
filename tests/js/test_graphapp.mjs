@@ -49,6 +49,17 @@ test('each cell a pastel for its annotations and a near-white of the same hue fo
   assert.equal(g.hslHex(120, 1, 0.5), '#00ff00');
 });
 
+test('the color a lone cell takes is told apart from every selection marker', () => {
+  // render3d.js: the yellow and its cyan, the blue below and its pink, the red above and its orange.
+  // The first color was the blue, hue 205, the blue marker's own (2026-10-22).
+  const markers = ['#ffe14d', '#38e1ff', '#8fd0ff', '#ff8ad8', '#ff5c5c', '#ff7a00'];
+  const apart = (a, b) => Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
+  for (const part of ['annotation', 'skeleton']) {
+    const hue = hueOf(g.graphColors(0)[part]);
+    for (const m of markers) assert.ok(apart(hue, hueOf(m)) >= 45, `${part} ${hue} vs ${m} ${hueOf(m)}`);
+  }
+});
+
 test('unfinished: one link, not terminal, not off-edge; a repeated link counts once', () => {
   const nodes = [
     { id: 1 }, { id: 2 }, { id: 3 }, { id: 4, terminal: true }, { id: 5, off_edge: true }, { id: 6 },

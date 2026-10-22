@@ -56,9 +56,13 @@ export const GRAPH_BACKGROUND = '#000000';
 /**
  * The hues the cells take in turn, degrees: far apart from one cell to the
  * next, so two cells side by side are told apart.  GraphApp keeps its own
- * colors; the 3D render's are left alone.
+ * colors; the 3D render's are left alone.  The first, the color a lone cell
+ * takes, is green: the farthest of them from every selection marker's color
+ * (render3d.js: the yellow and its cyan, the blue below and its pink, the red
+ * above and its orange).  It was the blue, 205, which the blue marker (203)
+ * could not be told from (2026-10-22).
  */
-export const GRAPH_HUES = Object.freeze([205, 25, 140, 275, 350, 55, 175, 315, 95, 240]);
+export const GRAPH_HUES = Object.freeze([140, 25, 205, 275, 350, 55, 175, 315, 95, 240]);
 
 const hex = (r, g, b) => `#${[r, g, b].map((v) => Math.round(Math.min(1, Math.max(0, v)) * 255)
   .toString(16).padStart(2, '0')).join('')}`;

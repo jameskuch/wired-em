@@ -935,10 +935,16 @@ export class Renderer3D {
    * The rings and outline bands of a cell's annotations as one mesh (setDiscs'
    * and GraphApp's), with what selection needs kept on it (`rings`, `bands`,
    * `stroke`); null when there is nothing to draw.  Not placed or added.
+   *
+   * `lines` draws each ring and outline as a line in place of a band (GraphApp's,
+   * 2026-10-22): no width in X and Y and no depth in Z, yet one pixel on the
+   * screen at any zoom and from any side, where a band thinner than a pixel
+   * breaks up zoomed out and a flat one vanishes edge-on.  `stroke` and `depth`
+   * are then not used, and `stroke` is kept as 0.
    */
   _ringMesh(key, nodes, {
     color = '#ffffff', opacity = 0.85, stroke = 0.1, outlines = [], through = true,
-    depth = 0, ringColors = null, outlineColors = null,
+    depth = 0, ringColors = null, outlineColors = null, lines = false,
   } = {}) {
     const SEG = RING_SEGMENTS;
     // Kept with their place in `nodes`, which a color array is indexed by.
@@ -965,6 +971,11 @@ export class Renderer3D {
     }
     if (!rings.length && !polygons.length) return null;
     const nBand = polygons.reduce((n, p) => n + p.pts.length, 0);
+    if (lines) {
+      return this._ringLines(key, rings, ringAt, polygons, nBand, {
+        color, opacity, outlines, through, ringColors, outlineColors,
+      });
+    }
     // `depth` gives the flat ribbon a height along Z, centered on the section
     // plane: a band with a rectangular cross-section, stroke wide and depth
     // tall (asked for 2026-09-19 -- a ribbon in the section plane has no
@@ -1096,6 +1107,97 @@ export class Renderer3D {
     object.userData.rings = rings;
     object.userData.bands = polygons;
     object.userData.stroke = stroke;
+    applyDiscDepth(object, through);
+    return object;
+  }
+
+  /**
+   * `_ringMesh`'s rings and outlines as lines (its `lines`): one vertex a sample,
+   * a segment to the next, every ring and outline closed.  `rings`, `ringAt`,
+   * `polygons` and `nBand` are what `_ringMesh` chose to draw.
+   */
+  _ringLines(key, rings, ringAt, polygons, nBand, {
+    color, opacity, outlines, through, ringColors, outlineColors,
+  }) {
+    const SEG = RING_SEGMENTS;
+    const verts = new Float32Array((rings.length * SEG + nBand) * 3);
+    const index = new Uint32Array((rings.length * SEG + nBand) * 2);
+    let vi = 0;
+    let ii = 0;
+    const loop = (base, n) => {
+      for (let k = 0; k < n; k += 1) {
+        index[ii] = base + k;
+        index[ii + 1] = base + ((k + 1) % n);
+        ii += 2;
+      }
+    };
+    for (const n of rings) {
+      const [cx, cy, cz] = n.xyz_um;
+      const base = vi / 3;
+      for (let k = 0; k < SEG; k += 1) {
+        const a = (k / SEG) * Math.PI * 2;
+        verts[vi] = cx + n.radius_um * Math.cos(a);
+        verts[vi + 1] = cy + n.radius_um * Math.sin(a);
+        verts[vi + 2] = cz;
+        vi += 3;
+      }
+      loop(base, SEG);
+    }
+    for (const { pts, z } of polygons) {
+      const base = vi / 3;
+      for (const [x, y] of pts) {
+        verts[vi] = x; verts[vi + 1] = y; verts[vi + 2] = z;
+        vi += 3;
+      }
+      loop(base, pts.length);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+    geometry.setIndex(new THREE.BufferAttribute(index, 1));
+    const layerColor = new THREE.Color(color);
+    const painted = ringColors !== null || outlineColors !== null;
+    if (painted) {
+      const toRgb = (value) => {
+        if (Array.isArray(value) || ArrayBuffer.isView(value)) return [value[0], value[1], value[2]];
+        const c = new THREE.Color(value);
+        return [c.r, c.g, c.b];
+      };
+      geometry.setAttribute('color', new THREE.BufferAttribute(discColorBuffer({
+        ringCount: rings.length,
+        ringRgb: resolveColors(ringColors, rings, (n) => n.id, toRgb, ringAt),
+        polygonRgb: resolveColors(outlineColors, polygons.map((p) => outlines[p.oi]),
+          (o) => o.location_id, toRgb, polygons.map((p) => p.oi)),
+        polygonSamples: polygons.map((p) => p.pts.length),
+        segments: SEG,
+        perSample: 1,
+        fallback: [layerColor.r, layerColor.g, layerColor.b],
+      }), 3));
+    }
+    const material = new THREE.LineBasicMaterial({
+      color: painted ? new THREE.Color(1, 1, 1) : layerColor, vertexColors: painted,
+    });
+    setOpacity(material, opacity);
+    const object = new THREE.LineSegments(geometry, material);
+    object.raycast = () => {};
+    object.name = key;
+    object.userData.painted = painted;
+    // Past the one-draw budget (see _ringMesh) the rest is drawn by children.
+    if (index.length > MAX_DRAW_INDICES) {
+      geometry.setDrawRange(0, MAX_DRAW_INDICES);
+      for (let start = MAX_DRAW_INDICES; start < index.length; start += MAX_DRAW_INDICES) {
+        const part = new THREE.BufferGeometry();
+        part.setAttribute('position', geometry.getAttribute('position'));
+        if (painted) part.setAttribute('color', geometry.getAttribute('color'));
+        part.setIndex(geometry.getIndex());
+        part.setDrawRange(start, Math.min(MAX_DRAW_INDICES, index.length - start));
+        const child = new THREE.LineSegments(part, material);
+        child.raycast = () => {};
+        object.add(child);
+      }
+    }
+    object.userData.rings = rings;
+    object.userData.bands = polygons;
+    object.userData.stroke = 0;
     applyDiscDepth(object, through);
     return object;
   }
@@ -2972,8 +3074,9 @@ export class Renderer3D {
         root.add(skeleton);
       }
     }
+    // The rings as lines: as thin as anything drawn, and still a pixel on the screen (2026-10-22).
     const rings = this._ringMesh(key, nodes, {
-      color: colors.annotation, opacity: 0.9, stroke: 0.06, outlines: data.outlines || [], through: false,
+      color: colors.annotation, opacity: 0.9, lines: true, outlines: data.outlines || [], through: false,
     });
     if (rings) {
       rings.userData.part = 'discs';
@@ -3802,7 +3905,7 @@ export class Renderer3D {
       const umpp = this.umPerPixelAt(this.toWorld(item.point, source));
       const core = Math.max(2 * umpp, item.kind === 'skeleton'
         ? ((this._skeletonOf(item.key)?.userData.skeletonWidth || 0) / 2) * 1.3
-        : (this._ringsOf(item.key)?.userData.stroke || 0.1) * 0.75);
+        : (this._ringsOf(item.key)?.userData.stroke ?? 0.1) * 0.75);
       // A ring just chosen starts at full strength and settles; the rest are drawn settled.
       const settling = pulse && pulses(item.kind) && !prefersReducedMotion();
       const start = highlightLook(settling ? 0 : 1, item.kind);
