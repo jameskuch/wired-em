@@ -25,7 +25,8 @@ Deviations (see DEVIATIONS.md):
   section number here; short skips are interpolated, long ones stay open.
   Viking's links say which outline carries on as which across a skip, and
   each linked pair is interpolated on its own, so a branch untraced for a few
-  sections is whole even where the rest of the cell was traced there.
+  sections is whole even where the rest of the cell was traced there.  A
+  linked pair that does not overlap is drawn as a run between the two.
 * MATLAB refused a structure with no closed curves.  A cell traced with
   discs has its discs stand in here (:func:`annotations_from_discs`): each
   disc's circle on its own section, plus the stretch of each link that
@@ -48,8 +49,8 @@ from .spline import close_spline
 __all__ = ["BRIDGE_UM", "LINK_BRIDGE_UM", "MAX_SURFACE", "TILE", "ClosedCurveAnnotation",
            "CurveVolume", "annotations_from_discs", "annotations_from_geometries",
            "build_curve_volume", "curve_grid_voxels", "curve_voxel_counter", "decode_labels",
-           "finest_fitting_pixel", "interpolate_masks", "label_code", "repair_leading_nan",
-           "surface_fitting_pixel"]
+           "finest_fitting_pixel", "interpolate_masks", "label_code", "link_run_masks",
+           "repair_leading_nan", "surface_fitting_pixel"]
 
 #: Default raster resolution.  MATLAB used 0.01 um implicitly (round to 2
 #: decimals, times 100); 0.05 um is finer than the 0.07-0.09 um section spacing
@@ -1046,7 +1047,11 @@ def build_curve_volume(
     through them -- whether or not some other part of the structure was
     traced there, which is what the whole-section rule above cannot see
     (RPC1 c2628: location 144100 on section 1121 links to 144101 on 1125,
-    and other branches occupy 1122-1124; the branch showed a slit).
+    and other branches occupy 1122-1124; the branch showed a slit).  A
+    linked pair whose blend comes out empty somewhere, two outlines that do
+    not overlap, is drawn as a run instead (:func:`link_run_masks`), which
+    also reaches onto the two traced sections by the first and last
+    section's worth of it; those few tiles are allocated after the plan.
 
     The volume is allocated in tiles (:class:`CurveVolume`), and
     ``max_voxels`` caps the tiles' voxels, not the box's.  The pixels are
@@ -1146,6 +1151,7 @@ def build_curve_volume(
             volume._paint(section_index[z], r0, c0, mask, code)
 
     index = {id(a): i for i, a in enumerate(annotations)}
+    run_ends: list[tuple[int, int, int, np.ndarray, int]] = []
     for (below, above), bounds_px in zip(spans, plan.span_windows, strict=True):
         # The two outlines alone, on a window just big enough for both: the
         # rest of the section is other branches' business.
@@ -1157,15 +1163,32 @@ def build_curve_volume(
         rings_lo = to_pixels(rings_um[index[id(below)]])
         rings_hi = to_pixels(rings_um[index[id(above)]])
         lo, hi = int(below.z_section), int(above.z_section)
-        between = interpolate_masks(
-            rasterize_rings([r - shift for r in rings_lo], size),
-            rasterize_rings([r - shift for r in rings_hi], size),
-            [(z - lo) / (hi - lo) for z in range(lo + 1, hi)],
-            keep=True,
-        )
+        mask_lo = rasterize_rings([r - shift for r in rings_lo], size)
+        mask_hi = rasterize_rings([r - shift for r in rings_hi], size)
+        between = interpolate_masks(mask_lo, mask_hi,
+                                    [(z - lo) / (hi - lo) for z in range(lo + 1, hi)])
         code = max(below.label_code(), above.label_code()) if keep_labels else 0
+        if mask_lo.any() and mask_hi.any() and not all(m.any() for m in between):
+            # The blend cut the branch: two outlines that do not overlap.  The
+            # link says they are one branch, so it is drawn as a run, which
+            # also reaches onto the two traced sections.
+            run = link_run_masks(mask_lo, mask_hi, hi - lo)
+            between = run[1:-1]
+            run_ends.append((section_index[lo], r0, c0, run[0] & ~mask_lo, code))
+            run_ends.append((section_index[hi], r0, c0, run[-1] & ~mask_hi, code))
         for z, mask in zip(range(lo + 1, hi), between, strict=True):
             volume._paint(section_index[z], r0, c0, mask, code)
+    run_ends = [end for end in run_ends if end[3].any()]
+    if run_ends:
+        # The plan gave the traced sections their own outlines' tiles; a run's
+        # first and last stretch can reach a few more, all allocated at once.
+        boxes = []
+        for k, r0, c0, mask, _code in run_ends:
+            rr, cc = np.flatnonzero(mask.any(axis=1)), np.flatnonzero(mask.any(axis=0))
+            boxes.append((k, r0 + int(rr[0]), r0 + int(rr[-1]), c0 + int(cc[0]), c0 + int(cc[-1])))
+        volume._allocate(boxes)
+        for k, r0, c0, mask, code in run_ends:
+            volume._paint(k, r0, c0, mask, code)
 
     plane, across = volume.exposed_faces()
     if plane + across > max_surface:
@@ -1232,20 +1255,20 @@ def _linked_spans(annotations, links, max_sections: float):
     return spans
 
 
-def interpolate_masks(below: np.ndarray, above: np.ndarray, fractions, *,
-                      keep: bool = False) -> list[np.ndarray]:
+def interpolate_masks(below: np.ndarray, above: np.ndarray, fractions) -> list[np.ndarray]:
     """Masks part of the way from ``below`` to ``above``, one per fraction.
 
     Shape-based interpolation (Raya & Udupa 1990): blend the two signed
     distance maps and keep what is still inside.  An outline present on both
     sides morphs from one to the other; one present on a single side tapers
     off toward the other.  The result never leaves the union of the two
-    masks, so the work is done on the union's bounding box alone.
+    masks, so the work is done on the union's bounding box alone.  With
+    nothing on one side, the nearer side is carried across.
 
     Two outlines that do not overlap taper toward each other and can leave
-    nothing in the middle.  ``keep`` is for a pair known to be one branch
-    (a Viking link): where the blend comes out empty the nearer outline is
-    carried across instead, so the branch is never cut.  Tried and dropped:
+    nothing in the middle.  For a pair known to be one branch (a Viking link)
+    :func:`build_curve_volume` then draws the pair as a run instead
+    (:func:`link_run_masks`).  Tried and dropped for every linked pair:
     sliding the two outlines onto a common centroid first.  Leaving a traced
     outline out of 1,500 linked chains of RPC1 c2628 and rebuilding it from
     its neighbours scored IoU 0.711 plain against 0.682 aligned (0.698 /
@@ -1256,23 +1279,98 @@ def interpolate_masks(below: np.ndarray, above: np.ndarray, fractions, *,
     if not below.any() or not above.any():
         # Nothing to measure a distance to: carry the nearer side across.
         return [(below if t < 0.5 else above).copy() for t in fractions]
-    union = below | above
-    r = np.flatnonzero(union.any(axis=1))
-    c = np.flatnonzero(union.any(axis=0))
-    window = (slice(r[0], r[-1] + 1), slice(c[0], c[-1] + 1))
-
-    def signed(mask: np.ndarray) -> np.ndarray:
-        # One empty pixel all round, so an outline filling the window still
-        # has an outside to measure to.  Negative inside.
-        m = np.pad(mask[window], 1)
-        return (distance_transform_edt(~m) - distance_transform_edt(m)).astype(np.float32)
-
-    d0, d1 = signed(below), signed(above)
+    window = _union_window(below, above)
+    d0, d1 = _signed(below[window]), _signed(above[window])
     out = []
     for t in fractions:
         mask = np.zeros_like(below)
         mask[window] = (((1.0 - t) * d0 + t * d1) < 0)[1:-1, 1:-1]
-        if keep and not mask.any():
-            mask = (below if t < 0.5 else above).copy()
         out.append(mask)
     return out
+
+
+def link_run_masks(below: np.ndarray, above: np.ndarray, span: int) -> list[np.ndarray]:
+    """A linked pair the blend would cut, drawn as a run: one mask for each
+    section from ``below``'s (the first) to ``above``'s, ``span`` sections on
+    (the last).  Both masks must have something in them.
+
+    The run's shape at fraction ``t`` is the blend of the two signed distance
+    maps (:func:`interpolate_masks`) with each map first moved onto a center
+    that travels in a straight line from ``below``'s centroid to ``above``'s:
+    ``below`` itself at 0, ``above`` at 1, between them a shape morphing from
+    one to the other on the way.  Each section gets the part of the run
+    within one section of its own plane, flattened onto it, as
+    :func:`annotations_from_discs` draws a link between two discs: the union
+    of the run's shapes from ``(s - 1) / span`` to ``(s + 1) / span``, so
+    the two traced sections get the first and last sections' worth of it
+    too.  Every stretch of the run then lies on two sections, which the
+    volume's 3x3x3 smoothing keeps.  For two circles the run is the disc
+    run exactly: the convex hull of the two circles a section either side.
+
+    Only for a pair whose plain blend comes out empty: two outlines that
+    overlap keep the plain blend, which rebuilds a traced outline from its
+    neighbours better than aligning them does (:func:`interpolate_masks`).
+    Inferior c1178: traced outline 49506 on section 936 links to disc 224559
+    (r 0.4 um) on 914 across 916-935, where the volume has no annotations,
+    and the two are 5.2 um apart; the nearer end carried across each
+    section made two flat-ended slabs that joined neither.
+    """
+    span = int(span)
+    window = _union_window(below, above)
+    # The union's box with an empty pixel all round, as interpolate_masks
+    # measures it, then room to move either map the whole way over.
+    near = np.pad(below[window], 1), np.pad(above[window], 1)
+    h, w = near[0].shape
+    step = np.argwhere(above).mean(axis=0) - np.argwhere(below).mean(axis=0)   # (row, col)
+    pad = np.ceil(np.abs(step)).astype(int) + 1
+    far0, far1 = (_signed_full(np.pad(m, [(pad[0], pad[0]), (pad[1], pad[1])])) for m in near)
+    # Samples close enough that the run moves under half a pixel between them.
+    growth = abs(np.sqrt(below.sum() / np.pi) - np.sqrt(above.sum() / np.pi))
+    per = max(1, int(np.ceil(2.0 * (float(np.hypot(*step)) + growth) / span)))
+    samples = span * per
+    drawn = [np.zeros((h, w), dtype=bool) for _ in range(span + 1)]
+    for k in range(samples + 1):
+        t = k / samples
+        # Each map read where it has to be to sit on the center at t.
+        shape = ((1.0 - t) * _moved(far0, pad - t * step, (h, w))
+                 + t * _moved(far1, pad + (1.0 - t) * step, (h, w))) < 0
+        # The sections this fraction is within one section of.
+        for s in range(max(0, -(-k // per) - 1), min(span, k // per + 1) + 1):
+            drawn[s] |= shape
+    out = []
+    for mask in drawn:
+        full = np.zeros_like(below)
+        full[window] = mask[1:-1, 1:-1]
+        out.append(full)
+    return out
+
+
+def _union_window(below: np.ndarray, above: np.ndarray) -> tuple[slice, slice]:
+    """The bounding box of both masks' pixels together."""
+    union = below | above
+    r = np.flatnonzero(union.any(axis=1))
+    c = np.flatnonzero(union.any(axis=0))
+    return slice(r[0], r[-1] + 1), slice(c[0], c[-1] + 1)
+
+
+def _signed(mask: np.ndarray) -> np.ndarray:
+    """Signed distance in pixels, negative inside, with one empty pixel all
+    round, so an outline filling the window still has an outside to measure
+    to."""
+    return _signed_full(np.pad(mask, 1))
+
+
+def _signed_full(mask: np.ndarray) -> np.ndarray:
+    return (distance_transform_edt(~mask) - distance_transform_edt(mask)).astype(np.float32)
+
+
+def _moved(field: np.ndarray, at: np.ndarray, shape) -> np.ndarray:
+    """A ``shape`` window of ``field`` whose corner is at ``at`` (row,
+    column, in pixels), read linearly between the field's pixels."""
+    (r, c), (fr, fc) = np.floor(at).astype(int), at - np.floor(at)
+    h, w = shape
+    if not (0 <= r < field.shape[0] - h and 0 <= c < field.shape[1] - w):
+        raise ValueError("moved past the padding")
+    top = (1.0 - fc) * field[r:r + h, c:c + w] + fc * field[r:r + h, c + 1:c + w + 1]
+    low = (1.0 - fc) * field[r + 1:r + h + 1, c:c + w] + fc * field[r + 1:r + h + 1, c + 1:c + w + 1]
+    return (1.0 - fr) * top + fr * low

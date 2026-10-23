@@ -338,6 +338,20 @@ interpolates each linked pair more than a section apart on its own, up to
 the MATLAB output is a wrong height, not a convention (`bridge_um=0` turns the
 interpolation off, not the placement).
 
+A linked pair whose two outlines do not overlap blends to nothing half way. Until
+2026-10-22 the nearer outline was carried across each skipped section instead,
+which drew two flat-ended slabs joined to nothing: Inferior c1178 (Field + fit,
+live registration) links traced outline 49506 on section 936 to disc 224559 on
+914, 5.2 µm away, across 916–935, where the volume has no annotations. Such a pair
+is now drawn as a run (`link_run_masks`): the two signed distance maps moved onto a
+center travelling from one centroid to the other and blended, each section the
+part of the run within one section of its plane, the two traced sections
+included, as a link between two discs is drawn (for two circles it is that disc
+run). Pairs that overlap keep the plain blend. At 0.1 µm, Join bodies 0:
+c1178 2 bodies to 1 (dev 0.0794 to 0.0800 µm); RPC1 c2628, 36 such spans of 334,
+96 to 89 (0.1228 to 0.1196); RC1 c410, 13 of 193, 59 to 53 (0.0624 to 0.0620).
+MATLAB read no links, so it has no counterpart.
+
 ### 3.7 Surface area and annotation sizes counted synapses (F128, F129)
 
 `surfaceArea.m` and `AnnotationSizes` summed over `neuron.nodes`, which includes

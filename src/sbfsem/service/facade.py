@@ -4861,7 +4861,12 @@ def _shifts_um(frame: pd.DataFrame, prefix: str = "Corr") -> list[list[float] | 
 #: 6 (2026-10-16): Closed curve on a cell with traced outlines AND discs
 #: rasterizes the discs as well; earlier meshes drew only the outlines (a
 #: dendrite traced with discs under a traced soma was missing).
-GEOMETRY_VERSION = 6
+#: 7 (2026-10-22): two linked outlines (or an outline and a disc) that do not
+#: overlap are drawn as a run across the sections the link skips; earlier
+#: meshes carried the nearer end across, two flat-ended slabs joined to
+#: nothing (Inferior c1178 49506 to 224559; 36 spans of RPC1 c2628, 13 of
+#: RC1 c410).
+GEOMETRY_VERSION = 7
 
 
 def _annotation_rows(neuron: Neuron):

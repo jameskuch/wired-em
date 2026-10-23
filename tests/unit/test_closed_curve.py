@@ -28,6 +28,7 @@ from sbfsem.geometry.closed_curve import (
     build_curve_volume,
     curve_grid_voxels,
     interpolate_masks,
+    link_run_masks,
 )
 from sbfsem.geometry.cone_outline import (
     ConeOutline,
@@ -330,25 +331,100 @@ def test_a_link_adds_the_sections_it_crosses_and_stops_at_its_limit():
     assert len(stray.runs()) == 2
 
 
-def test_linked_outlines_that_do_not_overlap_are_never_cut():
+def test_linked_outlines_that_do_not_overlap_are_drawn_as_a_run():
     """An oblique branch can land clear of itself a few sections on.  The
-    blend of two disjoint outlines tapers to nothing half way; a linked pair
-    carries the nearer outline across instead."""
+    blend of two disjoint outlines tapers to nothing half way.  A linked pair
+    is drawn as a run instead: each end moved toward the other, morphing on
+    the way, each section the part of it within a section of its plane."""
     grid = np.zeros((60, 120), dtype=bool)
     left, right = grid.copy(), grid.copy()
     left[20:40, 10:30] = True
-    right[20:40, 90:110] = True
-    fractions = [0.25, 0.5, 0.75]
-    assert not interpolate_masks(left, right, fractions)[1].any()
-    kept = interpolate_masks(left, right, fractions, keep=True)
-    assert all(m.any() for m in kept)
-    np.testing.assert_array_equal(kept[1], right)               # 0.5 goes to the upper one
+    right[25:35, 90:100] = True
+    span = 6
+    assert not interpolate_masks(left, right, [k / span for k in range(1, span)])[2].any()
+    run = link_run_masks(left, right, span)
+    assert len(run) == span + 1
+    assert not (left & ~run[0]).any() and not (right & ~run[-1]).any()   # the ends stay whole
+    assert all((a & b).any() for a, b in zip(run[:-1], run[1:], strict=False))  # never cut
+    box = np.zeros_like(grid)
+    box[20:40, 10:100] = True
+    assert not any((m & ~box).any() for m in run)                # within the pair's box
+    # Half way: about centered between the two (the larger end's side is the
+    # larger), sized between them.
+    middle = run[span // 2]
+    assert np.argwhere(middle).mean(axis=0) == pytest.approx([29.5, 57.0], abs=3.0)
+    assert right.sum() < middle.sum()
 
-    below = ClosedCurveAnnotation(ring(1.0, cx=10.0), [], 100, 7.0, location_id=1)
-    above = ClosedCurveAnnotation(ring(1.0, cx=16.0), [], 104, 7.28, location_id=2)
-    cv = build_curve_volume([below, above], volume_scale=(2.176, 2.176, 70.0),
-                            pixel_size_um=0.1, bridge_um=0, links=[(1, 2)])
-    assert cv.volume.any(axis=(0, 1)).all()
+
+def test_the_run_of_two_circles_is_the_disc_run():
+    """Two linked discs are drawn as the hull of their circles a section
+    either side of each plane (annotations_from_discs).  The run of their
+    circles' masks is that hull, to the pixel: every pixel either has and
+    the other lacks is on the other's rim."""
+    from scipy.ndimage import binary_dilation
+    from scipy.spatial import ConvexHull
+
+    unit = np.column_stack([np.cos(np.linspace(0, 2 * np.pi, 256, endpoint=False)),
+                            np.sin(np.linspace(0, 2 * np.pi, 256, endpoint=False))])
+    shape = (80, 140)
+    for p0, r0, p1, r1, span in (((20.3, 30.2), 6.0, (110.7, 50.4), 3.0, 6),
+                                 ((15.5, 20.2), 4.0, (40.2, 35.7), 4.0, 2),
+                                 ((20.0, 20.0), 8.0, (60.0, 50.0), 2.0, 22)):
+        p0, p1 = np.array(p0), np.array(p1)
+        run = link_run_masks(rasterize_rings([p0 + r0 * unit], shape),
+                             rasterize_rings([p1 + r1 * unit], shape), span)
+        for s, mask in enumerate(run):
+            faces = (max(0.0, (s - 1) / span), min(1.0, (s + 1) / span))
+            circles = np.vstack([p0 + t * (p1 - p0) + (r0 + t * (r1 - r0)) * unit for t in faces])
+            hull = rasterize_rings([circles[ConvexHull(circles).vertices]], shape)
+            assert not (mask & ~binary_dilation(hull)).any()
+            assert not (hull & ~binary_dilation(mask)).any()
+
+
+def _outline_to_disc(apart_um, top=936):
+    """Inferior c1178 in small: a traced outline on section 936 (``top``)
+    linked to a 0.4 um disc on 914, ``apart_um`` sideways, nothing annotated
+    between."""
+    outline = ClosedCurveAnnotation(
+        np.column_stack([1.2 * np.cos(THETA) + 10.0, 0.7 * np.sin(THETA) + 12.0]),
+        [], top, top * 0.09, location_id=49506)
+    (disc,) = annotations_from_discs(
+        _discs([(224559, 10.0 + apart_um, 12.0 - 0.4 * apart_um, 914, 0.4)]),
+        volume_scale=(2.18, 2.18, 90.0))
+    return [outline, disc], [(49506, 224559)]
+
+
+def test_an_outline_linked_to_a_disc_it_misses_is_one_body():
+    """Inferior c1178, Field + fit with live registration: traced outline
+    49506 on section 936 links to disc 224559 (r 0.40 um) on 914, across
+    916-935 where the volume has no annotations, and the two do not overlap.
+    The nearer end carried across each skipped section drew two flat-ended
+    slabs, joined to nothing.  Drawn as a run, it is one body; a pair that
+    overlaps keeps the plain blend, bit for bit."""
+    scale = (2.18, 2.18, 90.0)
+    annotations, links = _outline_to_disc(4.0)
+    alone = build_curve_volume(annotations, volume_scale=scale, pixel_size_um=0.1)
+    assert len(split_components(curve_volume_to_mesh(alone))) == 2
+    cv = build_curve_volume(annotations, volume_scale=scale, pixel_size_um=0.1, links=links)
+    assert cv.runs() == [(0, 23)] and int(cv.traced.sum()) == 2
+    assert len(split_components(curve_volume_to_mesh(cv))) == 1
+    # Each section's middle travels from the disc to the outline, as the link does.
+    volume = cv.volume
+    middles = [np.argwhere(volume[:, :, k]).mean(axis=0)[1] for k in range(volume.shape[2])]
+    assert np.all(np.diff(middles) < 0)
+    # The run reaches onto the traced sections only by its first and last stretch.
+    traced = build_curve_volume(annotations, volume_scale=scale, pixel_size_um=0.1, bridge_um=0)
+    for k in (0, -1):
+        grown = int(volume[:, :, k].sum()) - int(traced.volume[:, :, k].sum())
+        assert 0 < grown < 0.5 * traced.volume[:, :, k].sum()
+
+    near, links = _outline_to_disc(0.6)
+    cv = build_curve_volume(near, volume_scale=scale, pixel_size_um=0.1, links=links)
+    volume = cv.volume
+    plain = interpolate_masks(volume[:, :, 0], volume[:, :, -1],
+                              [k / 22 for k in range(1, 22)])
+    for k, mask in enumerate(plain, start=1):
+        np.testing.assert_array_equal(volume[:, :, k], mask)
 
 
 def test_the_service_hands_the_links_to_the_curve_volume(cone_neuron):
@@ -570,13 +646,20 @@ def _box_raster(annotations, *, volume_scale=(7.5, 7.5, 90.0), pixel_size_um,
                                     [(z - lo) / (hi - lo) for z in range(lo + 1, hi)])
         for z, mask in zip(range(lo + 1, hi), between, strict=True):
             volume[:, :, at[z]] = mask
+    ends = []
     for below, above in grid.spans:
         lo, hi = int(below.z_section), int(above.z_section)
-        between = interpolate_masks(rasterize_rings(pixels(below), shape),
-                                    rasterize_rings(pixels(above), shape),
-                                    [(z - lo) / (hi - lo) for z in range(lo + 1, hi)], keep=True)
+        mask_lo, mask_hi = rasterize_rings(pixels(below), shape), rasterize_rings(pixels(above), shape)
+        between = interpolate_masks(mask_lo, mask_hi,
+                                    [(z - lo) / (hi - lo) for z in range(lo + 1, hi)])
+        if mask_lo.any() and mask_hi.any() and not all(m.any() for m in between):
+            run = link_run_masks(mask_lo, mask_hi, hi - lo)
+            between = run[1:-1]
+            ends += [(at[lo], run[0]), (at[hi], run[-1])]
         for z, mask in zip(range(lo + 1, hi), between, strict=True):
             volume[:, :, at[z]] |= mask
+    for k, mask in ends:
+        volume[:, :, k] |= mask
     return volume
 
 
@@ -641,6 +724,26 @@ def test_tiles_and_blocks_give_the_box_raster_and_its_surface_exactly(
     on_slice = cv.sections[k] == section          # not in the gap between the runs
     assert 0 < int((~on_slice).sum()) < len(probe)
     np.testing.assert_array_equal(cv.contains(probe), box[rows, cols, k] & on_slice)
+
+
+@pytest.mark.parametrize(("tile", "block"), [(32, 64), (8, 5), (5, 3)])
+def test_a_run_onto_its_traced_sections_is_the_box_raster_exactly(monkeypatch, tile, block):
+    """A linked pair drawn as a run reaches onto its two traced sections,
+    past the tiles the plan gave them: those are allocated after the plan,
+    and the pixels and the surface are still the whole box's."""
+    monkeypatch.setattr(closed_curve, "TILE", tile)
+    monkeypatch.setattr(volume_module, "CONTOUR_BLOCK", block)
+    pair, links = _outline_to_disc(2.0, top=916)              # half the jump on each end
+    trunk = [ClosedCurveAnnotation(ring(0.8, 6.0, 9.0), [], z, z * 0.09) for z in range(910, 940)]
+    annotations, scale = [*pair, *trunk], (2.18, 2.18, 90.0)
+    cv = build_curve_volume(annotations, volume_scale=scale, pixel_size_um=0.1, links=links)
+    box = _box_raster(annotations, volume_scale=scale, pixel_size_um=0.1, links=links)
+    np.testing.assert_array_equal(cv.dense(), box)
+    planned = curve_grid_voxels(annotations, volume_scale=scale, pixel_size_um=0.1, links=links)
+    assert cv.allocated_voxels > planned
+    mesh, expected = curve_volume_to_mesh(cv), _box_mesh(box, cv)
+    np.testing.assert_array_equal(mesh.vertices, expected.vertices)
+    np.testing.assert_array_equal(mesh.faces, expected.faces)
 
 
 def test_the_cone_fixture_is_the_box_raster_and_surface_exactly(cone_neuron):
