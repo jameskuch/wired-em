@@ -99,13 +99,6 @@ class SectionCorrectionDTO(BaseModel):
     median_um: float = 0.0
     p95_um: float = 0.0
     max_um: float = 0.0
-    #: Asked to leave the traced outlines the correction log lists where the
-    #: registration drew them (``curvefit`` and ``all``), and those it left there
-    #: (Location IDs): their correction is not applied, so they are not counted
-    #: in ``n_moved`` or the sizes.
-    keep_outlines: bool = False
-    n_kept: int = 0
-    kept_outlines: list[int] = Field(default_factory=list)
 
 
 class LiveRegistrationDTO(BaseModel):
@@ -1003,10 +996,8 @@ class RegistrationQualityDTO(BaseModel):
     #: Annotations the curve fit pulled toward one ``pull_ratio`` times as wide (None: no fit ran).
     pulls: int | None = None
     pull_ratio: float
-    #: Traced outlines the correction moved off the outlines linked to them (None: no fit ran),
-    #: and how many of them this copy left where the registration drew them (``keep_outlines``).
+    #: Traced outlines the correction moved off the outlines linked to them (None: no fit ran).
     outline_moves: int | None = None
-    outlines_kept: int | None = None
 
 
 class CorrectionPullDTO(BaseModel):
@@ -1071,8 +1062,6 @@ class CorrectionOutlineMoveDTO(BaseModel):
     overlap_neighbor: float
     overlap_slid: float
     cause: str
-    #: Left where the registration drew it in this copy (loaded with ``keep_outlines``).
-    kept: bool = False
 
 
 class OutlineRuleDTO(BaseModel):
@@ -1096,17 +1085,12 @@ class CorrectionLogCellDTO(BaseModel):
     linked to one on another section, ``n_outlines_moved`` those the correction
     moved at least the rule's ``min_move_um``, and ``outline_moves`` those it
     moved off their linked outlines (:class:`CorrectionOutlineMoveDTO`).
-    ``keep_outlines``: the copy was loaded to leave those where the registration
-    drew them, and ``n_kept`` it left there; the rows say what Viking's correction
-    did, each one left there marked ``kept``.
     """
 
     source: str
     neuron_id: int
     copy_tag: str
     mode: str
-    keep_outlines: bool = False
-    n_kept: int = 0
     checked: bool = False
     note: str = ""
     service_version: str | None = None

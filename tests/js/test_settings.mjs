@@ -19,7 +19,7 @@ const {
   formatBytes, formatDuration, restartPhase, serverRows, RESTART_WAIT_S,
   RATIO_KEY, RATIO_LIMITS, parseRatio, formatRatio, correctionLogView,
   savedRatio, pullTitle, cellPullsView, PULLS_HELP,
-  OUTLINE_RULE, OUTLINE_CAUSES, OUTLINE_IDS_SHOWN, outlineTitle, outlineRuleText, outlinesHelp, KEPT_NOTE,
+  OUTLINE_RULE, OUTLINE_CAUSES, OUTLINE_IDS_SHOWN, outlineTitle, outlineRuleText, outlinesHelp,
   EXPERT_RENDER_KEY, EXPERT_RENDER_HELP, expertRender, setExpertRender,
   STALE_RELOAD_KEY, fromBrowserCache, staleStart,
   IPL_METHOD_KEY, IPL_METHOD_CHOICES, IPL_METHOD_DEFAULT, IPL_METHOD_HELP, iplMethod, setIplMethod,
@@ -347,24 +347,6 @@ test('the log lists a cell’s outlines moved off apart from its pulls, with a s
   assert.deepEqual(c476.outlines, { summary: '', rows: [] });
   const kept = correctionLogView({ ...LOG, cells: [{ ...cell, outline_moves: [] }] }).checked[0].outlines;
   assert.match(kept.summary, /^None moved off: 50 of the 180 linked traced outlines moved/);
-});
-
-test('a copy that keeps the listed outlines says so in its mode, its summary and each row', () => {
-  const cell = { ...LOG.cells[0], copy_tag: 'all.1.k', keep_outlines: true, n_kept: 1, n_outlines: 180,
-    n_outlines_moved: 50, outline_moves: [{ ...OUTLINE, kept: true }] };
-  const [view] = correctionLogView({ ...LOG, cells: [cell] }).checked;
-  assert.match(view.mode, / · kept$/);
-  assert.match(view.outlines.summary, /\(180 linked in all\); this copy keeps it where Viking draws it$/);
-  const [row] = view.outlines.rows;
-  assert.equal(row.cause, 'shape, kept');
-  assert.ok(row.kept && row.title.endsWith(KEPT_NOTE) && row.causeHelp.endsWith(KEPT_NOTE));
-  const plain = correctionLogView({ ...LOG, cells: [{ ...cell, keep_outlines: false, n_kept: 0,
-    outline_moves: [OUTLINE] }] }).checked[0];
-  assert.ok(!/kept/.test(plain.mode) && !/keeps/.test(plain.outlines.summary) && !plain.outlines.rows[0].kept);
-  const panel = cellPullsView({ ...cell, ratio: 4, outline_rule: OUTLINE_RULE });
-  assert.equal(panel.outlines.line, 'Curve fit moved 1 traced outline off the outlines linked to it; it is kept '
-    + 'where Viking draws it:');
-  assert.ok(panel.outlines.ids[0].title.endsWith(KEPT_NOTE));
 });
 
 test('the rule is said with the server’s numbers', () => {

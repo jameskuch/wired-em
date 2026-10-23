@@ -949,19 +949,16 @@ def test_a_load_body_reads_a_string_flag_as_the_boolean_it_spells(client, monkey
 
     monkeypatch.setattr(client.app.state.service, "load_neuron", load)
     body = {"id": 943, "source": "i", "refresh": "false", "include_synapses": "false",
-            "live_registration": "false", "check_fresh": "false", "transform": "None",
-            "keep_outlines": "true"}
+            "live_registration": "false", "check_fresh": "false", "transform": "None"}
     assert client.post("/api/neurons", json=body).status_code == 400
     assert seen["refresh"] is False and seen["include_synapses"] is False
     assert seen["live_registration"] is False and seen["transform"] == "None"
-    assert seen["keep_outlines"] is True
     assert seen["neuron_id"] == 943 and seen["source"] == "NeitzInferiorMonkey"
     # What was already true stays true: defaults, and null read as false.
     seen.clear()
     client.post("/api/neurons", json={"id": 943})
     assert seen["include_synapses"] is True and seen["refresh"] is False
     assert seen["live_registration"] is None and seen["transform"] == "Standard"
-    assert seen["keep_outlines"] is None
     assert seen["source"] == "NeitzInferiorMonkey"
     seen.clear()
     client.post("/api/neurons", json={"id": 943, "include_synapses": None, "refresh": None})

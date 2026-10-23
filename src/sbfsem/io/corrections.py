@@ -79,7 +79,6 @@ __all__ = [
     "service_stamp",
     "stamp_version",
     "apply_offsets",
-    "uncorrect_outlines",
     "correct_neuron",
     "CorrectionsProvider",
 ]
@@ -801,9 +800,7 @@ class CellCorrection:
     cset: CorrectionSet
     #: One row per annotation: ``ID``, ``Z``, ``dx_nm``, ``dy_nm``, ``trusted``,
     #: ``found``.  Untrusted rows keep their sampled offset here for the record;
-    #: only trusted ones are applied.  After :func:`uncorrect_outlines`, a ``kept``
-    #: column marks the traced outlines left where the registration drew them:
-    #: their offset is kept for the record and not applied.
+    #: only trusted ones are applied.
     offsets: pd.DataFrame
     source_url: str = ""
     cached: bool = False
@@ -811,10 +808,7 @@ class CellCorrection:
 
     @property
     def applied(self) -> pd.DataFrame:
-        rows = self.offsets["trusted"]
-        if "kept" in self.offsets.columns:
-            rows = rows & ~self.offsets["kept"].astype(bool)
-        return self.offsets[rows]
+        return self.offsets[self.offsets["trusted"]]
 
     @property
     def token(self) -> str:
@@ -830,22 +824,18 @@ class CellCorrection:
         return hashlib.sha1(text.encode("ascii")).hexdigest()[:16]
 
     def summary(self) -> dict:
-        """Counts and shift sizes (um) for a status line.
-
-        The sizes are of the offsets applied; after :func:`uncorrect_outlines` the
-        outlines kept are counted (``n_kept``) and named (``kept_outlines``).
-        """
+        """Counts and shift sizes (um) for a status line."""
         applied = self.applied
         mags = np.hypot(applied["dx_nm"], applied["dy_nm"]).to_numpy() / 1000.0
         moved = mags > 0.0005
-        out = {
+        return {
             **self.cset.describe(),
             "service": self.source_url,
             "cached": self.cached,
             "n_annotations": int(len(self.offsets)),
             "n_sections": int(self.offsets["Z"].nunique()) if len(self.offsets) else 0,
             "n_found": int(self.offsets["found"].sum()),
-            "n_trusted": int(self.offsets["trusted"].sum()),
+            "n_trusted": int(len(applied)),
             "n_moved": int(moved.sum()),
             "median_um": float(np.median(mags[moved])) if moved.any() else 0.0,
             "p95_um": float(np.percentile(mags[moved], 95)) if moved.any() else 0.0,
@@ -853,11 +843,6 @@ class CellCorrection:
             "token": self.token,
             **self.extras,
         }
-        if "kept" in self.offsets.columns:
-            kept = self.offsets.loc[self.offsets["kept"].astype(bool), "ID"]
-            ids = sorted({int(i) for i in kept})
-            out.update(keep_outlines=True, n_kept=len(ids), kept_outlines=ids)
-        return out
 
 
 def apply_offsets(neuron, correction: CellCorrection) -> None:
@@ -892,57 +877,6 @@ def apply_offsets(neuron, correction: CellCorrection) -> None:
         frame["Curve"] = shifted
         neuron.geometries = frame
     neuron.section_correction = correction.summary()
-
-
-def uncorrect_outlines(neuron, correction: CellCorrection, location_ids: Iterable[int]) -> list[int]:
-    """Leave these traced outlines where the registration drew them: take the
-    section correction off each, node row and outline, every other annotation
-    keeping its own.
-
-    For the outlines the correction log lists
-    (:func:`sbfsem.analysis.correction_checks.scan_outlines`): Viking's curve fit
-    takes an outline's centroid as a point of the process, and where an outline
-    takes in a lobe it moves the next one off the membrane it lines up with.  Run
-    it after :func:`apply_offsets` with the same ``correction``.  An ID that is
-    not a traced outline of ``neuron`` or was not moved is not kept.
-
-    The rows kept stay in ``correction.offsets`` (a ``kept`` column), not
-    applied, so the summary's ``token`` and sizes are those of the offsets
-    applied, and ``neuron.section_correction`` names the outlines kept.  Returns
-    their IDs, ascending.
-    """
-    if not getattr(neuron, "section_correction", None):
-        raise ValueError(f"c{neuron.id} carries no section correction to take off")
-    applied = correction.applied.drop_duplicates("ID").set_index("ID")
-    geometries = getattr(neuron, "geometries", None)
-    traced: set[int] = set()
-    if geometries is not None and len(geometries):
-        traced = {int(row.ID) for row in geometries.itertuples() if row.Curve}
-    wanted = {int(i) for i in location_ids}
-    kept = sorted(i for i in wanted & traced & {int(i) for i in applied.index}
-                  if applied.at[i, "dx_nm"] or applied.at[i, "dy_nm"])
-    offsets = correction.offsets
-    already = offsets["kept"].astype(bool) if "kept" in offsets.columns else False
-    correction.offsets = offsets.assign(kept=already | offsets["ID"].astype(np.int64).isin(kept))
-    if kept and geometries is not None:  # a kept ID has an outline, so the frame exists
-        nodes = neuron.nodes
-        rows = nodes["ID"].astype(np.int64).isin(kept)
-        nodes.loc[rows, ["CorrDXnm", "CorrDYnm"]] = 0.0
-        neuron.apply_transform()
-        frame = geometries.copy()
-        moved_back = []
-        back = set(kept)
-        for row in frame.itertuples():
-            curves = row.Curve or []
-            key = int(row.ID)
-            if key in back:
-                shift = np.array([applied.at[key, "dx_nm"], applied.at[key, "dy_nm"]]) / 1000.0
-                curves = [np.asarray(c, dtype=float) - shift for c in curves]
-            moved_back.append(curves)
-        frame["Curve"] = moved_back
-        neuron.geometries = frame
-    neuron.section_correction = correction.summary()
-    return kept
 
 
 def _offsets_key(client: CorrectionsClient, cset: CorrectionSet, neuron) -> str:
@@ -1099,7 +1033,7 @@ def fetch_structure_offsets(neuron, client: CorrectionsClient, cset: CorrectionS
 
 def correct_neuron(neuron, client: CorrectionsClient | None = None, *,
                    stos_group: str | None = None, cache=None,
-                   mode: str = "neighbor", keep_outlines: bool = False) -> CellCorrection | None:
+                   mode: str = "neighbor") -> CellCorrection | None:
     """Apply Viking's section correction to a freshly loaded neuron.
 
     ``mode`` ``neighbor`` samples the published residual field at each
@@ -1108,10 +1042,6 @@ def correct_neuron(neuron, client: CorrectionsClient | None = None, *,
     untouched) when the volume has no published set, or not the
     ``stos_group`` asked for.  Service failures propagate as
     :class:`CorrectionsError`.
-
-    ``keep_outlines`` (off by default; ``curvefit`` and ``all`` only) leaves the
-    traced outlines the correction log lists where the registration drew them
-    (:func:`uncorrect_outlines`, :func:`~sbfsem.analysis.correction_checks.scan_outlines`).
     """
     mode = correction_mode(mode)
     if mode == "off":
@@ -1138,11 +1068,6 @@ def correct_neuron(neuron, client: CorrectionsClient | None = None, *,
         if own:
             client.close()
     apply_offsets(neuron, correction)
-    if keep_outlines and mode in ("curvefit", "all"):
-        from ..analysis.correction_checks import scan_neuron
-
-        listed = scan_neuron(neuron).outline_moves
-        uncorrect_outlines(neuron, correction, [m.location_id for m in listed])
     return correction
 
 

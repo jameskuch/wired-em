@@ -431,9 +431,7 @@ export function correctionLogView(log, { volumeName = (s) => s } = {}) {
   const checked = [];
   const unchecked = [];
   for (const cell of log?.cells || []) {
-    // A copy loaded with Keep listed outlines: its rows are what Viking's correction did, as the
-    // plain copy's are, and the outlines listed are drawn where Viking draws them.
-    const mode = (MODE_LABELS[cell.mode] || cell.mode) + (cell.keep_outlines ? ' · kept' : '');
+    const mode = MODE_LABELS[cell.mode] || cell.mode;
     const base = { source: cell.source, cellId: cell.neuron_id, copy: cell.copy_tag, mode,
       volume: volumeName(cell.source), service: cell.service_version || '' };
     if (!cell.checked) {
@@ -468,23 +466,15 @@ export function correctionLogView(log, { volumeName = (s) => s } = {}) {
   return { ratio, checked, unchecked };
 }
 
-/** What a log row or a cell panel ID adds when the copy keeps the outline where Viking draws it. */
-export const KEPT_NOTE = 'This copy keeps it where Viking draws it (Keep listed outlines).';
-
 /** A checked cell's outlines moved off their linked outlines: its summary and rows. */
 function outlinesOf(cell) {
   const moves = cell.outline_moves || [];
   const n = moves.length;
   const tested = cell.n_outlines_moved ?? 0;
   const linked = cell.n_outlines ?? 0;
-  const kept = cell.n_kept ?? 0;
-  const keeping = !cell.keep_outlines ? ''
-    : kept ? `; this copy keeps ${kept === n ? (n === 1 ? 'it' : `all ${n}`) : kept} where Viking draws `
-      + `${kept === 1 ? 'it' : 'them'}` : '';
   const summary = !linked ? ''
     : n ? `${n} of the ${tested} traced outline${tested === 1 ? '' : 's'} moved by the rule’s distance or more `
       + `${n === 1 ? 'was' : 'were'} moved off the outlines linked to ${n === 1 ? 'it' : 'them'} (${linked} linked in all)`
-      + keeping
       : `None moved off: ${tested} of the ${linked} linked traced outline${linked === 1 ? '' : 's'} moved by the rule’s `
         + 'distance or more, none away from where it overlaps its linked ones';
   return {
@@ -498,10 +488,9 @@ function outlinesOf(cell) {
       off: share(m.off_share),
       neighborId: m.neighbor_id,
       step: um(m.step_um),
-      cause: (OUTLINE_CAUSES[m.cause]?.word || m.cause) + (m.kept ? ', kept' : ''),
-      causeHelp: (OUTLINE_CAUSES[m.cause]?.help || '') + (m.kept ? ` ${KEPT_NOTE}` : ''),
-      kept: !!m.kept,
-      title: outlineTitle(m) + (m.kept ? `. ${KEPT_NOTE}` : ''),
+      cause: OUTLINE_CAUSES[m.cause]?.word || m.cause,
+      causeHelp: OUTLINE_CAUSES[m.cause]?.help || '',
+      title: outlineTitle(m),
     })),
   };
 }
@@ -557,12 +546,8 @@ export function cellPullsView(answer) {
     ids: (answer.pulls || []).map((p) => ({ locationId: p.location_id, title: pullTitle(p) })),
     outlines: m ? {
       line: `Curve fit moved ${m} traced outline${m === 1 ? '' : 's'} off the outlines linked to `
-        + `${m === 1 ? 'it' : 'them'}`
-        + (answer.keep_outlines && answer.n_kept
-          ? `; ${answer.n_kept === m ? (m === 1 ? 'it is' : 'all are') : `${answer.n_kept} are`} kept where Viking draws `
-            + `${answer.n_kept === 1 ? 'it' : 'them'}:`
-          : ':'),
-      ids: shown.map((o) => ({ locationId: o.location_id, title: outlineTitle(o) + (o.kept ? `. ${KEPT_NOTE}` : '') })),
+        + `${m === 1 ? 'it' : 'them'}:`,
+      ids: shown.map((o) => ({ locationId: o.location_id, title: outlineTitle(o) })),
       more: m - shown.length,
       help: outlinesHelp(answer.outline_rule || OUTLINE_RULE),
     } : null,

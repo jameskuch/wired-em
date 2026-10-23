@@ -471,16 +471,14 @@ export function isTypingTarget(element) {
 
 /**
  * Does applying a history step change which copy of the cell is loaded?  The
- * Registration panel's choices -- Viking's current section transforms, its
- * section correction, and whether the outlines the correction log lists keep
- * their place -- are kept on the cell and saved in every step; a step that
- * differs in any needs the cell loaded again under the step's choices, not just
- * redrawn.  `undefined` is a choice (the server's default), so it is compared as
- * it is.
+ * Registration panel's two choices -- Viking's current section transforms and
+ * its section correction -- are kept on the cell and saved in every step; a step
+ * that differs in either needs the cell loaded again under the step's choices,
+ * not just redrawn.  `undefined` is a choice (the server's default), so it is
+ * compared as it is.
  */
 export function registrationChoiceDiffers(record, entry) {
   return record.registration !== entry.registration || record.corrections !== entry.corrections
-    || record.keepOutlines !== entry.keepOutlines
     || movesDiffer(record.manualMoves, entry.manualMoves);
 }
 

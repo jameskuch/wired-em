@@ -117,26 +117,6 @@ picks how it is computed:
   2,431 of 2,819 annotations (median 0.12 µm) where Curve fit moved 2,176
   (median 0.11 µm).
 
-**Keep listed outlines** (since 2.38.0; off by default), under the Correction
-dropdown, acts under Curve fit and Field + fit only, and is greyed out under the
-residual field. Viking's curve fit takes each traced outline's centroid as a point
-of the process. Where an outline takes in a lobe or the base of a branch, its
-centroid steps sideways though its membrane does not, and the fit moves the next
-outline toward that step, off the membrane it lines up with (Inferior Monkey
-c16137's soma outline on section 547 moved 0.58 µm toward section 546's lobe).
-Ticked, the outlines the Settings tab's [Correction log](#settings-debug-tools)
-lists stay where Viking draws them, and every disc, every other outline and every
-synapse keeps the correction. Measured on eight cells: on RC1 c410 it kept the
-400 linked outline pairs the fit lined up better and cut the 318 it lined up
-worse to 196, with the median step between linked annotations at the fit's
-(0.121 → 0.118 µm). Leaving every outline in place instead would have given up
-those 400 real fixes, so the option keeps only the listed ones. The chip beside it
-counts them (`1 kept`) and its hover names them; the Registration header adds
-`1 outline kept`. It is another copy of the cell on the server (`all.1.k`), so its
-surfaces are built and kept apart from the plain copy's. Viking's own fit of the
-other annotations still took the kept outlines' centroids as points of the
-process: only those outlines go back.
-
 An annotation Viking's service places more than 20 µm from where the viewer
 draws it keeps its place: its correction was worked out somewhere else. (Until
 the evening of 2026-09-24 the service placed lines and curves with empty
@@ -1874,8 +1854,6 @@ point of the process, so where an outline takes in a lobe or the base of a branc
 next one is moved toward the lobe though their membranes line up (Inferior Monkey
 c16137's soma outline on section 547 moved 0.58 µm toward section 546's lobe). The shut
 section counts them too (`off · 3 pulled, 22 off`); the ratio does not change them.
-With **Keep listed outlines** on, the line says they are kept where Viking draws them,
-and the arrows show no correction move for them.
 
 **What is drawn.** One arrow per annotation that moved, in its section plane,
 **Arrow width** pixels wide on the screen at any zoom (2.5 by default, 1 to 8),
@@ -3855,10 +3833,7 @@ looks wrong rather than for the work itself.
   outline is this one displaced) or **other** (no linked outline lies that way: the fit
   carried it along with the process, often after a pull toward a soma). A cell's first 10
   rows are shown, *Show all* the rest. A move that brings an outline onto its neighbors (a
-  misregistered section the fit lined up) is never listed. A copy loaded with **Keep
-  listed outlines** is listed apart, its mode followed by `· kept`: its rows are the same,
-  what Viking's correction did, each one it left where Viking draws it marked `kept` in
-  *Why*.
+  misregistered section the fit lined up) is never listed.
   A cell's own pulls are also listed in its panel's
   [Position shift](#position-shift-where-each-annotation-was-and-where-it-is-drawn) section,
   at this ratio.

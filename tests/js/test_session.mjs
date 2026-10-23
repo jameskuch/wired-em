@@ -71,16 +71,6 @@ test('a session stored with Hold ticked (before 2.30.2) is read back without it'
   assert.deepEqual(saved.ui.display.clip_box, { min: [0, 0, 0], max: [5, 5, 5] }, 'the crop still is');
 });
 
-test('a cell\'s Keep listed outlines is saved with it, and nothing when it never chose', () => {
-  const neurons = new Map([
-    ['a', { id: 1, source: 'i', corrections: 'all', keepOutlines: true, render: {}, display: {} }],
-    ['b', { id: 2, source: 'i', corrections: 'all', render: {}, display: {} }],
-  ]);
-  const snap = session.snapshot({ ...state, neurons }, renderer, ui());
-  assert.equal(snap.neurons[0].keepOutlines, true);
-  assert.equal('keepOutlines' in snap.neurons[1], false);
-});
-
 test('the undo history keeps Hold: snapshot() is the page\'s and carries it', () => {
   const snap = session.snapshot(state, renderer, ui());
   assert.equal(snap.ui.display.hold_limits, true);

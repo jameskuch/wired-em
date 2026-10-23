@@ -441,10 +441,9 @@ def test_c16137_547_is_moved_off_toward_546_s_lobe(c16137, mode, move, moved, of
     assert table.loc[1337464].off_share < 0
 
 
-def outline_cell(*, corrected: bool = True, disc: bool = False) -> Neuron:
+def outline_cell(*, corrected: bool = True) -> Neuron:
     """Three soma outlines (IDs 21-23, sections 99-101) as Viking's VolumeShape gives them:
-    the node at each outline's centroid, the outline moved with its annotation's correction.
-    ``disc``: and a disc (24, r 1 um) on section 102 above 23, which no correction here moves."""
+    the node at each outline's centroid, the outline moved with its annotation's correction."""
     import shapely
 
     lobe = lobed()
@@ -458,20 +457,12 @@ def outline_cell(*, corrected: bool = True, disc: bool = False) -> Neuron:
         "OffEdge": [False] * 3, "Terminal": [False] * 3, "TypeCode": [6] * 3,
     })
     edges = pd.DataFrame({"ID": [9, 9], "A": [21, 22], "B": [22, 23]})
-    if disc:
-        nodes = pd.concat([nodes, pd.DataFrame({
-            "ID": [24], "ParentID": [9], "VolumeX": [0.0], "VolumeY": [0.0], "Z": [102], "Radius": [1.0],
-            "X": [0.0], "Y": [0.0], "OffEdge": [False], "Terminal": [True], "TypeCode": [1]})], ignore_index=True)
-        edges = pd.concat([edges, pd.DataFrame({"ID": [9], "A": [23], "B": [24]})], ignore_index=True)
-        moves[24] = (0.0, 0.0)
-        ids = [*ids, 24]
     neuron = Neuron(9, "i", nodes=nodes, edges=edges, volume_scale=(1000.0, 1000.0, 1000.0),
                     omitted_ids=[], data_stamp=datetime(2026, 10, 22, tzinfo=UTC))
     shift = {i: np.array(moves[i]) if corrected else np.zeros(2) for i in ids}
     neuron.geometries = pd.DataFrame({
-        "ID": list(rows), "ParentID": [9] * 3, "Z": [rows[i][0] for i in rows],
-        "Zum": [float(rows[i][0]) for i in rows], "Curve": [[rows[i][2] + shift[i]] for i in rows],
-        "Registered": [True] * 3,
+        "ID": ids, "ParentID": [9] * 3, "Z": [rows[i][0] for i in ids], "Zum": [float(rows[i][0]) for i in ids],
+        "Curve": [[rows[i][2] + shift[i]] for i in ids], "Registered": [True] * 3,
     })
     if corrected:
         neuron.nodes["CorrDXnm"] = [moves[i][0] * 1000.0 for i in ids]
@@ -490,53 +481,6 @@ def test_a_loaded_cell_s_outlines_are_moved_back_to_where_viking_draws_them_and_
     rings = cc.registered_rings(neuron, own, stage_frame(own))
     assert np.allclose(rings[22][0], circle(5.0))                # the move taken back off
     assert cc.scan_neuron(outline_cell(corrected=False)).outline_moves == []
-
-
-def test_the_outlines_the_log_lists_go_back_and_everything_else_keeps_the_correction():
-    """``keep_outlines`` (2.38.0): the outline the log lists is put back where the registration
-    drew it, node and outline; a disc and the outlines not listed keep Viking's correction, and
-    the correction's summary says what was kept.  An ID that is not a moved outline is not kept."""
-    import shapely
-
-    from sbfsem.io.corrections import (
-        CellCorrection,
-        CorrectionSet,
-        apply_offsets,
-        uncorrect_outlines,
-    )
-
-    step = float(shapely.Polygon(lobed()).centroid.x)
-    neuron = outline_cell(corrected=False, disc=True)
-    registered = neuron.nodes.set_index("ID")[["Xum", "Yum"]].copy()
-    rings = {int(r.ID): np.asarray(r.Curve[0]).copy() for r in neuron.geometries.itertuples()}
-    offsets = pd.DataFrame({"ID": [21, 22, 23, 24], "Z": [99, 100, 101, 102],
-                            "dx_nm": [0.0, step / 2 * 1000.0, 0.0, 300.0], "dy_nm": [0.0, 0.0, 0.0, 200.0],
-                            "trusted": [True] * 4, "found": [True] * 4})
-    correction = CellCorrection(CorrectionSet("InferiorMonkey", "Grid16"), offsets, extras={"mode": "all"})
-    apply_offsets(neuron, correction)
-    plain = dict(neuron.section_correction)
-    listed = [m.location_id for m in cc.scan_neuron(neuron).outline_moves]
-    assert listed == [22]
-
-    assert uncorrect_outlines(neuron, correction, [*listed, 21, 24, 999]) == [22]
-    nodes = neuron.nodes.set_index("ID")
-    assert nodes.loc[22, ["CorrDXnm", "CorrDYnm"]].tolist() == [0.0, 0.0]
-    assert np.allclose(nodes.loc[22, ["Xum", "Yum"]].to_numpy(float), registered.loc[22].to_numpy(float))
-    assert np.allclose(nodes.loc[24, ["Xum", "Yum"]].to_numpy(float), registered.loc[24].to_numpy(float) + [0.3, 0.2])
-    curves = neuron.geometries.set_index("ID")["Curve"]
-    for i in (21, 22, 23):
-        assert np.allclose(curves[i][0], rings[i], atol=1e-12), i
-    summary = neuron.section_correction
-    assert (summary["keep_outlines"], summary["n_kept"], summary["kept_outlines"]) == (True, 1, [22])
-    assert (plain["n_moved"], summary["n_moved"]) == (2, 1)
-    assert summary["n_trusted"] == plain["n_trusted"] == 4
-    assert summary["token"] != plain["token"]          # what a surface built from it is keyed on
-    assert "keep_outlines" not in plain
-    # Viking's offset stays in the correction, for the record; the cell as drawn has nothing to list.
-    kept = correction.offsets.set_index("ID")
-    assert bool(kept.at[22, "kept"]) and kept.at[22, "dx_nm"] == pytest.approx(step / 2 * 1000.0)
-    assert 22 not in correction.applied["ID"].tolist()
-    assert cc.scan_neuron(neuron).outline_moves == []
 
 
 # -- the service and the endpoint ----------------------------------------------------

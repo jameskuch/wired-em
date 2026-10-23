@@ -46,34 +46,7 @@ test('in words, as the cell panel says them; a volume without transforms names n
 test('the load of a copy asks for the registration and the synapses, never the person\'s moves', () => {
   const body = rg.copyLoadBody({ id: 1178, source: 'NeitzInferiorMonkey' }, { live: false, corrections: 'curvefit' });
   assert.deepEqual(body, { id: 1178, source: 'NeitzInferiorMonkey', include_synapses: true,
-    live_registration: false, section_corrections: 'curvefit', keep_outlines: false });
-  // A plain copy of a curve fit says so, so a server default can never make it another copy;
-  // a mode without a fit has nothing to keep.
-  assert.equal('keep_outlines' in rg.copyLoadBody({ id: 1, source: 'i' }, { live: true, corrections: 'neighbor' }), false);
-  assert.equal(rg.copyLoadBody({ id: 1, source: 'i' }, { live: true, corrections: 'all', keepOutlines: true })
-    .keep_outlines, true);
-});
-
-test('a copy that keeps the listed outlines has its own tag and name, under a curve fit only', () => {
-  const kept = { live: true, corrections: 'all', keepOutlines: true };
-  assert.equal(rg.registrationTag(kept), 'all.1.k');
-  assert.deepEqual(rg.registrationOfTag('all.1.k'), kept);
-  assert.deepEqual(rg.registrationOfTag('curvefit.0.k'), { live: false, corrections: 'curvefit', keepOutlines: true });
-  assert.equal(rg.registrationOfTag('neighbor.1.k'), null, 'the server never tags a field copy .k');
-  assert.deepEqual(rg.normalizeRegistration({ live: true, corrections: 'neighbor', keepOutlines: true }),
-    { live: true, corrections: 'neighbor' });
-  assert.equal(rg.registrationTag({ live: true, corrections: 'off', keepOutlines: true }), 'off.1');
-  assert.ok(!rg.sameRegistration(kept, { live: true, corrections: 'all' }));
-  assert.equal(rg.registrationLabel(kept), 'Current transforms + Field + fit, listed outlines kept');
-  assert.equal(rg.registrationShort(kept, { compact: true }), 'current+field+fit+kept');
-  assert.equal(rg.copyLabel('all.1.k'), 'Current transforms + Field + fit, listed outlines kept');
-  assert.equal(rg.copyLabel('all.1.k.m3f9a'),
-    'Current transforms + Field + fit, listed outlines kept, with manual moves');
-  assert.equal(rg.registrationPart('all.1.k.m3f9a'), 'all.1.k');
-  assert.equal(rg.registrationPart('all.1.m3f9a'), 'all.1');
-  assert.equal(rg.registrationPart('nonsense'), null);
-  // The sweep's choices stay the plain eight.
-  assert.ok(rg.registrationChoices().every((r) => !r.keepOutlines));
+    live_registration: false, section_corrections: 'curvefit' });
 });
 
 test('every registration a layer can take: eight with the transforms read, four without, stored first', () => {

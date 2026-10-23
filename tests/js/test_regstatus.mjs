@@ -20,26 +20,6 @@ const cases = [];
 const test = (name, fn) => cases.push([name, fn]);
 const stamp = (t) => `<${t}>`;
 
-test('the Keep listed outlines chip counts the outlines kept, and says nothing when off', () => {
-  const sc = { requested: true, applied: true, mode: 'all', keep_outlines: true, n_kept: 2, kept_outlines: [1337465, 39957] };
-  const chip = R.keepChip(sc);
-  assert.equal(chip.text, '2 kept');
-  assert.match(chip.help, /^2 traced outlines the Correction log lists are drawn where Viking draws them, without the correction: 1337465, 39957\./);
-  assert.equal(R.keepChip({ ...sc, n_kept: 1, kept_outlines: [5] }).text, '1 kept');
-  assert.match(R.keepChip({ ...sc, n_kept: 1, kept_outlines: [5] }).help, /^1 traced outline .* is drawn where Viking draws it/);
-  const many = Array.from({ length: 15 }, (_, i) => i + 1);
-  assert.match(R.keepChip({ ...sc, n_kept: 15, kept_outlines: many }).help, /: 1, 2, .*, 12, …\./);
-  assert.equal(R.keepChip({ ...sc, n_kept: 0, kept_outlines: [] }).text, 'none kept');
-  for (const off of [null, { ...sc, keep_outlines: false }, { ...sc, applied: false }, { requested: false }]) {
-    assert.equal(R.keepChip(off).text, '', JSON.stringify(off));
-  }
-  assert.equal(R.keepForCell(sc), 'This cell: 2 traced outlines left where Viking draws them.');
-  assert.equal(R.keepForCell({ ...sc, n_kept: 0 }), 'This cell: the Correction log lists none of its outlines.');
-  assert.equal(R.keepForCell({ requested: true, applied: true, mode: 'all' }), 'This cell: off.');
-  assert.match(R.keepForCell(sc, { fit: false }), /has no curve fit/);
-  assert.match(R.REG_HELP.keep, /Only with Curve fit or Field \+ fit\.$/);
-});
-
 // What the server answered on 2026-10-16 (facade._correct, CorrectionsClient.call).
 const NOT_FOUND = "Not applied: CorrectStructures at https://corrections.codepharm.net:443: NOT_FOUND no VikingXML endpoint for 'InferiorMonkey'";
 const TIMEOUT = 'Not applied: CorrectStructures at https://corrections.codepharm.net:443: DEADLINE_EXCEEDED Deadline Exceeded';

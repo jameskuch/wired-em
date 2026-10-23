@@ -3058,8 +3058,8 @@ def correctionlog(c: Chrome, r: Report, ctx):
 
     ratio('20')
     everything = js(c, OUTLINE_ROWS)
-    # c1178's own block: a block names its cell on its first row only, and other cells (or a
-    # copy of c1178 with Keep listed outlines) may be loaded on the server too.
+    # c1178's own block: a block names its cell on its first row only, and other cells may be
+    # loaded on the server too.
     owner, outlines = None, []
     for row in everything:
         owner = (row['cells'][1], row['cells'][2]) if row['cells'][1] else owner
@@ -3068,8 +3068,7 @@ def correctionlog(c: Chrome, r: Report, ctx):
 
     def falls(row) -> bool:
         before, after = (float(v) for v in row['cells'][8].split(' → '))
-        cause = row['cells'][12].removesuffix(', kept')
-        return after <= before and float(row['cells'][9]) >= 0.2 and cause in ('shape', 'slide', 'other')
+        return after <= before and float(row['cells'][9]) >= 0.2 and row['cells'][12] in ('shape', 'slide', 'other')
 
     rule = js(c, "document.querySelector('#correction-log .settings-outline-table')?.closest('.settings-scroll')"
                  "?.previousElementSibling?.textContent || ''")

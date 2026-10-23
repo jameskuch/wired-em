@@ -175,23 +175,6 @@ least `OUTLINE_MIN_OFF` (0.2); `cause` says why (`shape`, `slide`, `other`).
 thresholds, what they list on 11 cells and what leaving outlines in place would
 do are in `docs/context/correction-outlines-2026-10-22.md`.
 
-Leaving the listed outlines in place is a load option (2.38.0, off by default
-in the library, the API and the web app): `correct_neuron(..., keep_outlines=True)`
-or `SbfsemService.load_neuron(..., keep_outlines=True)` under `curvefit` or `all`.
-The scan runs on Viking's correction, then
-`sbfsem.io.corrections.uncorrect_outlines(neuron, correction, ids)` takes the
-correction off the outlines it lists, node row (`CorrDXnm`/`CorrDYnm` zero) and
-outline, every other annotation keeping its own. The offsets stay in the
-`CellCorrection` with a `kept` column, not applied, so its `token`, and with it
-the mesh key, differs from the plain copy's; the summary names them
-(`keep_outlines`, `n_kept`, `kept_outlines`). The service holds it as another copy,
-tagged `<mode>.<0|1>.k` (`copy_tag(mode, live, keep_outlines)`), and keeps the scan
-from before the keep as the copy's `correction_pulls`, with `kept` set, so the log
-lists the same outlines for both copies. Measured post hoc on 8 cells (Viking's fit
-would still take a kept outline as a control point): RC1 c410's worsened linked
-outline pairs 318 → 196 with the 400 it improved kept, median link step 0.121 →
-0.118 um.
-
 ## The data model
 
 `Neuron.nodes`, `.edges` and `.synapses` are pandas DataFrames.
