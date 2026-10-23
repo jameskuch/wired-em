@@ -70,7 +70,7 @@ import {
 } from './comparelayers.js';
 import {
   normalizeRegistration, registrationTag, registrationOfTag, registrationLabel, registrationShort,
-  registrationChoices, copyLoadBody, correctionName, copyLabel,
+  registrationChoices, copyLoadBody, correctionName, copyLabel, registrationPart,
 } from './registrations.js';
 
 /** The render options the measurement endpoints accept: the whole of a layer's
@@ -671,12 +671,12 @@ export class CompareView {
     const record = this.cell() ?? this.record;
     const info = record ? this.volumeInfo(record.source) : null;
     const source = this._sweepSource();
-    const loaded = /^((?:off|neighbor|curvefit|all)\.[01])/.exec(record?.summary?.copy_tag ?? '');
     return {
       cell: record ? `c${record.id}` : 'the cell',
       hasTransforms: this._hasTransforms(record),
       defaultCorrection: info?.default_correction ?? 'all',
-      loadedTag: loaded ? loaded[1] : null,
+      // "all.1.k" (the tab keeps the listed outlines) is none of the plain choices.
+      loadedTag: registrationPart(record?.summary?.copy_tag),
       source: source ? techniqueName(source.config.options) : null,
       where: source ? this._where(source).toLowerCase() : '',
       pane: source ? source.pane.index + 1 : 1,

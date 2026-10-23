@@ -289,6 +289,11 @@ export function upsertNeuron(detail, { render, display, select = true } = {}) {
     // The mode last chosen, so switching the correction off and on again
     // brings that one back.
     correctionMode: existing?.correctionMode,
+    // Leave the traced outlines the correction log lists where Viking draws them,
+    // under Curve fit or Field + fit (the Keep listed outlines switch): true, false,
+    // or undefined for the server's default (off).  What was applied is
+    // summary.section_correction.keep_outlines and its n_kept.
+    keepOutlines: existing?.keepOutlines,
     // Viking's current section transforms, likewise (undefined: the server's
     // default, on); what was applied is summary.live_registration.
     registration: existing?.registration,

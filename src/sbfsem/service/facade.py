@@ -104,7 +104,12 @@ from ..geometry.unify import (
     raw_budget,
 )
 from ..geometry.volume import curve_volume_to_mesh
-from ..io.corrections import CorrectionsError, CorrectionsProvider, correction_mode
+from ..io.corrections import (
+    CorrectionsError,
+    CorrectionsProvider,
+    correction_mode,
+    uncorrect_outlines,
+)
 from ..io.loader import NeuronLoader
 from ..io.odata import ODataClient, ODataError, odata_utc
 from ..io.registration import RegistrationError, RegistrationProvider
@@ -333,11 +338,15 @@ _REQUEST_COPY: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "sbfsem_request_copy", default=None)
 
 
-def copy_tag(mode: str, live: bool) -> str:
+def copy_tag(mode: str, live: bool, keep_outlines: bool = False) -> str:
     """The name of a loaded copy's setting: Viking's correction mode, then 1
     when the volume's current section transforms were asked for
-    (``"curvefit.1"``, ``"off.0"``)."""
-    return f"{mode}.{int(bool(live))}"
+    (``"curvefit.1"``, ``"off.0"``), then ``.k`` when the traced outlines the
+    correction log lists are left where the registration drew them
+    (``"all.1.k"``; a mode with a curve fit only: under any other the option
+    changes nothing, and the copy is the plain one)."""
+    keep = ".k" if keep_outlines and mode in FIT_MODES else ""
+    return f"{mode}.{int(bool(live))}{keep}"
 
 
 def positions_token(neuron) -> str | None:
@@ -664,7 +673,8 @@ class SbfsemService:
                  build_recycle_mb: float | None = None,
                  untagged_psd: str = "assume", section_corrections: bool | str = False,
                  lab_corrections: Mapping[str, bool | str] | None = None,
-                 corrections_url: str | None = None, live_registration: bool = False):
+                 corrections_url: str | None = None, live_registration: bool = False,
+                 keep_outlines: bool = False):
         self.offline = offline
         # Viking's current section transforms (sbfsem.io.registration): what
         # a load that does not say gets.  Off here, as the library is (MATLAB
@@ -682,6 +692,10 @@ class SbfsemService:
                                 for lab, mode in (lab_corrections or {}).items()}
         self._corrections_url = corrections_url
         self._corrections: CorrectionsProvider | None = None
+        # Whether a load that does not say leaves the traced outlines the
+        # correction log lists where the registration drew them, under a mode
+        # with a curve fit (:meth:`_correct`).  Off here and in the web app.
+        self.keep_outlines = bool(keep_outlines)
         # What a postsynapse whose Viking tags name no kind becomes (see
         # ``sbfsem.core.types.UNTAGGED_POLICIES``).  MATLAB assumed
         # conventional; the web app infers it from the linked partner.
@@ -1173,6 +1187,7 @@ class SbfsemService:
         section_corrections: bool | str | None = None,
         live_registration: bool | None = None,
         manual_moves: Mapping[str, Any] | None = None,
+        keep_outlines: bool | None = None,
     ) -> NeuronDetailDTO:
         """Fetch a neuron from Viking (or the cache) and keep it in memory.
 
@@ -1190,7 +1205,10 @@ class SbfsemService:
         off, neighbor, curvefit or all; ``True`` is neighbor).  ``None`` takes
         the service's default for either; a loaded cell asked for with another
         setting is loaded again with it.  A refresh also re-reads the cell's
-        stos files.
+        stos files.  ``keep_outlines``, under ``curvefit`` or ``all``, leaves
+        the traced outlines the correction log lists where the registration
+        drew them, Viking's correction taken off them alone (:meth:`_correct`);
+        ``None`` takes the service's default (off).
 
         ``manual_moves`` maps a setting's copy tag (``"curvefit.1"``) to the
         move set a person made under it (:func:`~sbfsem.core.moves.normalize_moves`);
@@ -1205,23 +1223,26 @@ class SbfsemService:
         want = (self.default_correction(volume) if section_corrections is None
                 else correction_mode(section_corrections))
         live = self.live_registration if live_registration is None else bool(live_registration)
-        tag = copy_tag(want, live)
+        keep = self._keeps(want, keep_outlines)
+        tag = copy_tag(want, live, keep)
         moves = normalize_moves((manual_moves or {}).get(tag))
         want_transform = Transforms.from_str(transform)
         with self._lock:
             held = (self._copies[key][tag] if not refresh
-                    and self._satisfies(key, want, live, include_synapses, want_transform) else None)
+                    and self._satisfies(key, want, live, include_synapses, want_transform, keep)
+                    else None)
         # A copy held since an earlier load, or one the disk cache keeps, can be
         # older than the cell in Viking: Temporal c162392, being traced, was drawn
         # from its first annotation an hour after it had 153 (2026-10-21).
         fetch_fresh = refresh or (held is not None and self._viking_newer(held))
         with self._lock:
-            if not fetch_fresh and self._satisfies(key, want, live, include_synapses, want_transform):
+            if not fetch_fresh and self._satisfies(key, want, live, include_synapses, want_transform, keep):
                 return self._held(key, tag, neuron_id, volume, moves)
             gate = self._loading.setdefault(key, threading.Lock())
         with gate:
             with self._lock:
-                if not fetch_fresh and self._satisfies(key, want, live, include_synapses, want_transform):
+                if not fetch_fresh and self._satisfies(key, want, live, include_synapses, want_transform,
+                                                       keep):
                     return self._held(key, tag, neuron_id, volume, moves)
             client = self.client(volume)
             loader = NeuronLoader(volume, client=client)
@@ -1246,7 +1267,7 @@ class SbfsemService:
             if live:
                 neuron.registration_status = self._register(neuron, force=refresh)
             if want != "off":
-                neuron.correction_status = self._correct(neuron, want)
+                neuron.correction_status = self._correct(neuron, want, keep)
             with self._lock:
                 self._store(key, neuron, tag)
         return self._held(key, tag, neuron_id, volume, moves)
@@ -1369,7 +1390,14 @@ class SbfsemService:
         status = getattr(neuron, "correction_status", None) or {}
         mode = status.get("mode", "neighbor") if status.get("requested") else "off"
         reg = getattr(neuron, "registration_status", None) or {}
-        return copy_tag(mode, bool(reg.get("requested")))
+        return copy_tag(mode, bool(reg.get("requested")), bool(status.get("keep_outlines")))
+
+    def _keeps(self, mode: str, keep_outlines: bool | None) -> bool:
+        """Whether a load in ``mode`` leaves the listed outlines where the
+        registration drew them: as asked (``None``: the service's default), and
+        only under a mode with a curve fit."""
+        keep = self.keep_outlines if keep_outlines is None else bool(keep_outlines)
+        return keep and mode in FIT_MODES
 
     # -- Viking's section corrections --------------------------------------
     def default_correction(self, source) -> str:
@@ -1390,7 +1418,8 @@ class SbfsemService:
             return self._corrections
 
     def _satisfies(self, key: _Key, want: str, live: bool = False,
-                   include_synapses: bool = False, transform: Transforms | None = None) -> bool:
+                   include_synapses: bool = False, transform: Transforms | None = None,
+                   keep: bool = False) -> bool:
         """Is the loaded cell (if any) already what a load with ``want``/``live`` asks for?
 
         ``want`` is a correction mode; a cell corrected in another mode is
@@ -1404,7 +1433,7 @@ class SbfsemService:
         them, nor one that names a ``transform`` by a copy in another (a
         copy that was not loaded here, from a file, is taken as it is).
         """
-        neuron = self._copies.get(key, {}).get(copy_tag(want, live))
+        neuron = self._copies.get(key, {}).get(copy_tag(want, live, keep))
         if neuron is None:
             return False
         if neuron.loaded_synapses is not None:  # loaded here, so what it was loaded with is known
@@ -1467,33 +1496,55 @@ class SbfsemService:
                  summary.get("sections_moved") or "none")
         return {"requested": True, "applied": True, **summary}
 
-    def _correct(self, neuron: Neuron, mode: str = "neighbor") -> dict:
-        """Apply Viking's section correction in ``mode``; the status the cell shows."""
+    def _correct(self, neuron: Neuron, mode: str = "neighbor", keep: bool = False) -> dict:
+        """Apply Viking's section correction in ``mode``; the status the cell shows.
+
+        ``keep`` (a mode with a curve fit): the traced outlines the correction log
+        lists (:func:`~sbfsem.analysis.correction_checks.scan_outlines`) stay where
+        the registration drew them, every other annotation keeping the correction
+        (:func:`~sbfsem.io.corrections.uncorrect_outlines`).  The log's scan is of
+        Viking's correction, before that, so it lists them as it does without
+        ``keep``, each marked kept.
+        """
+        asked = {"keep_outlines": True} if keep else {}
         volume_name = neuron.volume.viking_name
         if not volume_name:
-            return {"requested": True, "mode": mode,
+            return {"requested": True, "mode": mode, **asked,
                     "note": f"{neuron.volume.display_name} is not a Viking volume"}
         try:
             correction = self.corrections().correct(neuron, mode)
         except CorrectionsError as exc:
             log.warning("c%s %s: section correction (%s) not applied: %s",
                         neuron.id, volume_name, mode, exc)
-            return {"requested": True, "mode": mode, "note": f"Not applied: {exc}"}
+            return {"requested": True, "mode": mode, **asked, "note": f"Not applied: {exc}"}
         if correction is None:
-            return {"requested": True, "mode": mode,
+            return {"requested": True, "mode": mode, **asked,
                     "note": f"No section correction is published for {volume_name}"}
+        if mode in FIT_MODES:
+            found = self._scan_pulls(neuron, mode)
+            neuron.correction_pulls = found
+            if keep and found is not None:
+                self._keep_outlines(neuron, correction, found)
         summary = dict(neuron.section_correction or {})
         note = summary.pop("service_note", "")
         log.info("c%s %s: section correction %s, %s %s: %d of %d annotations moved, max %.2f um%s",
                  neuron.id, volume_name, mode, summary.get("stos_group"), summary.get("built_utc"),
                  summary.get("n_moved", 0), summary.get("n_annotations", 0),
                  summary.get("max_um", 0.0), " (offsets from disk)" if summary.get("cached") else "")
-        status = {"requested": True, "applied": True, "mode": mode, **summary}
+        status = {"requested": True, "applied": True, "mode": mode, **asked, **summary}
         if note:
             status["note"] = f"The service is not answering; offsets kept from before ({note})"
-        if mode in FIT_MODES:
-            neuron.correction_pulls = self._scan_pulls(neuron, mode)
         return status
+
+    @staticmethod
+    def _keep_outlines(neuron: Neuron, correction, found: PullScan) -> None:
+        """Take Viking's correction off the outlines ``found`` lists (:meth:`_correct`)."""
+        kept = uncorrect_outlines(neuron, correction, [m.location_id for m in found.outline_moves])
+        found.kept = tuple(kept)
+        if kept:
+            log.info("c%s %s: %d traced outline(s) the correction log lists left where the "
+                     "registration drew them: %s", neuron.id, neuron.volume.viking_name, len(kept),
+                     ", ".join(str(k) for k in kept[:12]) + (" ..." if len(kept) > 12 else ""))
 
     @staticmethod
     def _scan_pulls(neuron: Neuron, mode: str) -> PullScan | None:
@@ -1917,6 +1968,8 @@ class SbfsemService:
         if (saved.get("applied") and saved.get("mode") in FIT_MODES
                 and getattr(neuron, "correction_pulls", None) is None):
             # The file keeps the moves, so the correction log can test them as at a load.
+            # Outlines a copy kept were saved without Viking's move, so its scan lists
+            # them no more: the summary still names them (``kept_outlines``).
             neuron.correction_pulls = self._scan_pulls(neuron, str(saved["mode"]))
         if getattr(neuron, "live_registration", None) and not getattr(
                 neuron, "registration_status", None):
@@ -4208,7 +4261,8 @@ class SbfsemService:
         cell = dto(
             source=key.source, neuron_id=key.neuron_id, copy_tag=tag, mode=mode,
             checked=found is not None, service_version=corrected.get("service_version") or None,
-            stos_group=corrected.get("stos_group"), **(extra or {}))
+            stos_group=corrected.get("stos_group"), keep_outlines=bool(status.get("keep_outlines")),
+            n_kept=int(corrected.get("n_kept") or 0), **(extra or {}))
         if not status.get("applied"):
             cell.note = str(status.get("note") or "Not applied")
         elif mode not in FIT_MODES:
@@ -4220,7 +4274,9 @@ class SbfsemService:
             cell.n_next_to_wider = found.n_next_to_wider(ratio)
             cell.pulls = [CorrectionPullDTO(**p.as_dict()) for p in found.at(ratio)]
             cell.n_outlines, cell.n_outlines_moved = found.n_outlines, found.n_outlines_moved
-            cell.outline_moves = [CorrectionOutlineMoveDTO(**m.as_dict()) for m in found.outline_moves]
+            kept = set(found.kept)
+            cell.outline_moves = [CorrectionOutlineMoveDTO(**m.as_dict(), kept=m.location_id in kept)
+                                  for m in found.outline_moves]
         return cell
 
     def shift_summary(self, neuron_id: int, source, pair: str = "correction") -> ShiftSummaryDTO:
@@ -4245,6 +4301,7 @@ class SbfsemService:
                     sampling: str = "annotations", radius: str = "stored",
                     section_corrections: bool | str | None = None,
                     live_registration: bool | None = None,
+                    keep_outlines: bool | None = None,
                     time_budget_s: float | None = None) -> SwcArchive:
         """One ``.swc`` per structure and a manifest, zipped (see
         :func:`sbfsem.export.bulk.swc_archive`, which says what
@@ -4253,8 +4310,8 @@ class SbfsemService:
 
         Every file of one archive is drawn the same way: through the
         volume's current section transforms and Viking's section correction
-        as ``live_registration`` and ``section_corrections`` say, the
-        service's defaults (a load's) when they do not.  A cell already
+        as ``live_registration``, ``section_corrections`` and ``keep_outlines``
+        say, the service's defaults (a load's) when they do not.  A cell already
         loaded that way is written as loaded; any other is fetched for the
         archive alone -- without its synapses, and without joining the table
         of loaded cells, which every browser shares.  Until 2026-09-25 a
@@ -4268,12 +4325,13 @@ class SbfsemService:
         want = (self.default_correction(volume) if section_corrections is None
                 else correction_mode(section_corrections))
         live = self.live_registration if live_registration is None else bool(live_registration)
+        keep = self._keeps(want, keep_outlines)
 
         def load(structure_id: int):
             key = _Key(volume.source, int(structure_id))
             with self._lock:
-                loaded = self._copies.get(key, {}).get(copy_tag(want, live))
-                usable = loaded is not None and not refresh and self._satisfies(key, want, live)
+                loaded = self._copies.get(key, {}).get(copy_tag(want, live, keep))
+                usable = loaded is not None and not refresh and self._satisfies(key, want, live, keep=keep)
             if usable:
                 return loaded
             bypass = client.fresh() if refresh else contextlib.nullcontext()
@@ -4283,7 +4341,7 @@ class SbfsemService:
             if live:
                 neuron.registration_status = self._register(neuron, force=refresh)
             if want != "off":
-                neuron.correction_status = self._correct(neuron, want)
+                neuron.correction_status = self._correct(neuron, want, keep)
             return neuron
 
         return swc_archive(neuron_ids, load, volume=volume.source, pattern=pattern,
@@ -4754,6 +4812,7 @@ def registration_quality(neuron: Neuron) -> dict:
         "pulls": len(scan.at(DEFAULT_RATIO)) if scan is not None else None,
         "pull_ratio": DEFAULT_RATIO,
         "outline_moves": len(scan.outline_moves) if scan is not None else None,
+        "outlines_kept": len(scan.kept) if scan is not None else None,
     }
 
 

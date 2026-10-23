@@ -169,6 +169,10 @@ test('a step that switched Registration or the section correction reloads the ce
   assert.ok(!registrationChoiceDiffers(moved, { ...moved, manualMoves: JSON.parse(JSON.stringify(moved.manualMoves)) }));
   assert.ok(!registrationChoiceDiffers({ ...record, manualMoves: {} }, { ...record, manualMoves: null }),
     'no moves and an empty store are the same');
+  // Keep listed outlines (2.38.0): another copy of the cell, so a step that switched it reloads too.
+  assert.ok(registrationChoiceDiffers({ ...record, keepOutlines: true }, { ...record }));
+  assert.ok(registrationChoiceDiffers({ ...record, keepOutlines: true }, { ...record, keepOutlines: false }));
+  assert.ok(!registrationChoiceDiffers({ ...record, keepOutlines: true }, { ...record, keepOutlines: true }));
 });
 
 // -- the surfaces kept for Undo (audit wave 2, R3) ----------------------------------

@@ -170,8 +170,8 @@ test('several archives are summed, and a short one is not buried by the next', (
 });
 
 // -- the bulk SWC archives --------------------------------------------------------
-const cell = (id, { registration, corrections, lr, sc } = {}) => ({
-  id, source: 'RC1', registration, corrections,
+const cell = (id, { registration, corrections, keepOutlines, lr, sc } = {}) => ({
+  id, source: 'RC1', registration, corrections, keepOutlines,
   summary: { live_registration: lr, section_correction: sc },
 });
 
@@ -188,11 +188,33 @@ test('what the server applied is what the archive is drawn with', () => {
     registration: undefined, corrections: true,
     lr: { requested: true, applied: true }, sc: { requested: true, mode: 'curvefit', applied: true },
   }));
-  assert.deepEqual(way, { registration: true, corrections: 'curvefit' });
+  assert.deepEqual(way, { registration: true, corrections: 'curvefit', keepOutlines: false });
   const off = X.drawnWith(cell(1, {
     lr: { requested: false }, sc: { requested: false, applied: false },
   }));
   assert.deepEqual(off, { registration: false, corrections: 'off' });
+});
+
+test('the outlines kept are part of how a cell is drawn, under a curve fit only', () => {
+  const kept = X.drawnWith(cell(1, { sc: { requested: true, mode: 'all', applied: true, keep_outlines: true } }));
+  assert.deepEqual(kept, { registration: undefined, corrections: 'all', keepOutlines: true });
+  // The residual field keeps nothing: the server answers that copy without the option.
+  const field = X.drawnWith(cell(1, { keepOutlines: true, sc: { requested: true, mode: 'neighbor', applied: true } }));
+  assert.deepEqual(field, { registration: undefined, corrections: 'neighbor' });
+  // Before any load the cell's own choice says it.
+  assert.equal(X.drawnWith(cell(1, { corrections: 'curvefit', keepOutlines: true })).keepOutlines, true);
+  const plan = X.planBulkSwc([
+    cell(1, { corrections: 'all', keepOutlines: true }), cell(2, { corrections: 'all' }),
+    cell(3, { corrections: 'all', keepOutlines: true }),
+  ]);
+  assert.deepEqual(plan.map((p) => p.ids), [[1, 3], [2]]);
+  assert.deepEqual(plan.map((p) => p.keepOutlines), [true, undefined]);
+  const url = new URL(api.bulkSwcUrl('RC1', [1, 3], {
+    section_corrections: 'all', keep_outlines: plan[0].keepOutlines,
+  }), 'http://x');
+  assert.equal(url.searchParams.get('keep_outlines'), 'true');
+  assert.equal(new URL(api.bulkSwcUrl('RC1', [2], { keep_outlines: undefined }), 'http://x')
+    .searchParams.has('keep_outlines'), false);
 });
 
 test('a legacy on/off correction is the residual field / off', () => {

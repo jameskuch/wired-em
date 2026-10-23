@@ -576,6 +576,10 @@ class LoadNeuronBody(BaseModel):
     #: (true = neighbor); absent = the server's default.
     section_corrections: Any = None
     live_registration: bool | None = None
+    #: Under Curve fit or Field + fit: leave the traced outlines the correction
+    #: log lists where the registration drew them (absent = the server's
+    #: default, off).  Another copy of the cell, tagged ``.k``.
+    keep_outlines: bool | None = None
     check_fresh: _Flag = True
     #: A person's own moves of the cell's annotations, by the setting they were
     #: made under (a copy tag, ``"curvefit.1"``): ``[{"id", "dx_um", "dy_um",
@@ -607,6 +611,7 @@ def load_neuron(request: Request, body: LoadNeuronBody):
             section_corrections=mode,
             live_registration=None if live is None else bool(live),
             manual_moves=body.manual_moves,
+            keep_outlines=body.keep_outlines,
         )
         detail.attached_render = _cell_renders(request).get(source, neuron_id)
         # A load served from the disk cache may be months old; one small live
@@ -2525,7 +2530,12 @@ def export_swc_bulk(request: Request, source: str,
                     section_corrections: str | None = Query(
                         None,
                         description="Viking's section correction for every cell: off, "
-                                    "neighbor, curvefit or all; absent: the server's default")):
+                                    "neighbor, curvefit or all; absent: the server's default"),
+                    keep_outlines: bool | None = Query(
+                        None,
+                        description="Under curvefit or all, leave the traced outlines the "
+                                    "correction log lists where the registration drew them; "
+                                    "absent: the server's default (off)")):
     """A zip of one SWC per structure plus ``manifest.csv``: a population in
     one request, every file carrying its own provenance header, every cell
     drawn the same way."""
@@ -2548,7 +2558,7 @@ def export_swc_bulk(request: Request, source: str,
                                relax=swc_relax, relax_bound=swc_relax_bound, bracket=bracket,
                                lamellae=swc_lamellae, sampling=swc_sampling, radius=swc_radius,
                                section_corrections=mode, live_registration=live_registration,
-                               time_budget_s=BULK_EXPORT_BUDGET_S)
+                               keep_outlines=keep_outlines, time_budget_s=BULK_EXPORT_BUDGET_S)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return Response(

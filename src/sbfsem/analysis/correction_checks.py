@@ -58,7 +58,10 @@ with the outlines linked to them, where Viking draws them
 (:func:`outline_overlaps`); the thresholds were chosen on 11 cells on
 2026-10-22 (``docs/context/correction-outlines-2026-10-22.md``): from 0.25 um
 three in four of the fit's outline moves lower that overlap, below 0.1 um most
-raise it.
+raise it.  The load option ``keep_outlines`` (off by default, 2.38.0) leaves the
+outlines it lists where the registration drew them, every other annotation
+keeping Viking's correction; on RC1 c410 that kept the 400 linked outline pairs
+the fit lined up better and cut the 318 it lined up worse to 196.
 """
 
 from __future__ import annotations
@@ -248,6 +251,11 @@ class PullScan:
     #: many of them the correction moved :data:`OUTLINE_MIN_MOVE_UM` or more.
     n_outlines: int = 0
     n_outlines_moved: int = 0
+    #: The listed outlines left where the registration drew them, Viking's
+    #: correction taken off (``sbfsem.io.corrections.uncorrect_outlines``, the
+    #: load option ``keep_outlines``).  The scan is of Viking's correction, before
+    #: that: a copy that keeps them lists what the copy without the option does.
+    kept: tuple[int, ...] = ()
 
     def at(self, ratio: float = DEFAULT_RATIO) -> list[Pull]:
         """The pulls toward a neighbor at least ``ratio`` times as wide."""

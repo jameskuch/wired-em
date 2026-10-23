@@ -3057,11 +3057,19 @@ def correctionlog(c: Chrome, r: Report, ctx):
         c.settle(1)
 
     ratio('20')
-    outlines = js(c, OUTLINE_ROWS)
+    everything = js(c, OUTLINE_ROWS)
+    # c1178's own block: a block names its cell on its first row only, and other cells (or a
+    # copy of c1178 with Keep listed outlines) may be loaded on the server too.
+    owner, outlines = None, []
+    for row in everything:
+        owner = (row['cells'][1], row['cells'][2]) if row['cells'][1] else owner
+        if owner == ('c1178', 'Field + fit'):
+            outlines.append(row)
 
     def falls(row) -> bool:
         before, after = (float(v) for v in row['cells'][8].split(' → '))
-        return after <= before and float(row['cells'][9]) >= 0.2 and row['cells'][12] in ('shape', 'slide', 'other')
+        cause = row['cells'][12].removesuffix(', kept')
+        return after <= before and float(row['cells'][9]) >= 0.2 and cause in ('shape', 'slide', 'other')
 
     rule = js(c, "document.querySelector('#correction-log .settings-outline-table')?.closest('.settings-scroll')"
                  "?.previousElementSibling?.textContent || ''")
@@ -3072,7 +3080,7 @@ def correctionlog(c: Chrome, r: Report, ctx):
     folded = [row for row in outlines if row['hidden']]
     if len(outlines) > 10:
         js(c, "document.querySelector('#correction-log button.settings-more').click()")
-        opened = js(c, OUTLINE_ROWS)
+        opened = [row for row in js(c, OUTLINE_ROWS) if row['id'] in {o['id'] for o in outlines}]
         r.check(f'{len(outlines)} rows are folded to 10 behind "Show all", which opens them',
                 len(folded) == len(outlines) - 10 and not any(row['hidden'] for row in opened),
                 {'folded': len(folded), 'rows': len(outlines)})
@@ -3081,7 +3089,7 @@ def correctionlog(c: Chrome, r: Report, ctx):
     kept = js(c, "localStorage.getItem('sbfsem:correction-log-ratio')")
     r.check('a ratio of 20 lists none of c1178\'s pulls (13x at most), and is kept in the browser',
             narrowed and kept == '20', {'kept': kept, 'rows': js(c, LOG_ROWS)})
-    r.check('and leaves the outlines as they were', len(js(c, OUTLINE_ROWS)) == len(outlines),
+    r.check('and leaves the outlines as they were', len(js(c, OUTLINE_ROWS)) == len(everything),
             len(js(c, OUTLINE_ROWS)))
     ratio('wide')
     said = js(c, """({ value: document.getElementById('correction-log-ratio').value,

@@ -139,6 +139,7 @@ export function snapshot(state, renderer, ui = {}) {
       display: r.display,
       corrections: r.corrections,
       correctionMode: r.correctionMode,
+      ...(r.keepOutlines !== undefined ? { keepOutlines: r.keepOutlines } : {}),
       registration: r.registration,
       ...(r.manualMoves && Object.keys(r.manualMoves).length ? { manualMoves: r.manualMoves } : {}),
     })),

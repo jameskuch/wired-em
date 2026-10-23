@@ -1,4 +1,4 @@
-// What a cell's Registration section says: the help of its two switches and of
+// What a cell's Registration section says: the help of its switches and of
 // the Correction select, and the small status chip beside each switch (a count,
 // or "unavailable") whose hover has the facts and, for a failure, the reason in
 // plain words with the server's own message at the end.  Asked for 2026-10-16:
@@ -50,6 +50,16 @@ export const REG_HELP = Object.freeze({
     + 'the fit near Inferior c21768 (2026-09-23).\n\n'
     + 'Field + fit (the default for the Neitz lab\'s volumes): the field, then the fit; what Viking\'s service '
     + 'does when it is not told which.',
+  keep: 'Viking\'s curve fit (Curve fit, and Field + fit) takes each traced outline\'s centroid as a point of the '
+    + 'process. Where an outline takes in a lobe or the base of a branch, its centroid steps sideways though its '
+    + 'membrane does not, and the fit moves the next outline toward that step, off the membrane it lines up with '
+    + '(Inferior c16137\'s soma outline on section 547 moved 0.58 µm toward 546\'s lobe).\n\n'
+    + 'On: the outlines the Settings tab\'s Correction log lists stay where Viking draws them: each moved 0.25 µm '
+    + 'or more, overlapping the outlines linked to it at least 80 % where Viking draws it, and taken at least 0.2 '
+    + 'of the way off them. Every disc, every other outline and every synapse keeps the correction. On RC1 c410 '
+    + 'this kept the 400 linked outline pairs the fit lined up better and cut the 318 it lined up worse to 196. '
+    + 'Viking\'s fit of the other annotations still took these outlines\' centroids as points of the process; only '
+    + 'these outlines go back.\n\nOff: the correction as Viking gives it. Only with Curve fit or Field + fit.',
 });
 
 /**
@@ -162,4 +172,43 @@ export function correctionForCell(sc) {
   }
   const first = explainNote(sc.note, { what: 'correction', mode: sc.mode }).split('\n')[0];
   return `This cell: not corrected. ${first}`;
+}
+
+/** How many of the outlines a cell keeps its chip's hover names. */
+const KEPT_NAMED = 12;
+
+/**
+ * The Keep listed outlines switch's chip, as `correctionChip`: how many outlines the
+ * copy left where Viking draws them.  Nothing to say when it was not asked for, or the
+ * correction was not applied (the correction's own chip says why).
+ */
+export function keepChip(sc) {
+  if (!sc?.requested || !sc.applied || !sc.keep_outlines) return { text: '', warn: false, help: '' };
+  const kept = sc.kept_outlines || [];
+  const count = Number.isFinite(sc.n_kept) ? sc.n_kept : kept.length;
+  if (!count) {
+    return {
+      text: 'none kept', warn: false,
+      help: 'The Correction log lists no traced outline of this cell, so every annotation is corrected.',
+    };
+  }
+  const named = kept.slice(0, KEPT_NAMED).join(', ') + (kept.length > KEPT_NAMED ? ', …' : '');
+  return {
+    text: `${n(count)} kept`,
+    warn: false,
+    help: `${n(count)} traced outline${count === 1 ? '' : 's'} the Correction log lists ${count === 1 ? 'is' : 'are'} `
+      + `drawn where Viking draws ${count === 1 ? 'it' : 'them'}, without the correction: ${named}. `
+      + 'The Settings tab\'s Correction log has their numbers.',
+  };
+}
+
+/** The last line of the keep switch's help, as `correctionForCell`. */
+export function keepForCell(sc, { fit = true } = {}) {
+  if (!fit) return 'This cell: the correction chosen has no curve fit, so there is nothing to keep.';
+  if (!sc?.keep_outlines) return 'This cell: off.';
+  if (!sc.applied) return 'This cell: not corrected, so nothing to keep.';
+  const count = Number.isFinite(sc.n_kept) ? sc.n_kept : (sc.kept_outlines || []).length;
+  return count
+    ? `This cell: ${n(count)} traced outline${count === 1 ? '' : 's'} left where Viking draws ${count === 1 ? 'it' : 'them'}.`
+    : 'This cell: the Correction log lists none of its outlines.';
 }

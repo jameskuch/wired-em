@@ -86,7 +86,7 @@ import { buildFigure } from './helpfigures.js';
 import { ENDED as PIVOT_ENDED, pivotAtPointer } from './pivot.js';
 import { buildMovie, loadMovies, movieFor, movieManifest } from './helpmovies.js';
 import {
-  REG_FIGURES, REG_HELP, correctionChip, correctionForCell, transformsChip,
+  REG_FIGURES, REG_HELP, correctionChip, correctionForCell, keepChip, keepForCell, transformsChip,
 } from './regstatus.js';
 import { planBulkSwc, savedNotice, bulkSwcSummary, exportQuery } from './exports.js';
 import {
@@ -434,6 +434,7 @@ async function applyHistory(snap) {
           const detail = await api.load({
             id: entry.id, source: entry.source, include_synapses: true,
             section_corrections: entry.corrections, live_registration: entry.registration,
+            keep_outlines: entry.keepOutlines,
             manual_moves: movesBody(entry.manualMoves),
           });
           record = upsertNeuron(detail, {
@@ -441,6 +442,7 @@ async function applyHistory(snap) {
           });
           record.corrections = entry.corrections;
           record.correctionMode = entry.correctionMode;
+          record.keepOutlines = entry.keepOutlines;
           record.registration = entry.registration;
           record.manualMoves = entry.manualMoves ?? null;
           record.color = entry.color ?? record.color;
@@ -461,11 +463,13 @@ async function applyHistory(snap) {
           const detail = await loadInOrder(record.key, {
             id: record.id, source: record.source, include_synapses: true,
             section_corrections: entry.corrections, live_registration: entry.registration,
+            keep_outlines: entry.keepOutlines,
             manual_moves: movesBody(entry.manualMoves),
           });
           record = upsertNeuron(detail, {});
           record.corrections = entry.corrections;
           record.correctionMode = entry.correctionMode;
+          record.keepOutlines = entry.keepOutlines;
           record.registration = entry.registration;
           record.manualMoves = entry.manualMoves ?? null;
           forgetDrawn(record);
@@ -1087,6 +1091,7 @@ async function restoreSession(saved) {
           include_synapses: true,
           section_corrections: entry.corrections,
           live_registration: entry.registration,
+          keep_outlines: entry.keepOutlines,
           check_fresh: false,
           manual_moves: movesBody(entry.manualMoves),
         });
@@ -1121,6 +1126,7 @@ async function restoreSession(saved) {
         });
         record.corrections = entry.corrections;
         record.correctionMode = entry.correctionMode;
+        record.keepOutlines = entry.keepOutlines;
         record.registration = entry.registration;
         record.manualMoves = entry.manualMoves ?? null;
         record.color = entry.color ?? record.color;
@@ -4446,11 +4452,13 @@ async function restoreUnloaded(snap) {
     const detail = await api.load({
       id: snap.id, source: snap.source, include_synapses: true,
       section_corrections: snap.corrections, live_registration: snap.registration,
+      keep_outlines: snap.keepOutlines,
       manual_moves: movesBody(snap.manualMoves),
     });
     const record = upsertNeuron(detail, { render: snap.render, display: snap.display });
     record.corrections = snap.corrections;
     record.correctionMode = snap.correctionMode;
+    record.keepOutlines = snap.keepOutlines;
     record.registration = snap.registration;
     record.manualMoves = snap.manualMoves ?? null;
     record.color = snap.color;
@@ -4919,6 +4927,7 @@ async function unloadCell(record) {
     display: JSON.parse(JSON.stringify(record.display)),
     corrections: record.corrections,
     correctionMode: record.correctionMode,
+    keepOutlines: record.keepOutlines,
     registration: record.registration,
     manualMoves: record.manualMoves ?? null,
     wasSelected: isSelected(record.key),
@@ -5173,6 +5182,7 @@ async function reloadWithMoves(record) {
   const detail = await loadInOrder(record.key, {
     id: live.id, source: live.source, include_synapses: true, check_fresh: false,
     section_corrections: live.corrections, live_registration: live.registration,
+    keep_outlines: live.keepOutlines,
   });
   if (!state.neurons.has(record.key)) {
     api.unload(record.source, record.id).catch(() => {});
@@ -5248,26 +5258,33 @@ async function setRegistration(record, changes) {
   // The control that asked for this: while it still has the focus the list is its own to rebuild.
   const origin = document.activeElement;
   const live = state.neurons.get(record.key) ?? record;
-  const before = { registration: live.registration, corrections: live.corrections };
+  const before = {
+    registration: live.registration, corrections: live.corrections, keepOutlines: live.keepOutlines,
+  };
   const want = { ...before, ...changes };
   // Kept on the cell at once: a second click before this load returns builds
   // on this one's choice, not on the settings from before it.
   live.registration = want.registration;
   live.corrections = want.corrections;
+  live.keepOutlines = want.keepOutlines;
   // A mode, or 'off'; true and false are how a cell saved before the modes says it.
   const correcting = !!changes.corrections && changes.corrections !== 'off';
   const modeName = (CORRECTION_MODES.find(([v]) => v === changes.corrections)?.[1]
     || 'Residual field').toLowerCase();
+  const keeping = 'keepOutlines' in changes;
   const turning = 'registration' in changes
     ? `${changes.registration ? 'Applying' : 'Removing'} Viking's current section transforms`
-    : correcting ? `Applying Viking's section correction (${modeName})`
-      : "Removing Viking's section correction";
+    : keeping ? (changes.keepOutlines ? 'Leaving the listed outlines where Viking draws them'
+      : "Putting Viking's correction back on the listed outlines")
+      : correcting ? `Applying Viking's section correction (${modeName})`
+        : "Removing Viking's section correction";
   statusEl.textContent = `${turning} for c${record.id}…`;
   statusEl.className = 'status';
   try {
     const detail = await loadInOrder(record.key, {
       id: record.id, source: record.source, include_synapses: true,
       live_registration: want.registration, section_corrections: want.corrections,
+      keep_outlines: want.keepOutlines,
     });
     // Unloaded while this load was under way: the row is gone, and so is the
     // choice.  The server holds a copy nobody will ask for again.
@@ -5304,6 +5321,14 @@ async function setRegistration(record, changes) {
             + `current transforms put them, at most ${lr.max_um.toFixed(2)} µm from their stored position`
           : `c${record.id}: drawn at Viking's stored positions`;
       }
+    } else if (keeping) {
+      const kept = sc?.n_kept ?? 0;
+      statusEl.textContent = !changes.keepOutlines
+        ? `c${record.id}: every traced outline corrected as Viking gives it`
+        : !sc?.applied ? `c${record.id}: not corrected, so no outline to keep`
+          : kept ? `c${record.id}: ${kept.toLocaleString('en-US')} traced outline${kept === 1 ? '' : 's'} `
+            + `the Correction log lists left where Viking draws ${kept === 1 ? 'it' : 'them'}`
+            : `c${record.id}: the Correction log lists none of its outlines`;
     } else if (correcting && !sc?.applied) {
       flareStatus(`c${record.id}: no section correction applied — ${sc?.note || 'no answer'}`);
     } else {
@@ -5316,9 +5341,11 @@ async function setRegistration(record, changes) {
     // Not loaded: the cell is as it was, so its checkboxes go back too
     // (unless a later click has changed them since).
     const now = state.neurons.get(record.key);
-    if (now && now.registration === want.registration && now.corrections === want.corrections) {
+    if (now && now.registration === want.registration && now.corrections === want.corrections
+        && now.keepOutlines === want.keepOutlines) {
       now.registration = before.registration;
       now.corrections = before.corrections;
+      now.keepOutlines = before.keepOutlines;
       renderNeuronList();
     }
     fail(error);
@@ -5338,6 +5365,7 @@ async function refetchCell(record) {
     id: record.id, source: record.source,
     include_synapses: true, refresh: true,
     section_corrections: now.corrections, live_registration: now.registration,
+    keep_outlines: now.keepOutlines,
   });
   // Unloaded while Viking was asked: do not bring the row back.
   if (!state.neurons.has(record.key)) {
@@ -6838,6 +6866,7 @@ async function exportLoadedSwc(source) {
     const url = api.bulkSwcUrl(source, piece.ids, {
       pattern: 'c{id}', ...SWC_APP_OPTIONS,
       live_registration: piece.registration, section_corrections: piece.corrections,
+      keep_outlines: piece.keepOutlines,
     });
     const saved = await saveExport(url, filename);
     if (!saved) return;
@@ -7463,7 +7492,10 @@ function registrationSummary(record) {
   const what = CORRECTION_SHORT[sc?.mode] || 'field';
   // A volume whose transforms are not read here: the correction is all there is to say.
   if (!volumeHasTransforms(record.source)) {
-    if (sc?.applied) return `${what}, ${(sc.n_moved ?? 0).toLocaleString('en-US')} moved`;
+    if (sc?.applied) {
+      return `${what}, ${(sc.n_moved ?? 0).toLocaleString('en-US')} moved`
+        + (sc.n_kept ? `, ${sc.n_kept.toLocaleString('en-US')} kept` : '');
+    }
     if (sc?.requested) return `${what} unavailable`;
     return 'stored positions';
   }
@@ -7474,6 +7506,7 @@ function registrationSummary(record) {
   else text = `${lr.n_moved.toLocaleString('en-US')} moved, max ${lr.max_um.toFixed(2)} µm`;
   if (sc?.applied) text += ` + ${what}`;
   else if (sc?.requested) text += ` + ${what} unavailable`;
+  if (sc?.applied && sc.n_kept) text += `, ${sc.n_kept.toLocaleString('en-US')} outline${sc.n_kept === 1 ? '' : 's'} kept`;
   return text;
 }
 
@@ -7498,6 +7531,20 @@ function correctionOf(record) {
   if (c === false) return 'off';
   return typeof c === 'string' ? c : 'off';
 }
+
+/**
+ * Whether a cell leaves the traced outlines the correction log lists where Viking
+ * draws them (the Keep listed outlines switch): what the server applied, else the
+ * cell's own choice, else off (the server's default).
+ */
+function keepOutlinesOf(record) {
+  const sc = record.summary?.section_correction;
+  if (sc?.requested && FIT_CORRECTIONS.includes(sc.mode)) return !!sc.keep_outlines;
+  return record.keepOutlines === true;
+}
+
+/** The correction modes with Viking's curve fit, the only ones the keep switch acts under. */
+const FIT_CORRECTIONS = ['curvefit', 'all'];
 
 /**
  * Where one cell is drawn: Viking's current section transforms, and on top of
@@ -7561,6 +7608,17 @@ function buildRegistration(body, record) {
   field(body, 'Correction', pick);
   setHelp(pick, REG_HELP.mode, REG_FIGURES.mode);
   if (pick.previousElementSibling) setHelp(pick.previousElementSibling, REG_HELP.mode, REG_FIGURES.mode);
+
+  // Under the curve fit only: the outlines the Correction log lists stay where Viking draws
+  // them (2.38.0, off by default).  Kept on the cell under any mode; greyed out where it does nothing.
+  const fit = FIT_CORRECTIONS.includes(current);
+  const keep = row('Keep listed outlines', keepOutlinesOf(record),
+    `${REG_HELP.keep}\n\n${keepForCell(sc, { fit })}`, null, fit ? keepChip(sc) : { text: '' },
+    (on) => setRegistration(record, { keepOutlines: on }));
+  keep.dataset.reg = 'keep';
+  const keepBox = keep.querySelector('input');
+  keepBox.disabled = !fit;
+  if (!fit) keep.classList.add('disabled');
 }
 
 /**

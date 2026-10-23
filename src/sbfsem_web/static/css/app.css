@@ -2476,6 +2476,8 @@ select[aria-expanded="true"] { border-color: var(--accent); }
 .section-body .switch-row { grid-column: 1 / -1; display: block; min-width: 0; margin: 1px 0; line-height: 20px; }
 .switch-row > label.check { display: inline; margin: 0; }
 .switch-row > label.check > input { margin: 0 6px 0 0; vertical-align: -2px; }
+/* A switch that does nothing under the other choices (Keep listed outlines without a curve fit). */
+.switch-row.disabled > label.check { color: var(--muted); }
 .status-chip {
   display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   vertical-align: 0; padding: 0 6px; border: 1px solid var(--line); border-radius: 8px;

@@ -4,11 +4,14 @@
 // and Viking's section correction off or in one of its modes.  The server holds
 // one copy per setting side by side (all eight of them, if asked) and names each
 // by its tag, `<correction>.<0|1>` (facade.copy_tag: "all.1" is the current
-// transforms with Field + fit, "off.0" the stored positions).  A layer's
+// transforms with Field + fit, "off.0" the stored positions), and `.k` after it
+// when the outlines the correction log lists keep where Viking draws them (a
+// curve fit only: "all.1.k", the cell panel's Keep listed outlines).  A layer's
 // `registration` is null -- the cell as the page loaded it, the tab's own copy,
 // with the person's own moves if it has any -- or `{ live, corrections }`, the
-// plain copy of that setting.  Asked for 2026-10-20: the same cell with the same
-// render options under several registrations, side by side.
+// plain copy of that setting (with `keepOutlines: true` for a tab's copy that
+// keeps them).  Asked for 2026-10-20: the same cell with the same render options
+// under several registrations, side by side.
 //
 // Pure: no page, no server; loads under node (tests/js/test_registrations.mjs).
 
@@ -16,6 +19,9 @@ import { MODE_LABELS } from './regstatus.js';
 
 /** Viking's correction, off or one of its modes, in the order the choices list them. */
 export const CORRECTIONS = Object.freeze(['off', 'neighbor', 'curvefit', 'all']);
+
+/** The modes with Viking's curve fit: the only ones under which listed outlines can keep their place. */
+const FIT = Object.freeze(['curvefit', 'all']);
 
 /** As the cell panel's Registration header says them ("current + field + fit"). */
 const SHORT = Object.freeze({ neighbor: 'field', curvefit: 'fit', all: 'field + fit' });
@@ -25,23 +31,35 @@ export function correctionName(corrections) {
   return MODE_LABELS[corrections] ?? 'no correction';
 }
 
-/** A registration as stored: null (the cell as loaded) or `{ live, corrections }`. */
+/**
+ * A registration as stored: null (the cell as loaded) or `{ live, corrections }`, with
+ * `keepOutlines: true` when the listed outlines keep their place (a curve fit only).
+ */
 export function normalizeRegistration(reg) {
   if (!reg || typeof reg !== 'object') return null;
   const corrections = CORRECTIONS.includes(reg.corrections) ? reg.corrections : 'off';
-  return { live: !!reg.live, corrections };
+  const out = { live: !!reg.live, corrections };
+  if (reg.keepOutlines === true && FIT.includes(corrections)) out.keepOutlines = true;
+  return out;
 }
 
 /** The server's name for the copy (`facade.copy_tag`), or null for the cell as loaded. */
 export function registrationTag(reg) {
   const r = normalizeRegistration(reg);
-  return r ? `${r.corrections}.${r.live ? 1 : 0}` : null;
+  return r ? `${r.corrections}.${r.live ? 1 : 0}${r.keepOutlines ? '.k' : ''}` : null;
 }
 
-/** The registration a tag names (`"all.1"`), or null for one that names no plain copy. */
+/** The registration a tag names (`"all.1"`, `"all.1.k"`), or null for one that names no such copy. */
 export function registrationOfTag(tag) {
-  const m = /^(off|neighbor|curvefit|all)\.([01])$/.exec(String(tag ?? ''));
-  return m ? { live: m[2] === '1', corrections: m[1] } : null;
+  const m = /^(off|neighbor|curvefit|all)\.([01])(\.k)?$/.exec(String(tag ?? ''));
+  if (!m || (m[3] && !FIT.includes(m[1]))) return null;
+  return normalizeRegistration({ live: m[2] === '1', corrections: m[1], keepOutlines: !!m[3] });
+}
+
+/** The part of a copy's tag that names its registration (`"all.1.k"` of `"all.1.k.m3f9a"`), or null. */
+export function registrationPart(tag) {
+  const m = /^((?:off|neighbor|curvefit|all)\.[01](?:\.k)?)(?:\.m.+)?$/.exec(String(tag ?? ''));
+  return m && registrationOfTag(m[1]) ? m[1] : null;
 }
 
 /**
@@ -49,9 +67,10 @@ export function registrationOfTag(tag) {
  * tab's copy with a person's own moves (`all.1.m<token>`) with that said, an unknown tag as it is.
  */
 export function copyLabel(tag, { hasTransforms = true } = {}) {
-  const m = /^((?:off|neighbor|curvefit|all)\.[01])(\.m.+)?$/.exec(String(tag ?? ''));
-  if (!m) return tag ? String(tag) : 'As loaded';
-  return registrationLabel(registrationOfTag(m[1]), { hasTransforms }) + (m[2] ? ', with manual moves' : '');
+  const part = registrationPart(tag);
+  if (!part) return tag ? String(tag) : 'As loaded';
+  const moved = String(tag).length > part.length;
+  return registrationLabel(registrationOfTag(part), { hasTransforms }) + (moved ? ', with manual moves' : '');
 }
 
 export function sameRegistration(a, b) {
@@ -64,6 +83,7 @@ export function copyLoadBody(record, reg) {
   return {
     id: record.id, source: record.source, include_synapses: true,
     live_registration: r.live, section_corrections: r.corrections,
+    ...(FIT.includes(r.corrections) ? { keep_outlines: !!r.keepOutlines } : {}),
   };
 }
 
@@ -76,7 +96,8 @@ export function registrationLabel(reg, { hasTransforms = true } = {}) {
   const r = normalizeRegistration(reg);
   if (!r) return 'As loaded';
   const where = hasTransforms && r.live ? 'Current transforms' : 'Stored positions';
-  return r.corrections === 'off' ? `${where}, no correction` : `${where} + ${correctionName(r.corrections)}`;
+  if (r.corrections === 'off') return `${where}, no correction`;
+  return `${where} + ${correctionName(r.corrections)}${r.keepOutlines ? ', listed outlines kept' : ''}`;
 }
 
 /**
@@ -88,7 +109,8 @@ export function registrationShort(reg, { hasTransforms = true, compact = false }
   const r = normalizeRegistration(reg);
   if (!r) return '';
   const where = hasTransforms && r.live ? 'current' : 'stored';
-  const text = r.corrections === 'off' ? where : `${where} + ${SHORT[r.corrections]}`;
+  const text = r.corrections === 'off' ? where
+    : `${where} + ${SHORT[r.corrections]}${r.keepOutlines ? ' + kept' : ''}`;
   return compact ? text.replaceAll(' + ', '+') : text;
 }
 

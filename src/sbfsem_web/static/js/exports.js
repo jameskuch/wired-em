@@ -31,10 +31,12 @@ export const BULK_SWC_LIMIT = 200;
 
 /**
  * How a cell is drawn, as the export routes take it: `registration` (Viking's
- * current section transforms: true or false) and `corrections` (`off` or a
- * mode), each `undefined` when the cell never chose and the server's default
- * applies.  What the server reported applying wins over the cell's own
- * choice: the choice may be a legacy `true`, or a click still on its way.
+ * current section transforms: true or false), `corrections` (`off` or a
+ * mode) and `keepOutlines` (the outlines the correction log lists left where
+ * Viking draws them: true or false), each `undefined` when the cell never chose
+ * and the server's default applies.  What the server reported applying wins over
+ * the cell's own choice: the choice may be a legacy `true`, or a click still on
+ * its way.
  */
 export function drawnWith(record) {
   const lr = record?.summary?.live_registration;
@@ -49,7 +51,13 @@ export function drawnWith(record) {
   } else if (record?.corrections === true) corrections = 'neighbor';
   else if (record?.corrections === false) corrections = 'off';
   else if (typeof record?.corrections === 'string') corrections = record.corrections;
-  return { registration, corrections };
+
+  let keepOutlines;
+  if (sc && typeof sc.requested === 'boolean') {
+    // Only a curve fit keeps outlines; under any other correction the copy is the plain one.
+    if (corrections === 'curvefit' || corrections === 'all') keepOutlines = !!sc.keep_outlines;
+  } else if (typeof record?.keepOutlines === 'boolean') keepOutlines = record.keepOutlines;
+  return keepOutlines === undefined ? { registration, corrections } : { registration, corrections, keepOutlines };
 }
 
 /**
@@ -62,7 +70,7 @@ export function planBulkSwc(records, limit = BULK_SWC_LIMIT) {
   const groups = new Map();
   for (const record of records) {
     const way = drawnWith(record);
-    const key = `${way.registration}|${way.corrections}`;
+    const key = `${way.registration}|${way.corrections}|${way.keepOutlines}`;
     if (!groups.has(key)) groups.set(key, { ...way, ids: [] });
     groups.get(key).ids.push(record.id);
   }
@@ -71,6 +79,7 @@ export function planBulkSwc(records, limit = BULK_SWC_LIMIT) {
     for (let i = 0; i < group.ids.length; i += limit) {
       plan.push({
         registration: group.registration, corrections: group.corrections,
+        ...(group.keepOutlines !== undefined ? { keepOutlines: group.keepOutlines } : {}),
         ids: group.ids.slice(i, i + limit),
       });
     }

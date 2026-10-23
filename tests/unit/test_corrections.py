@@ -687,6 +687,25 @@ def test_curvefit_moves_what_the_service_corrected(structures):
     assert fake.calls == ["ListCorrectionSets", "CorrectStructures"]
 
 
+def test_keep_outlines_names_what_it_kept_and_only_under_a_curve_fit(service, structures):
+    """``keep_outlines`` is off by default; under a curve fit it records what it kept (nothing
+    here: the cell has no traced outlines), under the residual field it does nothing."""
+    fake, url = structures
+    neuron = make_structure_neuron()
+    with corr.CorrectionsClient(url) as client:
+        corr.correct_neuron(neuron, client, mode="curvefit", keep_outlines=True)
+    s = neuron.section_correction
+    assert (s["keep_outlines"], s["n_kept"], s["kept_outlines"], s["n_moved"]) == (True, 0, [], 3)
+    plain = make_structure_neuron()
+    with corr.CorrectionsClient(url) as client:
+        corr.correct_neuron(plain, client, mode="curvefit")
+        assert plain.section_correction["token"] == s["token"]
+        field = make_neuron()
+        corr.correct_neuron(field, client, mode="neighbor", keep_outlines=True)
+    assert "keep_outlines" not in plain.section_correction
+    assert "keep_outlines" not in field.section_correction
+
+
 def test_a_line_placed_where_the_cell_has_it_is_corrected(structures):
     """Empty X/Y columns are no reason by themselves: since 2026-09-24 the
     service maps such a line from its outline's centroid."""
@@ -843,6 +862,82 @@ def test_a_curve_fit_load_logs_a_thin_process_pulled_toward_a_wider_one(web, cap
     assert [p.location_id for p in svc.correction_log(7.0)[0].pulls] == []
     assert not cells["neighbor.0"].checked
     assert "off.0" not in cells                # not corrected: nothing to log
+
+
+def test_a_load_that_keeps_outlines_puts_the_listed_ones_back_in_a_copy_of_its_own(web):
+    """``keep_outlines`` (2.38.0, off by default): c1178's outline 39957 on section 1110 lies
+    inside the outlines linked to it, and the fit here moves it 1 um off them, which the
+    correction log lists; every annotation also moves (+120, -80) nm.  Kept, 39957 is where
+    the registration drew it, node and outline, and everything else is corrected as without
+    the option.  It is another copy (``all.0.k``), keyed apart, and the log, the nodes and the
+    Position shift summary read it so."""
+    from sbfsem.service.facade import copy_tag
+
+    fake, svc = web
+    svc.load_neuron(1178, "i", include_synapses=False, section_corrections="off")
+    raw = svc.neuron(1178, "i")
+    nodes = raw.nodes.drop_duplicates("ID").set_index("ID")
+    sx, sy = map(float, raw.volume_scale[:2])
+    fake.locations = [{"location_id": int(i), "structure_id": 1178, "z": int(r.Z),
+                       "x": r.VolumeX * sx, "y": r.VolumeY * sy} for i, r in nodes.iterrows()]
+    fake.fit = {3: (120.0, -80.0)}
+    fake.moves = {39957: (1120.0, -80.0)}
+
+    plain = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="all")
+    fitted = svc.neuron(1178, "i")
+    kept = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="all",
+                           keep_outlines=True)
+    keeper = svc.neuron(1178, "i")
+    assert (fitted.copy_tag, keeper.copy_tag, kept.summary.copy_tag) == ("all.0", "all.0.k", "all.0.k")
+    assert keeper is not fitted
+    sc, before = kept.summary.section_correction, plain.summary.section_correction
+    assert (sc.keep_outlines, sc.n_kept, sc.kept_outlines) == (True, 1, [39957])
+    assert (before.keep_outlines, before.n_kept) == (False, 0)
+    assert sc.n_moved == before.n_moved - 1 and sc.n_trusted == before.n_trusted
+    assert kept.summary.positions != plain.summary.positions    # its surfaces are keyed apart
+
+    def xy(n):
+        return n.nodes.drop_duplicates("ID").set_index("ID")[["Xum", "Yum"]]
+
+    np.testing.assert_allclose(xy(keeper).loc[39957].to_numpy(float), xy(raw).loc[39957].to_numpy(float),
+                               atol=1e-9)
+    np.testing.assert_allclose(xy(fitted).loc[39957].to_numpy(float) - xy(raw).loc[39957].to_numpy(float),
+                               [1.12, -0.08], atol=1e-9)
+    rest = (xy(keeper).drop(39957) - xy(raw).drop(39957)).to_numpy(float)
+    np.testing.assert_allclose(rest, np.tile([0.12, -0.08], (len(rest), 1)), atol=1e-9)
+
+    def ring(n):
+        return np.asarray(n.geometries.set_index("ID")["Curve"][39957][0], dtype=float)
+
+    np.testing.assert_allclose(ring(keeper), ring(raw), atol=1e-9)
+    np.testing.assert_allclose(ring(fitted), ring(raw) + [1.12, -0.08], atol=1e-9)
+
+    # The log lists what Viking's correction did in both copies; the copy that keeps marks it.
+    cells = {c.copy_tag: c for c in svc.correction_log()}
+    assert [(m.location_id, m.kept) for m in cells["all.0"].outline_moves] == [(39957, False)]
+    assert [(m.location_id, m.kept) for m in cells["all.0.k"].outline_moves] == [(39957, True)]
+    assert (cells["all.0.k"].keep_outlines, cells["all.0.k"].n_kept) == (True, 1)
+    assert (cells["all.0"].keep_outlines, cells["all.0"].n_kept) == (False, 0)
+    # The Position shift layer's nodes and summary: no correction move on 39957 in that copy.
+    from sbfsem.service.facade import requested_copy
+
+    with requested_copy("all.0.k"):
+        shifts = {n.id: n.shift_um for n in svc.nodes(1178, "i")}
+        summary = svc.shift_summary(1178, "i")
+        quality = svc.registration_quality(1178, "i")
+    assert shifts[39957] is None and all(v is not None for k, v in shifts.items() if k != 39957)
+    with requested_copy("all.0"):
+        moved = svc.shift_summary(1178, "i").pairs["correction"].n_moved
+    assert summary.pairs["correction"].n_moved == moved - 1
+    assert (quality.outline_moves, quality.outlines_kept) == (1, 1)
+
+    # The option is the same copy under a mode without a curve fit, and off by default.
+    assert copy_tag("neighbor", True, True) == "neighbor.1" and copy_tag("curvefit", False, True) == "curvefit.0.k"
+    again = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="all")
+    assert again.summary.copy_tag == "all.0" and svc.neuron(1178, "i") is fitted
+    field = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor",
+                            keep_outlines=True)
+    assert field.summary.copy_tag == "neighbor.0" and not field.summary.section_correction.keep_outlines
 
 
 def test_the_service_version_is_kept_with_a_curve_fit_correction(structures, tmp_path):
