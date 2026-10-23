@@ -24,6 +24,7 @@ import {
 } from './pickgeom.js';
 import { ContextGesture, SURFACE_REACH_PX, listCandidates, pickOf } from './contextmenu.js';
 import { nearestAnnotation as nearestOnRay } from './hoverpick.js';
+import { pivotEnds, staleDepth } from './pivot.js';
 import {
   FAT_FRAGMENT_SHADER, FAT_VERTEX_SHADER, TAIL_ALPHA, WIDTH_DEFAULT, fatArrows, fatColors, fatRange,
   fatSegments, headSize, ringWidth, arrowReach, shaftRange, shaftSegments,
@@ -305,6 +306,12 @@ export class Renderer3D {
     // After every frame drawn: `() => void`, for what follows the camera over
     // the canvas (the view cube).
     this.onFrame = null;
+    // The pivot point (pivot.js): `({ on, armed, reason })` whenever it is set, let
+    // go (`reason` says why) or armed for a click; and `(clientX, clientY)` when P is
+    // pressed over the view or an armed click lands, for the app to say where it goes
+    // (it knows each cell's annotations) by `setPivot`.
+    this.onPivotChange = null;
+    this.onPivotRequest = null;
     this.bounds = new THREE.Box3();
     // Everything drawn, hidden or not, context included: what the far plane
     // has to reach.  Rebuilt lazily when something is added or removed.
@@ -357,6 +364,19 @@ export class Renderer3D {
     // long as the hand does.  Pan and zoom stay with OrbitControls.
     this.controls.enableRotate = false;
     this._spin = { yaw: 0, pitch: 0, endPending: false };
+    // The point every turn pivots about while one is set (setPivot), held in its
+    // volume's own frame so Flip Z and a volume shift carry it with the cell; null
+    // turns about the orbit target, as always.  `_pointer` is where the pointer is
+    // over the view (null once it has left), for P.
+    this._pivot = null;
+    this._pivotArmed = false;
+    this._pointer = null;
+    // Where the pivot is, drawn over the canvas (not in WebGL, so never in a
+    // snapshot or a video, and never under a surface).
+    this._pivotMark = document.createElement('div');
+    this._pivotMark.className = 'pivot-mark';
+    this._pivotMark.hidden = true;
+    container.appendChild(this._pivotMark);
 
     // Two key lights plus ambient, matching the MATLAB lightangle(45,30) /
     // lightangle(225,30) pair.
@@ -445,6 +465,12 @@ export class Renderer3D {
     }, { signal });
     this.webgl.domElement.addEventListener('click', (e) => {
       if (e.button !== 0) return;
+      // Armed by the toolbar's Pivot box (armPivot): a click, not a drag, says where
+      // the pivot goes, and selects nothing.  A drag still turns the view.
+      if (this._pivotArmed && Math.hypot(e.clientX - tcX, e.clientY - tcY) <= 5) {
+        this.onPivotRequest?.(e.clientX, e.clientY);
+        return;
+      }
       // ⌘-click (Ctrl-click on Windows) on a ring, without a drag: the app adds it to a set
       // or takes it out (moving annotations by hand).  A drag with the key still turns the view.
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && this.onAdditiveClick
@@ -498,9 +524,13 @@ export class Renderer3D {
     };
     this.webgl.domElement.addEventListener('pointermove', (e) => {
       hoverAt = { x: e.clientX, y: e.clientY };
+      this._pointer = hoverAt;
       if (e.buttons === 0) hoverSoon();
     }, { signal });
-    this.webgl.domElement.addEventListener('pointerleave', () => { hoverAt = null; }, { signal });
+    this.webgl.domElement.addEventListener('pointerleave', () => {
+      hoverAt = null;
+      this._pointer = null;
+    }, { signal });
     this.controls.addEventListener('end', hoverSoon);
     /** Look again where the pointer is (annotations came in under it); nothing once it has left. */
     this.hoverAgain = hoverSoon;
@@ -579,6 +609,7 @@ export class Renderer3D {
       if (e.button !== 0 || e.shiftKey) return;
       const mode = e.ctrlKey ? 'pitch' : (e.metaKey || e.altKey) ? 'yaw' : null;
       if (!mode) return;
+      this._freshenTurnDepth();
       axisDrag = mode;
       axisX = e.clientX;
       axisY = e.clientY;
@@ -619,6 +650,7 @@ export class Renderer3D {
       if (touching.size > 1) { freeDrag = null; return; }
       if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
       if (!this.controls.enabled) return;
+      this._freshenTurnDepth();
       freeDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: false };
     }, { signal });
     window.addEventListener('pointermove', (e) => {
@@ -735,6 +767,9 @@ export class Renderer3D {
     this.onInverted = null;
     this.onFrame = null;
     this.onContextMenu = null;
+    this.onPivotChange = null;
+    this.onPivotRequest = null;
+    this._pivot = null;
     this.selection = null;
     this.markers = { above: null, below: null };
     this.slices = { primary: null, above: null, below: null };
@@ -775,6 +810,7 @@ export class Renderer3D {
     this._applySpin();
     this.controls.update();
     this._syncPlanes();
+    this._placePivotMark();
     this._refreshHighlight();
     const dir = new THREE.Vector3();
     this.camera.getWorldDirection(dir);
@@ -2394,8 +2430,62 @@ export class Renderer3D {
     const direction = spec.dir
       ? new THREE.Vector3().fromArray(spec.dir).normalize()
       : DEFAULT_VIEW_DIR.clone();
-    this._placeView(direction, new THREE.Vector3().fromArray(spec.up), this._viewPivot());
+    const up = new THREE.Vector3().fromArray(spec.up);
+    const pivot = this._pivotWorld();
+    if (pivot) this._swingTo(direction, up, pivot, 1);
+    else this._placeView(direction, up, this._viewPivot());
     return true;
+  }
+
+  /**
+   * The camera's orientation now, and looking along `direction` (from what is
+   * looked at toward the camera) with `up` up, as quaternions: what a turn to a
+   * named view slerps between.
+   */
+  _facings(direction, up) {
+    const origin = new THREE.Vector3();
+    const facing = (eye, top) => new THREE.Quaternion()
+      .setFromRotationMatrix(new THREE.Matrix4().lookAt(eye, origin, top));
+    const cam = this.camera;
+    const sight = cam.position.clone().sub(this.controls.target);
+    if (sight.lengthSq() < 1e-12) cam.getWorldDirection(sight).negate();
+    return { from: facing(sight, cam.up), to: facing(direction.clone().normalize(), up.clone().normalize()) };
+  }
+
+  /**
+   * Turn toward looking along `direction` with `up` up, the fraction `t` (0..1) of
+   * the way from the pose in `start` (or now), by a rigid swing of the camera and
+   * its target about the pivot point: the point stays at the same pixel and the
+   * same distance throughout, where a turn about the middle of the picture would
+   * have centered it.  Returns the pose it started from, for the next step.
+   */
+  _swingTo(direction, up, pivot, t, start = null) {
+    const cam = this.camera;
+    const from = start ?? {
+      ...this._facings(direction, up),
+      position: cam.position.clone(), target: this.controls.target.clone(),
+    };
+    const q = new THREE.Quaternion().slerpQuaternions(from.from, from.to, t);
+    const swing = q.clone().multiply(from.from.clone().invert());
+    cam.position.copy(from.position).sub(pivot).applyQuaternion(swing).add(pivot);
+    this.controls.target.copy(from.target).sub(pivot).applyQuaternion(swing).add(pivot);
+    cam.up.set(0, 1, 0).applyQuaternion(q);
+    this._spin.yaw = 0;
+    this._spin.pitch = 0;
+    if (t >= 1) {
+      const distance = cam.position.distanceTo(this.controls.target);
+      const center = this.bounds.getCenter(new THREE.Vector3());
+      const radius = Math.max(this.bounds.getSize(new THREE.Vector3()).length() * 0.5, 1e-3);
+      this._setPlanes(cam, Math.max(distance / 2000, 1e-4),
+        (distance + this.controls.target.distanceTo(center)) * 8 + radius * 20);
+      cam.updateProjectionMatrix();
+      this.framed = true;
+      // Measured again the next time a viewpoint turns about the middle of the picture.
+      this._lastViewpoint = null;
+    }
+    this._syncControlsUp();
+    this.controls.update();
+    return from;
   }
 
   /**
@@ -2478,6 +2568,9 @@ export class Renderer3D {
     const cam = this.camera;
     const direction = new THREE.Vector3().fromArray(dir).normalize();
     const upward = new THREE.Vector3().fromArray(up).normalize();
+    // With a pivot point set, the glide swings the camera about it instead
+    // (`_swingTo`): the point keeps its place on the screen.
+    const pivot = this._pivotWorld();
     const view = this._viewPivot();
     const origin = new THREE.Vector3();
     const facing = (eye, top) => new THREE.Quaternion()
@@ -2502,7 +2595,12 @@ export class Renderer3D {
       (view.distance + view.pivot.distanceTo(view.center)) * 8 + view.radius * 20);
     cam.updateProjectionMatrix();
     const q = new THREE.Quaternion();
+    let swung = null;
     const place = (t) => {
+      if (pivot) {
+        swung = this._swingTo(direction, upward, pivot, t, swung);
+        return;
+      }
       q.slerpQuaternions(from, to, t);
       cam.position.set(0, 0, view.distance).applyQuaternion(q).add(view.pivot);
       cam.up.set(0, 1, 0).applyQuaternion(q);
@@ -2525,7 +2623,8 @@ export class Renderer3D {
         // pressed next turns about the same pivot (setViewpoint).
         this.controls.enableDamping = damping;
         this.controls.enabled = true;
-        this._placeView(direction, upward, view);
+        if (pivot) swung = this._swingTo(direction, upward, pivot, 1, swung);
+        else this._placeView(direction, upward, view);
         this.controls.dispatchEvent({ type: 'end' });
         resolve(true);
       };
@@ -2568,6 +2667,7 @@ export class Renderer3D {
    */
   spinBy(yaw, pitch) {
     if (!this.controls.enabled) return;
+    if (!this._spin.yaw && !this._spin.pitch && !this._spin.endPending) this._freshenTurnDepth();
     this._spin.yaw += yaw;
     this._spin.pitch += pitch;
   }
@@ -2912,6 +3012,8 @@ export class Renderer3D {
   resetView() {
     // A view cube turn under way would carry on over the reset.
     this._settleFlight();
+    // Reset means reset: turns are about the middle of the scene again.
+    this.clearPivot('reset');
     if (this.bounds.isEmpty()) {
       // Nothing to frame, but the horizon can still be put back: pressing
       // Reset view with every cell hidden used to do nothing at all, which
@@ -4570,6 +4672,7 @@ export class Renderer3D {
       event.preventDefault();
       return;
     }
+    if (event.key.startsWith('Arrow') && !event.repeat) this._freshenTurnDepth();
     let handled = true;
     switch (event.key) {
       case 'ArrowLeft': this._orbit(-step, 0); break;
@@ -4587,13 +4690,14 @@ export class Renderer3D {
       case 'm': this.resetView(); break;
       case 'c': this._copyPicked(); break;
       case 'f': this.onToggleFullscreen?.(); break;
+      case 'p': case 'P': if (!event.repeat) this.togglePivot(); break;
       default: handled = false;
     }
     if (handled) {
       event.preventDefault();
       // Key-driven camera moves emit the same end signal as a drag, so the
-      // undo history records them.  Copying and full screen move nothing.
-      if (event.key !== 'c' && event.key !== 'f') this.controls.dispatchEvent({ type: 'end' });
+      // undo history records them.  Copying, full screen and the pivot move nothing.
+      if (!['c', 'f', 'p', 'P'].includes(event.key)) this.controls.dispatchEvent({ type: 'end' });
     }
   }
 
@@ -4609,7 +4713,12 @@ export class Renderer3D {
     // A degenerate orbit (camera on its target) still has a facing direction.
     if (dir.lengthSq() < 1e-12) this.camera.getWorldDirection(dir);
     dir.normalize();
-    this.camera.up.applyAxisAngle(dir, angle).normalize();
+    // About the line of sight through the pivot point, when one is set: the camera
+    // and its target swing about it, so the point stays where it is on the screen.
+    // Without one the line is the camera's own, and neither moves.
+    const pivot = this._pivotWorld();
+    if (pivot) this._swingRig(new THREE.Quaternion().setFromAxisAngle(dir, angle), pivot);
+    else this.camera.up.applyAxisAngle(dir, angle).normalize();
     this._syncControlsUp();
     this.controls.update();
   }
@@ -4665,9 +4774,150 @@ export class Renderer3D {
     right.normalize();
     const screenUp = new THREE.Vector3().crossVectors(right, forward).normalize();
     const q = new THREE.Quaternion().setFromAxisAngle(which === 'x' ? right : screenUp, angle);
-    offset.applyQuaternion(q);
-    this.camera.up.copy(screenUp).applyQuaternion(q).normalize();
-    this.camera.position.copy(target).add(offset);
+    this.camera.up.copy(screenUp);
+    // The camera and its target swing together about the pivot point (pivot.js):
+    // with none set that is the target itself, which stays, as it always did.
+    this._swingRig(q, this._pivotWorld() ?? target);
+  }
+
+  /**
+   * Swing the camera, its target and its up vector rigidly by `q` about `pivot` (a
+   * point in the scene's frame).  The target stays on the line of sight, which is
+   * what OrbitControls' pan, zoom and `lookAt` count on, and `pivot` stays at the
+   * same pixel at the same distance.  About the target itself the target does not
+   * move: a plain turn, exactly as before there was a pivot.
+   */
+  _swingRig(q, pivot) {
+    const p = pivot.clone();
+    this.camera.position.sub(p).applyQuaternion(q).add(p);
+    if (!this.controls.target.equals(p)) this.controls.target.sub(p).applyQuaternion(q).add(p);
+    this.camera.up.applyQuaternion(q).normalize();
+  }
+
+  /**
+   * Measure the depth a turn pivots at again as it starts, when the orbit target
+   * has plainly gone off what is in the middle of the picture (pivot.js
+   * `staleDepth`): the wheel keeps the last surface's depth while it zooms over
+   * empty space, and Orthographic never moves it at all.  The target is slid along
+   * the view to the content's depth (`_viewedDepth`, what the view cube's turns
+   * use); the picture does not change.  Not while a pivot point is set, which the
+   * turn is about instead, nor during a flight.
+   */
+  _freshenTurnDepth() {
+    if (this._pivot || this._endFlight || !this.controls.enabled || this.bounds.isEmpty()) return false;
+    const cam = this.camera;
+    const forward = cam.getWorldDirection(new THREE.Vector3());
+    const pivotDepth = this.controls.target.clone().sub(cam.position).dot(forward);
+    const contentDepth = this._viewedDepth();
+    const halfHeightUm = (this._umPerPixelAtDepth(contentDepth) * (this.container.clientHeight || 1)) / 2;
+    if (!staleDepth({ pivotDepth, contentDepth, halfHeightUm })) return false;
+    if (cam.isOrthographicCamera) {
+      // The picture does not change as an orthographic camera slides along its
+      // view, so it keeps its distance in front of the new target.
+      const keep = Math.max(cam.position.distanceTo(this.controls.target), MIN_WORKING_UM);
+      const target = cam.position.clone().addScaledVector(forward, contentDepth);
+      cam.position.copy(target).addScaledVector(forward, -keep);
+      this.controls.target.copy(target);
+    } else {
+      this.controls.target.copy(cam.position).addScaledVector(forward, Math.max(contentDepth, MIN_WORKING_UM));
+    }
+    return true;
+  }
+
+  // -- the pivot point (pivot.js) ---------------------------------------------
+
+  /** The pivot point in the scene's frame (a Vector3), or null with none set. */
+  _pivotWorld() {
+    const pivot = this._pivot;
+    return pivot ? new THREE.Vector3(...this.toWorld(pivot.volume, pivot.source)) : null;
+  }
+
+  /** Where every turn pivots now, `[x, y, z]` in the scene's frame, or null when about the orbit target. */
+  pivotPoint() {
+    return this._pivotWorld()?.toArray() ?? null;
+  }
+
+  get pivotArmed() { return this._pivotArmed; }
+
+  /**
+   * Turn about `point` (`[x, y, z]` in the scene's frame) from now on, the point
+   * drawn on `key`'s cell: every drag, its glide, the arrow keys, q and e, the
+   * view cube and the viewpoint buttons keep it where it is on the screen.  Nothing
+   * moves when it is set.
+   */
+  setPivot(point, { key = null } = {}) {
+    if (!Array.isArray(point) || point.length < 3 || !point.every(Number.isFinite)) return false;
+    const source = this._sourceOf(key);
+    this._pivot = {
+      volume: this.toVolume(point, source), source, key,
+      umPerPixel: this.umPerPixelAt(point),
+    };
+    this._pivotArmed = false;
+    this.webgl.domElement.classList.remove('pivot-armed');
+    this._placePivotMark();
+    this.onPivotChange?.({ on: true, armed: false, reason: null });
+    return true;
+  }
+
+  /** Turn about the orbit target again; `reason` (pivot.js ENDED) goes to onPivotChange. */
+  clearPivot(reason = 'off') {
+    const was = !!this._pivot || this._pivotArmed;
+    this._pivot = null;
+    this._pivotArmed = false;
+    this.webgl.domElement.classList.remove('pivot-armed');
+    this._pivotMark.hidden = true;
+    if (was) this.onPivotChange?.({ on: false, armed: false, reason });
+    return was;
+  }
+
+  /** Wait for a click on the view to say where the pivot goes (a crosshair pointer), or stop waiting. */
+  armPivot(on = true) {
+    if (!on) return this.clearPivot('off');
+    if (this._pivot) this.clearPivot('off');
+    this._pivotArmed = true;
+    this.webgl.domElement.classList.add('pivot-armed');
+    this.onPivotChange?.({ on: false, armed: true, reason: null });
+    return true;
+  }
+
+  /**
+   * What P does: let go of a pivot that is set (or a click waited for); otherwise
+   * ask the app for one where the pointer is over the view, or wait for a click on
+   * it when the pointer is elsewhere.
+   */
+  togglePivot() {
+    if (this._pivot || this._pivotArmed) return this.clearPivot('off');
+    if (this._pointer && this.onPivotRequest) {
+      this.onPivotRequest(this._pointer.x, this._pointer.y);
+      return true;
+    }
+    return this.armPivot(true);
+  }
+
+  /**
+   * Each frame: let go of a pivot whose point has left the picture, whose view has
+   * been zoomed out past PIVOT_ZOOM_OUT times its scale, or whose cell the look on
+   * show no longer draws (pivot.js `pivotEnds`); otherwise put its mark on it.
+   */
+  _placePivotMark() {
+    const pivot = this._pivot;
+    if (!pivot) return;
+    const world = this._pivotWorld();
+    const cam = this.camera;
+    cam.updateMatrixWorld();
+    const seen = world.clone().applyMatrix4(cam.matrixWorldInverse);
+    const inFront = cam.isOrthographicCamera || -seen.z > cam.near;
+    const ndc = world.clone().project(cam);
+    const drawn = !pivot.key || this._cellDrawn(pivot.key);
+    const ended = pivotEnds({
+      drawn, ndc: [ndc.x, ndc.y], inFront,
+      umPerPixel: this.umPerPixelAt(world), umPerPixelAtSet: pivot.umPerPixel,
+    });
+    if (ended) { this.clearPivot(ended); return; }
+    const { clientWidth: w, clientHeight: h } = this.container;
+    this._pivotMark.style.left = `${((ndc.x + 1) / 2) * w}px`;
+    this._pivotMark.style.top = `${((1 - ndc.y) / 2) * h}px`;
+    this._pivotMark.hidden = false;
   }
 
   /**
@@ -4837,6 +5087,9 @@ export class Renderer3D {
     const toPos = target.clone().add(this._clearApproach(target, range));
 
     this._cancelFlight();
+    // The flight ends with its point in the middle and the target on it, which
+    // turns are then about; a pivot point set elsewhere would be left behind.
+    this.clearPivot('flight');
 
     // Damping fights an animated camera: it keeps applying its own easing to
     // controls.target while we are writing to it.

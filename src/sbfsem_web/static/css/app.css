@@ -1574,6 +1574,42 @@ table.rep-matrix tbody tr:hover { background: none; }
 #viewport.inverted .vc-caption { color: #16191d; text-shadow: 0 1px 3px rgb(255 255 255 / 0.9); }
 #viewport.inverted .vc-caption span { color: #4b5560; }
 
+/* The pivot point (pivot.js): while turns pivot about a chosen point, a ring on it
+   (render3d.js places it every frame) and a label under the view cube that says so
+   and turns it off when clicked.  Drawn over the canvas, so never in a snapshot or
+   a video.  Amber: no marker (red, yellow, blue), no axis and no GraphApp color. */
+.pivot-mark {
+  position: absolute; z-index: 2; box-sizing: border-box; width: 18px; height: 18px; margin: -9px 0 0 -9px;
+  border: 2px solid #ffb02e; border-radius: 50%;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.75), inset 0 0 0 1px rgb(0 0 0 / 0.75);
+  pointer-events: none;
+}
+.pivot-mark[hidden] { display: none; }
+.pivot-mark::after {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px;
+  border-radius: 50%; background: #ffb02e; box-shadow: 0 0 0 1px rgb(0 0 0 / 0.75);
+}
+.pivot-chip {
+  /* Below the overlay row's hint when the cube is hidden. */
+  position: absolute; z-index: 4; top: 44px; right: 12px;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 8px; font-size: 12px; font-weight: 600; line-height: 1.2; white-space: nowrap;
+  color: #1b1405; background: #ffb02e; border: 1px solid #b97400; border-radius: 6px;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.45); cursor: pointer;
+}
+.pivot-chip[hidden] { display: none; }
+.pivot-chip:hover { background: #ffc35c; }
+.pivot-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pivot-chip-ring {
+  width: 9px; height: 9px; border: 2px solid currentColor; border-radius: 50%; box-sizing: border-box;
+}
+.pivot-chip-x { font-size: 14px; line-height: 1; opacity: 0.7; }
+.pivot-chip:hover .pivot-chip-x { opacity: 1; }
+/* Under the cube and its caption when the cube is shown. */
+.view.with-viewcube .pivot-chip { top: 176px; right: 8px; }
+/* Waiting for the click that says where the pivot goes. */
+#viewport canvas.pivot-armed { cursor: crosshair; }
+
 /* -- Render compare -------------------------------------------------------- */
 /* A grid of independent viewports over the same cell.  A pane header carries
    the technique, the display toggles and the arrow that opens the pane's render

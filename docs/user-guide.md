@@ -190,7 +190,7 @@ column is otherwise entirely about cells: loading them, and the settings of
 each one.
 
 The bottom of the 3D view is a **fixed toolbar of view actions** — Axes,
-View cube, Orthographic, Undo/Redo, Reset view, the named viewpoints, Snapshot
+View cube, Pivot, Orthographic, Undo/Redo, Reset view, the named viewpoints, Snapshot
 and Video — that never rearranges. In **Orthographic**, showing or hiding a cell
 keeps the scale and where everything else is drawn (since 2.30.1: the scale used to
 follow the shown cells' extent, so hiding the larger of two cells zoomed in 8x about
@@ -292,7 +292,10 @@ so a click that was meant for the render never turns the view. Each turn
 glides there, longer the further it goes (up to 0.6 s; at once with reduced
 motion on), and pivots like a viewpoint button: what is in the middle of the
 picture stays there at the size it had, and turns in a row, with nothing
-moved in between, keep the same pivot. Every turn and every drag is one
+moved in between, keep the same pivot. With a pivot point set (see
+[Where a turn pivots](#where-a-turn-pivots-and-choosing-the-point)), the cube's
+turns and the viewpoint buttons swing about that point instead, and it stays
+where it is on the screen. Every turn and every drag is one
 undo step. Under **Flip Z** the face on top is the volume's −Z and the
 tripod's Z runs down, as the Axes helper's does. The cube is drawn over the
 render, not in it: it is never in a snapshot or a video. **Render compare** has
@@ -2233,8 +2236,59 @@ The MATLAB `RenderApp` keyboard navigation is preserved alongside it:
 | `z` / `Z` | zoom in / out |
 | `m` | reset the view (since 2.26.1 wherever the focus is, not only after a click in the render; not while typing in a box or with a dropdown focused) |
 | `[` `]` `PageUp` `PageDown` `Home` `End` | step the Position shift slice, while it is on |
+| `p` | turn about the point under the pointer from now on, or about the middle of the view again (see below; also wherever the focus is) |
 | `f` | full screen on or off (see below) |
 | `c` | copy the picked point as “X Y Z downsample” for Viking's Goto Location |
+
+### Where a turn pivots, and choosing the point
+
+Every turn of the view pivots about one point: a drag with or without shift,
+ctrl or ⌘/alt, its glide, the arrow keys, `q` and `e`, the view cube and the
+viewpoint buttons. Unless you choose one, that point lies on the line through the
+middle of the picture, at the depth of what is there, so whatever is in the middle
+stays in the middle as you turn.
+
+**The depth is measured again as a turn starts** (since 2.34.0) when it has plainly
+gone off what is in the middle. The wheel keeps the depth of the last surface it was
+over while you zoom over empty space, and Orthographic never moved it at all, so
+zooming in past a thin process left the pivot behind it, and the next turn threw the
+process out of the picture. Measured on Inferior Monkey c943, the pointer held still
+80 px beside a thin process: after 17 wheel steps the process was 5.1 µm away and the
+pivot 23.1 µm behind it, and a 60 px drag (about 32°) moved the process 1,561 px, off
+the 1,134 px view; now the same drag moves it 144 px and it stays in view. A view
+framed by Reset view is far inside the line (the pivot within a quarter of the
+picture's half height of what is in the middle), so its turns are as they were.
+
+**To keep something away from the middle in place while you turn, put the pivot on
+it** — zoomed in on a process near the edge of a large view, a turn about the middle
+swings it out of the picture:
+
+- point at it and press **`p`**; or
+- right-click it → **Rotate about this point (P)**; or
+- tick **Pivot** in the toolbar, then click the point (the pointer is a crosshair until
+  you do; `p` or `Esc` stops waiting).
+
+On a cell the pivot goes to the middle of the annotation there, so a process turns
+about its own axis; pointing at empty space just beside a thin process finds the
+nearest annotation within 24 px. Close up on a soma, where that middle is more than a
+quarter of the picture away from the point you pointed at, it is that point instead.
+Setting it moves nothing.
+
+While it is on, an amber ring marks the point (drawn over the render, never in a
+snapshot or a video, and seen through whatever is in front of it), the label
+**Rotating about a point** sits under the view cube, and the Pivot box is ticked.
+Every turn then keeps the point at the same pixel and the same distance (the browser
+check measures 0.00 px of movement over a plain, shift, ctrl and alt drag, the arrow
+keys, `q`, a cube turn, XY1 and a cube drag). Zooming in keeps it.
+
+It turns off with `p`, `Esc` (after any selection: one `Esc` per thing), a click on
+the label, unticking Pivot, **Reset view**, a jump to an annotation (a table row, a
+Location ID, a Viking location; the jump puts its point in the middle, where turns
+are about it anyway) and **Flatten IPL**; and by itself when the point leaves the
+picture, when you zoom out to more than 4× the scale you set it at, or when its cell
+is hidden. The status line says which. **Flip Z** and a volume offset carry it with
+its cell. It belongs to the page: it is not saved with the session or a workspace,
+and a reload starts without it.
 
 ### Full screen
 

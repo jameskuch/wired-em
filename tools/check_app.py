@@ -120,6 +120,15 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   cube orbits, and one begun straight after a turn is one undo step, not two; the house is
   Reset view; the overlay row makes room for it; Flip Z relabels it; hidden, it stays hidden after a
   reload and Restore.
+* ``pivot`` -- the point turns pivot about (2.34.0), on c943 with a real mouse: Reset view then a press
+  leaves the pivot where Reset put it; zoomed in with the pointer held over empty space beside a thin
+  process (the pivot left well behind it), a 60 px drag keeps the process in the picture; P over a process
+  toward the edge sets the pivot on its annotation (box ticked, label under the cube, ring on the point),
+  and a plain, Shift, Ctrl and Alt drag, the arrow keys, q, a cube turn, XY1 and a cube drag keep its pixel
+  to 1.5 px; zooming in keeps it, out past 4x lets go, as do a pan that takes it off the picture, P, Esc,
+  the label, Reset view, hiding its cell and Flatten IPL; Flip Z carries it; the Pivot box waits for a
+  click (crosshair) and Esc stops it; the right-click menu sets and clears it; the stored session leaves
+  it out and a reload starts without it.
 * ``comparecube`` -- the same cube in Render compare's top-right pane: a double-click turns every pane with
   Sync cameras; without Sync every pane turns to the same view about its own pivot, and a drag orbits each
   by the same amount; the house resets each pane; it moves with the pane count and into a maximized pane;
@@ -172,7 +181,16 @@ from contextlib import suppress
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_dropdowns import Chrome, Report, cell_selects, find_chrome, open_cell_panel  # noqa: E402
+from check_dropdowns import (  # noqa: E402
+    ALT,
+    CTRL,
+    SHIFT,
+    Chrome,
+    Report,
+    cell_selects,
+    find_chrome,
+    open_cell_panel,
+)
 
 # Every document starts with nothing stored, unless the section asked to keep it across a reload.
 CLEAR = ("try { if (!sessionStorage.getItem('__keep')) { localStorage.clear(); sessionStorage.clear(); } }"
@@ -3036,7 +3054,7 @@ def correctionlog(c: Chrome, r: Report, ctx):
     r.check('a ratio that is not a number is refused and the last one holds',
             said['value'] == '20' and said['status'].startswith('Not a number'), said)
     ratio('4')
-    c.wait_for(f"[...document.querySelectorAll('#correction-log tbody tr[data-location]')].length >= 2", 15)
+    c.wait_for("[...document.querySelectorAll('#correction-log tbody tr[data-location]')].length >= 2", 15)
 
     js(c, """[...document.querySelectorAll('#correction-log tr[data-location="1328721"] button.settings-id')]
         .find((b) => b.textContent === '1328721').click()""")
@@ -4148,6 +4166,356 @@ def flatten(c: Chrome, r: Report, ctx):
         r.skip('in Cped the box is disabled', 'NeitzCped is not in this server\'s volume list')
 
 
+# -- pivot ------------------------------------------------------------------------------------
+
+#: Where a point of the scene's frame is drawn: page pixels, its depth along the view, and whether it
+#: is inside the picture (and in front of a perspective camera).
+PROJECT = """((p) => { const R = window.sbfsem.renderer; const v = R.controls.target.clone().set(p[0], p[1], p[2]);
+  const d = v.clone().sub(R.camera.position).dot(R.camera.getWorldDirection(v.clone()));
+  v.project(R.camera); const b = R.webgl.domElement.getBoundingClientRect();
+  return { x: b.left + (v.x + 1) / 2 * b.width, y: b.top + (1 - v.y) / 2 * b.height, depth: d,
+           inside: Math.abs(v.x) <= 1 && Math.abs(v.y) <= 1 && (R.camera.isOrthographicCamera || d > 0) }; })"""
+
+#: A thin process: a surface hit with nothing drawn 8 px either side, the nearest found to `frac` of the
+#: way from the middle of the picture to its right edge (`{ x, y, p }`, p in the scene's frame).
+THIN_SPOT = """((frac) => { const R = window.sbfsem.renderer; const canvas = R.webgl.domElement;
+  const b = canvas.getBoundingClientRect(); const cx = b.left + b.width / 2 + frac * b.width / 2;
+  const cy = b.top + b.height / 2; const hit = (x, y) => R._hitsAt(x, y)[0];
+  for (let ring = 0; ring < 60; ring++) {
+    const n = Math.max(1, ring * 6);
+    for (let i = 0; i < n; i++) {
+      const a = 2 * Math.PI * i / n, x = cx + ring * 8 * Math.cos(a), y = cy + ring * 8 * Math.sin(a);
+      if (x < b.left + 40 || x > b.right - 160 || y < b.top + 60 || y > b.bottom - 40) continue;
+      if (document.elementFromPoint(x, y) !== canvas) continue;
+      const h = hit(x, y);
+      if (h && !hit(x - 8, y) && !hit(x + 8, y)) return { x, y, p: h.point.toArray() };
+    }
+  }
+  return null; })"""
+
+
+def pivot(c: Chrome, r: Report, ctx):
+    r.start('pivot: the point turns pivot about (P, the Pivot box, the right click), and a drag measuring its depth')
+    R = 'window.sbfsem.renderer'
+    boot(c, ctx.url)
+    key = load(c, ctx.cell)
+    status = "document.getElementById('status').textContent"
+
+    def box() -> list[float]:
+        return js(c, f"(() => {{ const b = {R}.webgl.domElement.getBoundingClientRect();"
+                     " return [b.left, b.top, b.width, b.height]; })()")
+
+    def at(point: list[float]) -> dict:
+        return js(c, f'({PROJECT})({json.dumps(point)})')
+
+    def still() -> None:
+        """Until the camera stops moving (a glide, damping)."""
+        last = js(c, f'{R}.cameraState()')
+        for _ in range(60):
+            time.sleep(0.1)
+            now = js(c, f'{R}.cameraState()')
+            if now == last:
+                return
+            last = now
+
+    def wheel(x: float, y: float, dy: int) -> None:
+        c.send('Input.dispatchMouseEvent', type='mouseWheel', x=x, y=y, deltaX=0, deltaY=dy)
+        time.sleep(0.03)
+
+    def drag(x0: float, y0: float, dx: float, dy: float = 0, mods: int = 0, button: str = 'left') -> None:
+        """A real drag of the mouse, `mods` held (check_dropdowns' ALT, CTRL, META, SHIFT)."""
+        held = 1 if button == 'left' else 2
+        mouse = lambda kind, x, y, b, **k: c.send(  # noqa: E731
+            'Input.dispatchMouseEvent', type=kind, x=x, y=y, button=button, buttons=b, modifiers=mods, **k)
+        mouse('mouseMoved', x0, y0, 0)
+        mouse('mousePressed', x0, y0, held, clickCount=1)
+        for i in range(1, 21):
+            mouse('mouseMoved', x0 + dx * i / 20, y0 + dy * i / 20, held)
+            time.sleep(0.01)
+        mouse('mouseReleased', x0 + dx, y0 + dy, 0, clickCount=1)
+        still()
+
+    def pivot_at() -> list[float] | None:
+        return js(c, f'{R}.pivotPoint()')
+
+    def ui() -> dict:
+        return js(c, """(() => { const b = document.getElementById('pivot-toggle');
+            const chip = document.getElementById('pivot-chip'); const mark = document.querySelector('.pivot-mark');
+            const m = mark.getBoundingClientRect();
+            return { checked: b.checked, indeterminate: b.indeterminate, chip: !chip.hidden,
+                     mark: mark.hidden ? null : [m.left + m.width / 2, m.top + m.height / 2],
+                     armed: window.sbfsem.renderer.webgl.domElement.classList.contains('pivot-armed') }; })()""")
+
+    def press_p(x: float, y: float) -> None:
+        c.move(x, y)
+        js(c, f'{R}.webgl.domElement.focus()')
+        c.key('p')
+        c.settle(2)
+
+    def zoom_onto(point: list[float], stop_um: float = 3.0) -> dict:
+        """Wheel in with the pointer kept on `point` until it is `stop_um` away (or 0.004 um a pixel)."""
+        for _ in range(200):
+            now = at(point)
+            if (not now['inside'] or now['depth'] <= stop_um
+                    or js(c, f'{R}.umPerPixelAt({json.dumps(point)})') < 0.004):
+                break
+            wheel(now['x'], now['y'], -100)
+        still()
+        return at(point)
+
+    def gap(a: dict, b: dict) -> float:
+        return math.hypot(a['x'] - b['x'], a['y'] - b['y'])
+
+    b = box()
+    low = (b[0] + b[2] / 2, b[1] + b[3] * 0.82)        # where the drags start: below the cell, mostly empty
+
+    # -- a whole-cell view turns about where Reset view put the pivot -----------------------
+    js(c, f'{R}.resetView()')
+    still()
+    reset = js(c, f'{R}.controls.target.toArray()')
+    c.press(*low)
+    c.release(*low)
+    still()
+    kept = js(c, f'{R}.controls.target.toArray()')
+    r.check('Reset view, then a press to turn: the pivot is where Reset view put it',
+            math.dist(reset, kept) <= 1e-9, (reset, kept))
+
+    # -- zoomed in with the pointer still over empty space, a drag measures the depth again --------
+    spot = js(c, f'({THIN_SPOT})(0)')
+    r.check('a thin process near the middle', bool(spot), spot)
+    if not spot:
+        return
+    process = spot['p']
+    x, y = spot['x'] + 80, spot['y']                   # held still beside it, as a person zooming past it
+    for _ in range(160):
+        wheel(x, y, -100)
+        now = at(process)
+        if (not now['inside'] or now['depth'] <= 1.0 or abs(now['x'] - (b[0] + b[2] / 2)) > 0.6 * b[2] / 2
+                or js(c, f'{R}.umPerPixelAt({json.dumps(process)})') < 0.004):
+            break
+    still()
+    before = at(process)
+    behind = js(c, """((p) => { const R = window.sbfsem.renderer; const f = R.camera.getWorldDirection(R.camera.position.clone());
+        const t = R.controls.target.clone().sub(R.camera.position).dot(f);
+        return t - R.controls.target.clone().set(p[0], p[1], p[2]).sub(R.camera.position).dot(f); })(%s)""" % json.dumps(process))
+    r.check('the wheel over empty space left the pivot well behind the process (the setup)',
+            before['inside'] and behind > 5, f"{behind:.1f} um behind, the process {before['depth']:.2f} um away")
+    drag(*low, 60)
+    after = at(process)
+    moved = gap(before, after)
+    r.check('a 60 px drag keeps the process in the picture (1,561 px off it before 2.34.0)',
+            after['inside'] and moved < b[2] / 4, f'{moved:.0f} px')
+
+    # -- P on a process away from the middle ------------------------------------------------------
+    js(c, f'{R}.resetView()')
+    still()
+    spot = js(c, f'({THIN_SPOT})(0.6)')
+    r.check('a thin process toward the right of the picture', bool(spot), spot)
+    if not spot:
+        return
+    process = spot['p']
+    here = zoom_onto(process)
+    press_p(here['x'], here['y'])
+    point = pivot_at()
+    shown = ui()
+    r.check('P over it sets the pivot', point is not None, js(c, status))
+    if point is None:
+        return
+    picture = js(c, f'{R}.umPerPixelAt({json.dumps(point)})') * b[3]
+    r.check('on the process: the middle of its annotation, within a quarter of the picture',
+            math.dist(point, process) <= 0.25 * picture, f'{math.dist(point, process):.3f} of {picture:.2f} um')
+    r.check('the Pivot box is ticked and the label under the cube shown',
+            shown['checked'] and not shown['indeterminate'] and shown['chip'], shown)
+    p0 = at(point)
+    r.check('the ring is drawn on the point', shown['mark'] is not None
+            and math.hypot(shown['mark'][0] - p0['x'], shown['mark'][1] - p0['y']) <= 2, (shown['mark'], p0))
+    r.check('and the status line says how to turn it off', 'P, Esc or the label' in js(c, status), js(c, status))
+    r.check('the label sits under the view cube', js(c, """(() => {
+        const a = document.getElementById('pivot-chip').getBoundingClientRect();
+        const v = document.querySelector('.viewcube').getBoundingClientRect();
+        return a.top >= v.bottom - 1 && a.right <= v.right + 8 && a.right >= v.left; })()"""))
+
+    turns = [
+        ('a plain drag', lambda: drag(*low, 60)),
+        ('a Shift-drag (roll)', lambda: drag(*low, 60, mods=SHIFT)),
+        ('a Ctrl-drag (pitch)', lambda: drag(*low, 0, -60, mods=CTRL)),
+        ('an Alt-drag (yaw)', lambda: drag(*low, 60, mods=ALT)),
+        ('the arrow keys', lambda: (js(c, f'{R}.webgl.domElement.focus()'), c.key('ArrowLeft'), c.key('ArrowUp'),
+                                    still())),
+        ('q', lambda: (js(c, f'{R}.webgl.domElement.focus()'), c.key('q'), still())),
+        ('a view cube turn', lambda: (js(c, f'{R}.turnTo([0, -1, 0], [0, 0, 1])', wait=True), still())),
+        ('the XY1 button', lambda: (js(c, "document.querySelector('[data-viewpoint=\"xy1\"]').click()"), still())),
+        ('a drag on the view cube', lambda: (js(c, f'{R}.spinBy(0.4, 0.2)'), js(c, f'{R}.endSpin()'), still())),
+    ]
+    for name, turn in turns:
+        start = at(point)
+        surface = at(process)
+        turn()
+        js(c, "document.getElementById('ctx-menu')?.remove()")
+        now = pivot_at()
+        if now is None:
+            r.check(f'{name} keeps the pivot', False, js(c, status))
+            return
+        end = at(now)
+        r.check(f'{name} turns about it: the point stays at its pixel',
+                gap(start, end) <= 1.5 and math.dist(now, point) <= 1e-6,
+                f'{gap(start, end):.2f} px; the process surface {gap(surface, at(process)):.0f} px')
+
+    # -- what lets go, and what does not ------------------------------------------------------------
+    here = at(point)
+    for _ in range(6):
+        wheel(here['x'], here['y'], -100)
+    still()
+    r.check('zooming in keeps it', pivot_at() is not None)
+    set_scale = js(c, f'{R}._pivot.umPerPixel')
+    ratio_before = None
+    for _ in range(80):
+        if pivot_at() is None:
+            break
+        ratio_before = js(c, f'{R}.umPerPixelAt({json.dumps(point)})') / set_scale
+        here = at(point)
+        wheel(here['x'], here['y'], 100)
+        c.settle(2)
+    r.check('zooming out past 4x the scale it was set at lets go', pivot_at() is None
+            and 3.6 <= (ratio_before or 0) <= 4.0, f'last held at {ratio_before:.2f}x')
+    shown = ui()
+    r.check('the box unticked, the label and ring gone, the status line says why',
+            not shown['checked'] and not shown['chip'] and shown['mark'] is None
+            and 'zoomed out past 4×' in js(c, status), (shown, js(c, status)))
+
+    def set_again() -> bool:
+        js(c, f'{R}.resetView()')
+        still()
+        here = at(process)
+        if not here['inside']:
+            return False
+        press_p(here['x'], here['y'])
+        return pivot_at() is not None
+
+    set_again()
+    here = at(js(c, f'{R}.pivotPoint()') or process)
+    drag(b[0] + b[2] / 2, b[1] + b[3] / 2, -b[2] * 0.6 if here['x'] > b[0] + b[2] / 2 else b[2] * 0.6,
+         button='right')
+    drag(b[0] + b[2] / 2, b[1] + b[3] / 2, -b[2] * 0.6 if here['x'] > b[0] + b[2] / 2 else b[2] * 0.6,
+         button='right')
+    r.check('a pan that takes the point out of the picture lets go',
+            pivot_at() is None and 'left the picture' in js(c, status), js(c, status))
+
+    set_again()
+    js(c, f'{R}.webgl.domElement.focus()')
+    c.key('p')
+    c.settle(2)
+    r.check('P again lets go', pivot_at() is None and 'middle of the view again' in js(c, status), js(c, status))
+    set_again()
+    c.key('Escape')
+    c.settle(2)
+    r.check('so does Esc', pivot_at() is None)
+    set_again()
+    chip = js(c, "(() => { const b = document.getElementById('pivot-chip').getBoundingClientRect();"
+                 " return [b.left + b.width / 2, b.top + b.height / 2]; })()")
+    c.click(*chip)
+    r.check('and a click on the label', pivot_at() is None)
+    set_again()
+    js(c, "document.getElementById('reset-view').click()")
+    c.settle(2)
+    r.check('and Reset view', pivot_at() is None and 'Reset view' in js(c, status), js(c, status))
+    set_again()
+    js(c, f'{R}.setStyle({json.dumps(key)}, {{ visible: false }})')
+    c.settle(3)
+    r.check('and hiding its cell', pivot_at() is None and 'no longer drawn' in js(c, status), js(c, status))
+    js(c, f'{R}.setStyle({json.dumps(key)}, {{ visible: true }})')
+    c.settle(2)
+    set_again()
+    turned = js(c, f'{R}.pivotPoint()')
+    js(c, """(() => { const b = document.getElementById('opt-flipz'); b.checked = true;
+        b.dispatchEvent(new Event('change', { bubbles: true })); })()""")
+    c.settle(3)
+    flipped = pivot_at()
+    r.check('Flip Z carries it with the cell (or lets go if that takes it out of the picture)',
+            (flipped is not None and math.dist(flipped, [turned[0], turned[1], -turned[2]]) <= 1e-6)
+            or (flipped is None and 'left the picture' in js(c, status)), (turned, flipped))
+    js(c, """(() => { const b = document.getElementById('opt-flipz'); b.checked = false;
+        b.dispatchEvent(new Event('change', { bubbles: true })); })()""")
+    c.settle(3)
+
+    # -- the Pivot box: a click says where ----------------------------------------------------------
+    js(c, f'{R}.clearPivot()')
+    js(c, f'{R}.resetView()')
+    still()
+    js(c, """(() => { const b = document.getElementById('pivot-toggle'); b.checked = true;
+        b.dispatchEvent(new Event('change', { bubbles: true })); })()""")
+    c.settle(2)
+    shown = ui()
+    r.check('ticking Pivot waits for a click: crosshair, the box half-ticked, the status line says so',
+            shown['armed'] and shown['indeterminate'] and 'Click the point' in js(c, status), (shown, js(c, status)))
+    empty = (b[0] + 30, b[1] + b[3] - 30)
+    c.click(*empty)
+    r.check('a click on nothing keeps waiting', js(c, f'{R}.pivotArmed') and pivot_at() is None, js(c, status))
+    here = at(process)
+    c.click(here['x'], here['y'])
+    r.check('a click on a cell sets the pivot there', pivot_at() is not None and not ui()['armed'])
+    js(c, """(() => { const b = document.getElementById('pivot-toggle'); b.checked = false;
+        b.dispatchEvent(new Event('change', { bubbles: true })); })()""")
+    c.settle(2)
+    r.check('unticking lets go', pivot_at() is None)
+    js(c, """(() => { const b = document.getElementById('pivot-toggle'); b.checked = true;
+        b.dispatchEvent(new Event('change', { bubbles: true })); })()""")
+    c.key('Escape')
+    c.settle(2)
+    r.check('Esc stops waiting', not js(c, f'{R}.pivotArmed') and not ui()['checked'])
+
+    # -- the right click --------------------------------------------------------------------------
+    def right_click(x: float, y: float) -> list[str]:
+        c.press(x, y, 'right')
+        c.release(x, y, 'right')
+        c.settle(2)
+        return js(c, "[...document.querySelectorAll('#ctx-menu .ctx-item')].map((e) => e.textContent.trim())") or []
+
+    def choose(label: str) -> bool:
+        return bool(js(c, """(() => { const item = [...document.querySelectorAll('#ctx-menu .ctx-item')]
+            .find((e) => e.textContent.trim() === %s); if (!item) return false; item.click(); return true; })()"""
+                       % json.dumps(label)))
+
+    here = at(process)
+    items = right_click(here['x'], here['y'])
+    r.check('a cell\'s right-click menu offers Rotate about this point (P)',
+            'Rotate about this point (P)' in items, items)
+    choose('Rotate about this point (P)')
+    c.settle(2)
+    r.check('which sets the pivot', pivot_at() is not None)
+    items = right_click(here['x'], here['y'])
+    r.check('and then offers to turn about the middle again',
+            'Rotate about the middle of the view again (P)' in items, items)
+    choose('Rotate about the middle of the view again (P)')
+    c.settle(2)
+    r.check('which lets go', pivot_at() is None)
+
+    # -- the page's alone ---------------------------------------------------------------------------
+    set_again()
+    js(c, f'{R}.webgl.domElement.focus()')
+    c.key('ArrowLeft')                                 # a turn saves the session
+    time.sleep(1.0)
+    stored = js(c, "localStorage.getItem('sbfsem.session.v1') || ''")
+    r.check('the session stored in the browser says nothing of it', 'pivot' not in stored.lower())
+    boot(c, ctx.url, keep=True)
+    c.wait_for("!document.getElementById('restore-banner').hidden", 30)
+    js(c, "document.getElementById('restore-yes').click()")
+    c.wait_for(f'{R}.meshes.size === 1', 240)
+    c.settle(3)
+    r.check('a reload and Restore start without it', pivot_at() is None and not ui()['checked'])
+
+    # -- Flatten IPL moves every cell -------------------------------------------------------------
+    if js(c, "!!document.getElementById('ctx-flatten') && !document.getElementById('ctx-flatten').disabled"):
+        set_again()
+        js(c, """(() => { const b = document.getElementById('ctx-flatten'); b.checked = true;
+            b.dispatchEvent(new Event('change', { bubbles: true })); })()""")
+        c.wait_for(f"{status}.includes('IPL flattened')", 240)
+        r.check('Flatten IPL lets go', pivot_at() is None)
+        js(c, """(() => { const b = document.getElementById('ctx-flatten'); b.checked = false;
+            b.dispatchEvent(new Event('change', { bubbles: true })); })()""")
+        c.wait_for(f"{status}.includes('IPL no longer flattened')", 240)
+
+
 SECTIONS = {
     'notice': notice, 'waiting': waiting, 'draws': draws, 'undo': undo, 'idle': idle,
     'picker': picker, 'save': save, 'analysis': analysis, 'strata': strata, 'strataexport': strataexport, 'twod': twod, 'sheets': sheets, 'volume': volume,
@@ -4175,6 +4543,7 @@ SECTIONS = {
     'narrow': narrow,
     'registrations': registrations,
     'viewcube': viewcube,
+    'pivot': pivot,
     'comparecube': comparecube,
     'comparereport': comparereport,
 }

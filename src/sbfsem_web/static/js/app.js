@@ -83,6 +83,7 @@ import { movesBody } from './manualmoves.js';
 import { applied as visualizationLook } from './visualizations.js';
 import { dismissApplyAll, visualizationItems, visualizationSelect } from './vismenu.js';
 import { buildFigure } from './helpfigures.js';
+import { ENDED as PIVOT_ENDED, pivotPlace } from './pivot.js';
 import { buildMovie, loadMovies, movieFor, movieManifest } from './helpmovies.js';
 import {
   REG_FIGURES, REG_HELP, correctionChip, correctionForCell, transformsChip,
@@ -635,6 +636,8 @@ async function boot() {
   });
   renderer.onContextMenu = contextMenuFor;
   renderer.onHover = hoverReadout;
+  renderer.onPivotRequest = pivotAt;
+  renderer.onPivotChange = pivotChanged;
   renderer.onSelectRequest = onSelectRequest;
   renderer.onSelectionChange = onSelectionChange;
   renderer.onMarkerChange = onMarkerChange;
@@ -1479,6 +1482,16 @@ function bindEvents() {
   $('show-viewcube').addEventListener('change', (e) => {
     showViewCube(e.target.checked);
     persist();
+  });
+  // The page's alone, like the pivot itself: not in the session.  Ticked, a click on
+  // the view says where; unticked, turns are about the middle of the picture again.
+  $('pivot-toggle').addEventListener('change', (e) => {
+    if (e.target.checked) renderer.armPivot(true);
+    else renderer.clearPivot('off');
+  });
+  $('pivot-chip').addEventListener('click', () => {
+    hideHelp();
+    renderer.clearPivot('off');
   });
   $('ortho').addEventListener('change', (e) => {
     renderer.setOrthographic(e.target.checked);
@@ -2914,6 +2927,7 @@ async function setIplFlat(on, { why = '' } = {}) {
   $('pick-location').textContent = 'Location ID —';
   display?.syncFlatten(iplFlat);
   if (on) renderer.clearSelection();
+  renderer.clearPivot('flatten');
   display?.flattenChanged();
   const records = [...state.neurons.values()];
   statusEl.textContent = `${on ? 'Flattening' : 'Unflattening'} the IPL: drawing ${describeCells(records)}…`;
@@ -3819,6 +3833,19 @@ let hovered = null;                 // { key, node } the readout names from the 
 const hoverAsked = new Map();       // key -> the load of the cell a fetch was sent for
 
 function hoverReadout(clientX, clientY) {
+  const found = renderer.nearestAnnotation(clientX, clientY, hoverCells());
+  if (!found || (hovered?.key === found.key && hovered.node === found.node)) return;
+  const record = state.neurons.get(found.key);
+  if (!record) return;
+  hovered = { key: found.key, node: found.node };
+  showNearestAnnotation(record, found.node);
+}
+
+/**
+ * Every shown cell whose annotations the page has, as `nearestAnnotation` takes
+ * them; a cell's are fetched the first time they are wanted, once for each load.
+ */
+function hoverCells() {
   const cells = [];
   for (const record of state.neurons.values()) {
     // A flattened cell is drawn on IPL depth, its annotations in sections: none is nearest.
@@ -3837,12 +3864,46 @@ function hoverReadout(clientX, clientY) {
       renderer.hoverAgain?.();
     }).catch(() => {});
   }
-  const found = renderer.nearestAnnotation(clientX, clientY, cells);
-  if (!found || (hovered?.key === found.key && hovered.node === found.node)) return;
-  const record = state.neurons.get(found.key);
-  if (!record) return;
-  hovered = { key: found.key, node: found.node };
-  showNearestAnnotation(record, found.node);
+  return cells;
+}
+
+/**
+ * Put the point every turn pivots about where the pointer is (P, an armed click,
+ * the right-click menu): the middle of the annotation the readout names there, so
+ * a process turns about its own axis, or the point drawn there (pivot.js
+ * `pivotPlace`).  Nothing there: the status line says so, and a click is still
+ * waited for if one was.
+ */
+function pivotAt(clientX, clientY) {
+  const hit = renderer.pickAt(clientX, clientY);
+  const found = renderer.nearestAnnotation(clientX, clientY, hoverCells());
+  const record = found ? state.neurons.get(found.key) : null;
+  const nearest = record ? {
+    point: renderer.toWorld(found.node.xyz_um, record.source), key: found.key, px: found.px, hit: found.hit,
+  } : null;
+  const pointed = hit ? { point: hit.world.toArray(), key: hit.key } : null;
+  const at = pointed?.point ?? nearest?.point;
+  const pictureUm = at ? renderer.umPerPixelAt(at) * ($('viewport').clientHeight || 1) : Infinity;
+  const place = pivotPlace({ pointed, nearest, pictureUm });
+  if (!place) {
+    flareStatus(renderer.pivotArmed ? 'Click on a cell: turns will pivot about that point (P or Esc to stop)'
+      : 'Point at a cell and press P: turns will pivot about that point');
+    return;
+  }
+  renderer.setPivot(place.point, { key: place.key });
+}
+
+/** The Pivot box, the label under the view cube and the status line follow the pivot. */
+function pivotChanged({ on, armed, reason }) {
+  const box = $('pivot-toggle');
+  box.checked = on || armed;
+  box.indeterminate = armed;
+  $('pivot-chip').hidden = !on;
+  if (!on) hideHelp();
+  if (armed) flareStatus('Click the point to turn about (P or Esc to stop)');
+  else if (on) flareStatus('Rotating about the ringed point — P, Esc or the label turns it off');
+  else if (PIVOT_ENDED[reason]) flareStatus(`Rotating about the middle of the view again: ${PIVOT_ENDED[reason]}`);
+  else flareStatus('Rotating about the middle of the view again');
 }
 
 /** Write an annotation into the readout as the one nearest the pointer. */
@@ -5518,10 +5579,25 @@ function contextMenuFor({
     menu.append(holder);
   };
 
+  // Turn about the point right-clicked, or about the middle again (P does both).
+  // Not in a Render compare pane, whose camera is not the 3D render's.
+  const pivotItem = () => {
+    if (pane) return;
+    if (renderer.pivotPoint()) {
+      item('Rotate about the middle of the view again (P)', () => renderer.clearPivot('off')).title =
+        'Turns pivot about the middle of the picture again, as they did before a point was chosen';
+    } else if (record) {
+      item('Rotate about this point (P)', () => pivotAt(clientX, clientY)).title =
+        'Every turn pivots about this point from now on, so it stays where it is on the screen '
+        + '(the middle of the annotation here, so a process turns about its own axis)';
+    }
+  };
+
   // GraphApp's right click is short: isolate the cell, Viking, deselect.
   if (graphOn && !pane) {
     if (record) graphMenuItems(record, context, item);
     else if (renderer.selection) item('Deselect', () => renderer.clearSelection()).title = 'Also Esc';
+    pivotItem();
     placeContextMenu(menu, at?.x ?? clientX, at?.y ?? clientY);
     return;
   }
@@ -5556,6 +5632,7 @@ function contextMenuFor({
     if (!pane) zSliceItems(item, context);
     moveItem();
     deselect();
+    pivotItem();
     placeContextMenu(menu, at?.x ?? clientX, at?.y ?? clientY);
     return;
   }
@@ -5611,6 +5688,7 @@ function contextMenuFor({
   if (!pane) zSliceItems(item, context);
   moveItem();
   deselect();
+  pivotItem();
   item('Show Last Modified', async () => {
     try {
       const row = await api.lastModified(record.source, record.id);
@@ -5766,11 +5844,13 @@ function underThePointer(rows, context, onPick, { light = true } = {}) {
 function placeContextMenu(menu, clientX, clientY) {
   document.body.append(menu);
   // The list of what is under the pointer gives way before the menu's own items
-  // do: on a short window it shrinks (and scrolls) to what is left.
+  // do: on a short window it shrinks (and scrolls) to what is left, down to two
+  // rows (it stopped at four, 96 px, and the menu's own items then ran 6 px past
+  // the bottom of a 620 px window once they had Rotate about this point, 2.34.0).
   const list = menu.querySelector('.ctx-candidates');
   if (list) {
     const over = menu.getBoundingClientRect().height - (window.innerHeight - 16);
-    if (over > 0) list.style.maxHeight = `${Math.max(96, list.getBoundingClientRect().height - over)}px`;
+    if (over > 0) list.style.maxHeight = `${Math.max(48, list.getBoundingClientRect().height - over)}px`;
   }
   // Keep the menu on screen -- a tall one starts at the top, where its first
   // items are, rather than above the window where they cannot be reached.
@@ -6814,11 +6894,12 @@ document.addEventListener('pointerdown', (event) => {
   if (!event.target.closest('#ctx-menu')) hideContextMenu();
 });
 // `m` resets the view wherever the focus is, not only once the canvas has been
-// clicked (it said nothing after a load, with the focus on Load: 2026-10-21).  Not
+// clicked (it said nothing after a load, with the focus on Load: 2026-10-21), and
+// `p` sets or lets go of the pivot point (after a click on the Pivot box).  Not
 // from a box being typed in, a dropdown (which takes letters to pick an entry), or
 // with a modifier; the canvas takes its own keys.
 document.addEventListener('keydown', (event) => {
-  if (event.key !== 'm' || event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
+  if (!['m', 'p', 'P'].includes(event.key) || event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
   if (state.view !== 'render' || !renderer || event.defaultPrevented) return;
   const target = event.target;
   if (target === renderer.webgl?.domElement || isTypingTarget(target)) return;
@@ -6827,12 +6908,20 @@ document.addEventListener('keydown', (event) => {
 });
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
-  // One Esc per thing: an open menu first, then the selection.  Handled here
+  // One Esc per thing: an open menu first, a click waited for by the Pivot box,
+  // then the selection, then the pivot point.  Handled here
   // rather than on the render canvas because choosing from the Select menu
   // leaves the keyboard focus on a button that no longer exists, and Esc
   // then never reached the canvas (2026-09-19: "how does one deselect it?").
   if (document.getElementById('ctx-menu')) { hideContextMenu(); return; }
-  if (state.view !== 'render' || !renderer?.selection) return;
+  if (state.view === 'render' && renderer?.pivotArmed) { renderer.clearPivot('off'); return; }
+  if (state.view !== 'render' || !renderer) return;
+  if (!renderer.selection) {
+    if (renderer.pivotPoint() && !event.target.closest?.('input, textarea, select, [contenteditable]')) {
+      renderer.clearPivot('off');
+    }
+    return;
+  }
   if (event.target.closest?.('input, textarea, select, [contenteditable]')) return;
   // The markers first, the one moved last first; then the selection.  A z-slice
   // goes before its annotation does.
