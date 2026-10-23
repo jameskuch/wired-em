@@ -108,11 +108,14 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   1557441, 13x, about halfway) with the volume, mode and service version; the ratio box narrows the list, is
   kept in the browser and refuses what is not a number; a Location ID selects its annotation in the 3D view,
   drawn yellow; Show in Viking answers on a Mac that Viking runs on Windows; the card scrolls its table rather
-  than the page at 480 px.
+  than the page at 480 px.  A second table lists the traced outlines the correction moved off the outlines linked
+  to them (2.36.0): c1178's rows each with their overlap falling and at least 0.2 of the way off, a cause, the
+  rule in words, the ratio box leaving them be, and a long list folded to 10 rows behind "Show all".
 * ``shiftpulls`` -- the same pulls in the cell's own panel (2026-10-20): the shut Position shift section's
   summary counts them at 4x with the layer off; open, a line says how many and lists their Location IDs, and
   one selects its annotation, drawn yellow; the Settings tab's ratio box changes what the panel lists (20x:
-  none, no count); the row wraps inside the panel at 480 px.
+  none, no count); the row wraps inside the panel at 480 px.  A second line (2.36.0) lists the traced outlines
+  the correction moved off the outlines linked to them, counted as "N off", which the ratio leaves be.
 * ``viewcube`` -- the view cube in the corner (viewcube.js), with a real mouse: a double-click on a
   face turns the view to that face's toolbar viewpoint exactly, on an edge to the 45 degree view and on a
   corner to the view between three faces; a single click turns nothing; looking at a face, the triangles
@@ -3009,8 +3012,11 @@ def settings(c: Chrome, r: Report, ctx):
     js(c, "sessionStorage.removeItem('__keep')")
 
 
-LOG_ROWS = """[...document.querySelectorAll('#correction-log tbody tr[data-location]')].map((tr) => ({
-    id: Number(tr.dataset.location), cells: [...tr.children].map((td) => td.textContent) }))"""
+LOG_ROWS = """[...document.querySelectorAll('#correction-log tbody tr[data-location]:not([data-outline])')]
+    .map((tr) => ({ id: Number(tr.dataset.location), cells: [...tr.children].map((td) => td.textContent) }))"""
+OUTLINE_ROWS = """[...document.querySelectorAll('#correction-log .settings-outline-table tbody tr[data-outline]')]
+    .map((tr) => ({ id: Number(tr.dataset.location), hidden: tr.hidden,
+                    cells: [...tr.children].map((td) => td.textContent) }))"""
 
 
 def correctionlog(c: Chrome, r: Report, ctx):
@@ -3043,18 +3049,40 @@ def correctionlog(c: Chrome, r: Report, ctx):
         c.settle(1)
 
     ratio('20')
-    narrowed = c.wait_for("!document.querySelector('#correction-log tbody tr[data-location]') && "
+    outlines = js(c, OUTLINE_ROWS)
+
+    def falls(row) -> bool:
+        before, after = (float(v) for v in row['cells'][8].split(' → '))
+        return after <= before and float(row['cells'][9]) >= 0.2 and row['cells'][12] in ('shape', 'slide', 'other')
+
+    rule = js(c, "document.querySelector('#correction-log .settings-outline-table')?.closest('.settings-scroll')"
+                 "?.previousElementSibling?.textContent || ''")
+    r.check('a second table lists c1178\'s traced outlines moved off their linked outlines: overlap falling, '
+            'at least 0.2 of the way off, a cause, the rule said above it',
+            bool(outlines) and all(falls(row) for row in outlines) and outlines[0]['cells'][1] == 'c1178'
+            and '0.25 µm or more' in rule, {'rows': outlines[:12], 'rule': rule})
+    folded = [row for row in outlines if row['hidden']]
+    if len(outlines) > 10:
+        js(c, "document.querySelector('#correction-log button.settings-more').click()")
+        opened = js(c, OUTLINE_ROWS)
+        r.check(f'{len(outlines)} rows are folded to 10 behind "Show all", which opens them',
+                len(folded) == len(outlines) - 10 and not any(row['hidden'] for row in opened),
+                {'folded': len(folded), 'rows': len(outlines)})
+    narrowed = c.wait_for("!document.querySelector('#correction-log tbody tr[data-location]:not([data-outline])') && "
                           "/None pulled/.test(document.querySelector('#correction-log tbody')?.textContent || '')", 15)
     kept = js(c, "localStorage.getItem('sbfsem:correction-log-ratio')")
     r.check('a ratio of 20 lists none of c1178\'s pulls (13x at most), and is kept in the browser',
             narrowed and kept == '20', {'kept': kept, 'rows': js(c, LOG_ROWS)})
+    r.check('and leaves the outlines as they were', len(js(c, OUTLINE_ROWS)) == len(outlines),
+            len(js(c, OUTLINE_ROWS)))
     ratio('wide')
     said = js(c, """({ value: document.getElementById('correction-log-ratio').value,
         status: document.querySelector('#correction-log p[role=status]').textContent })""")
     r.check('a ratio that is not a number is refused and the last one holds',
             said['value'] == '20' and said['status'].startswith('Not a number'), said)
     ratio('4')
-    c.wait_for("[...document.querySelectorAll('#correction-log tbody tr[data-location]')].length >= 2", 15)
+    c.wait_for("[...document.querySelectorAll('#correction-log tbody tr[data-location]:not([data-outline])')]"
+               ".length >= 2", 15)
 
     js(c, """[...document.querySelectorAll('#correction-log tr[data-location="1328721"] button.settings-id')]
         .find((b) => b.textContent === '1328721').click()""")
@@ -3086,11 +3114,16 @@ def correctionlog(c: Chrome, r: Report, ctx):
 
 POSITION_SHIFT = """[...document.querySelectorAll('.cell-section')]
     .find((s) => s.querySelector('.sec-name').textContent === 'Position shift')"""
-PULLS = """(() => { const s = %s; const row = s?.querySelector('.shift-pulls');
+PULLS = """(() => { const s = %s; const row = s?.querySelector('.shift-pulls:not(.shift-outlines)');
+    const off = s?.querySelector('.shift-pulls.shift-outlines');
     return { summary: s?.querySelector('.sec-summary')?.textContent ?? null,
              line: row?.querySelector('.shift-pulls-text')?.textContent ?? null,
              help: (row?.querySelector('.shift-pulls-text')?.dataset.help || '').length,
              ids: [...(row?.querySelectorAll('button.shift-pull-id') || [])].map((b) => Number(b.dataset.location)),
+             offLine: off?.querySelector('.shift-pulls-text')?.textContent ?? null,
+             offHelp: (off?.querySelector('.shift-pulls-text')?.dataset.help || '').length,
+             offIds: [...(off?.querySelectorAll('button.shift-pull-id') || [])].map((b) => Number(b.dataset.location)),
+             offMore: off?.querySelector('.shift-pulls-more')?.textContent ?? null,
              layerOn: !!s?.querySelector('.switch-row input[type=checkbox]')?.checked }; })()""" % POSITION_SHIFT
 
 
@@ -3103,7 +3136,7 @@ def shiftpulls(c: Chrome, r: Report, ctx):
     key = load(c, 1178, source='NeitzInferiorMonkey', mesh=False)
     js(c, "document.querySelector(%s).click(); true" % json.dumps(f'.neuron-item[data-key="{key}"] .chev'))
     c.wait_for("!!document.querySelector('.cell-panel')", 10)
-    counted = c.wait_for(f"/ · \\d+ pulled$/.test(({POSITION_SHIFT})?.querySelector('.sec-summary')"
+    counted = c.wait_for(f"/ · \\d+ pulled(, \\d+ off)?$/.test(({POSITION_SHIFT})?.querySelector('.sec-summary')"
                          "?.textContent || '')", 30)
     shut = js(c, PULLS)
     r.check('the shut Position shift section counts the pulls (at 4x), with the layer off',
@@ -3113,10 +3146,18 @@ def shiftpulls(c: Chrome, r: Report, ctx):
     c.wait_for(f"!!({POSITION_SHIFT})?.querySelector('.shift-pulls button.shift-pull-id')", 10)
     got = js(c, PULLS)
     n = len(got['ids'])
+    m = re.search(r', (\d+) off$', got['summary'] or '')
     r.check('open, a line says how many and lists 1328721 and 2028495 as buttons, with help on the line',
             {1328721, 2028495} <= set(got['ids'])
             and got['line'] == f'Curve fit pulled {n} annotations toward one 4× as wide or wider:'
-            and got['summary'].endswith(f'· {n} pulled') and got['help'] > 100, got)
+            and re.search(f'· {n} pulled(, \\d+ off)?$', got['summary'] or '') is not None
+            and got['help'] > 100, got)
+    off = int(m.group(1)) if m else 0
+    more = f'and {off - 12} more (Settings → Correction log)' if off > 12 else None
+    r.check('a second line lists the traced outlines moved off their linked outlines, its count in the summary, '
+            'the first 12 as buttons and how many more, with help',
+            off > 0 and got['offLine'] == f'Curve fit moved {off} traced outlines off the outlines linked to them:'
+            and len(got['offIds']) == min(off, 12) and got['offMore'] == more and got['offHelp'] > 200, got)
 
     js(c, f"({POSITION_SHIFT}).querySelector('button.shift-pull-id[data-location=\"1328721\"]').click()")
     chosen = c.wait_for("window.sbfsem.renderer.selection?.locationId === 1328721", 30)
@@ -3133,12 +3174,16 @@ def shiftpulls(c: Chrome, r: Report, ctx):
         c.settle(1)
 
     ratio('20')
-    gone = c.wait_for(f"!({POSITION_SHIFT})?.querySelector('.shift-pulls') && "
+    gone = c.wait_for(f"!({POSITION_SHIFT})?.querySelector('.shift-pulls:not(.shift-outlines)') && "
                       f"!/pulled/.test(({POSITION_SHIFT})?.querySelector('.sec-summary')?.textContent || '')", 15)
     r.check('the Settings ratio at 20x lists none here either (13x at most), and the count goes',
             gone, js(c, PULLS))
+    left = js(c, PULLS)
+    r.check('the outlines stay, counted on their own', len(left['offIds']) == min(off, 12)
+            and (left['summary'] or '').endswith(f'· {off} off'), left)
     ratio('4')
-    back = c.wait_for(f"({POSITION_SHIFT})?.querySelectorAll('.shift-pulls button.shift-pull-id').length === {n}", 15)
+    back = c.wait_for(f"({POSITION_SHIFT})?.querySelectorAll('.shift-pulls:not(.shift-outlines) "
+                      f"button.shift-pull-id').length === {n}", 15)
     r.check('back at 4x they are listed again', back, js(c, PULLS))
 
     c.emulate('mac', 480, 900)

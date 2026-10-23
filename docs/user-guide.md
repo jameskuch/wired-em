@@ -1846,6 +1846,15 @@ kept in this browser (default 4×); changing it there changes what the cell pane
 Nothing is shown for a cell with none, or under no correction or the residual field
 alone.
 
+**Outlines moved off** (since 2.36.0). A second line names the traced outlines the
+correction moved off the outlines linked to them: *Curve fit moved 22 traced outlines
+off the outlines linked to them:* followed by the first 12 Location IDs and how many
+more the Settings tab's Correction log lists. The fit takes an outline's centroid as a
+point of the process, so where an outline takes in a lobe or the base of a branch, the
+next one is moved toward the lobe though their membranes line up (Inferior Monkey
+c16137's soma outline on section 547 moved 0.58 µm toward section 546's lobe). The shut
+section counts them too (`off · 3 pulled, 22 off`); the ratio does not change them.
+
 **What is drawn.** One arrow per annotation that moved, in its section plane,
 **Arrow width** pixels wide on the screen at any zoom (2.5 by default, 1 to 8),
 with a filled head and a shaft that fades toward its tail, so which way it
@@ -3794,6 +3803,20 @@ looks wrong rather than for the work itself.
   (since 2.22.1: of five such rows on production at 4×, four were tips beside a thin
   neighbor under 0.7 µm away and one a point drawn inside an outline, none this bug).
   Cells under the residual field alone are listed as not checked. The server's log names the pulls at 4× as each cell is loaded.
+
+  A second table (since 2.36.0), **Traced outlines moved off the outlines linked to them**,
+  lists for each cell the outlines the correction moved 0.25 µm or more although, where
+  Viking draws them, at least 80 % of each (of the smaller of two) overlaps the outlines
+  linked to it, by a move that took it at least 0.2 of the way off them. *Overlap* is the
+  shared area where Viking draws it → moved by the correction; *Off* is the overlap lost
+  as a share of what the same move takes from a circle of its area lying on a copy of
+  itself (1: straight off); *Toward* and *Step* name the linked outline the move points at
+  most and how far apart their centroids are; *Why* is **shape** (that outline's centroid
+  steps away because its shape changes, a lobe or a branch taken in), **slide** (that
+  outline is this one displaced) or **other** (no linked outline lies that way: the fit
+  carried it along with the process, often after a pull toward a soma). A cell's first 10
+  rows are shown, *Show all* the rest. A move that brings an outline onto its neighbors (a
+  misregistered section the fit lined up) is never listed.
   A cell's own pulls are also listed in its panel's
   [Position shift](#position-shift-where-each-annotation-was-and-where-it-is-drawn) section,
   at this ratio.

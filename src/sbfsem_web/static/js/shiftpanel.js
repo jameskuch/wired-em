@@ -86,30 +86,47 @@ function layerSummary(display, layer) {
 
 /**
  * The line of annotations Viking's curve fit pulled toward a much wider linked one,
- * each ID a button that selects it (`select(locationId)`); nothing when none was.
+ * and the line of traced outlines it moved off the outlines linked to them, each ID
+ * a button that selects it (`select(locationId)`); nothing when neither was found.
+ * The outline line shows its first IDs and says how many more the Settings tab lists.
  */
 export function pullsRow(parent, pulls, select) {
   const view = cellPullsView(pulls);
   if (!view) return null;
-  const row = document.createElement('div');
-  row.className = 'shift-pulls';
-  const words = document.createElement('span');
-  words.className = 'shift-pulls-text';
-  words.textContent = view.line;
-  help(words, PULLS_HELP);
-  row.append(words);
-  for (const { locationId, title } of view.ids) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'shift-pull-id';
-    button.textContent = String(locationId);
-    button.dataset.location = String(locationId);
-    help(button, `${title}. Click to select it in the 3D view.`);
-    button.addEventListener('click', () => select?.(locationId));
-    row.append(button);
+  const rows = [];
+  const line = (text, helpText, ids, more = 0) => {
+    const row = document.createElement('div');
+    row.className = 'shift-pulls';
+    const words = document.createElement('span');
+    words.className = 'shift-pulls-text';
+    words.textContent = text;
+    help(words, helpText);
+    row.append(words);
+    for (const { locationId, title } of ids) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'shift-pull-id';
+      button.textContent = String(locationId);
+      button.dataset.location = String(locationId);
+      help(button, `${title}. Click to select it in the 3D view.`);
+      button.addEventListener('click', () => select?.(locationId));
+      row.append(button);
+    }
+    if (more) {
+      const rest = document.createElement('span');
+      rest.className = 'shift-pulls-more muted';
+      rest.textContent = `and ${more} more (Settings → Correction log)`;
+      row.append(rest);
+    }
+    parent.append(row);
+    rows.push(row);
+    return row;
+  };
+  if (view.line) line(view.line, PULLS_HELP, view.ids);
+  if (view.outlines) {
+    line(view.outlines.line, view.outlines.help, view.outlines.ids, view.outlines.more).classList.add('shift-outlines');
   }
-  parent.append(row);
-  return row;
+  return rows[0];
 }
 
 // -- a logarithmic slider -----------------------------------------------------------------------------

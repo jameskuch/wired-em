@@ -996,6 +996,8 @@ class RegistrationQualityDTO(BaseModel):
     #: Annotations the curve fit pulled toward one ``pull_ratio`` times as wide (None: no fit ran).
     pulls: int | None = None
     pull_ratio: float
+    #: Traced outlines the correction moved off the outlines linked to them (None: no fit ran).
+    outline_moves: int | None = None
 
 
 class CorrectionPullDTO(BaseModel):
@@ -1024,6 +1026,54 @@ class CorrectionPullDTO(BaseModel):
     moved_with: list[int] = Field(default_factory=list)
 
 
+class CorrectionOutlineMoveDTO(BaseModel):
+    """One traced outline the section correction moved off the outlines linked to it.
+
+    See :func:`sbfsem.analysis.correction_checks.scan_outlines`; lengths in um,
+    positions where Viking draws them.  An *overlap* is the shared area over the
+    smaller outline's, summed over the linked outlines.  ``off_share`` is the
+    overlap the move took away as a share of what the same move takes from a
+    circle of the outline's area lying on a copy of itself (1 straight off, 0
+    neither off nor onto them).  ``neighbor_id`` is the linked outline the move
+    points at most (``cos``), ``step_um`` the step between the two centroids,
+    ``overlap_slid`` their overlap with this one slid by that step.  ``cause``:
+    ``shape`` (the move goes toward the neighbor's centroid and not past it, and
+    the slide does not raise their overlap: the step is the outline's change of
+    shape, a lobe or a branch taken in), ``slide`` (the same, but it would) or
+    ``other`` (no linked outline's centroid lies that way and that far: the fit
+    carried it along with the process).
+    """
+
+    location_id: int
+    z: int
+    r_um: float
+    dx_um: float
+    dy_um: float
+    move_um: float
+    n_linked: int
+    overlap_traced: float
+    overlap_moved: float
+    off_share: float
+    neighbor_id: int
+    neighbor_z: int
+    neighbor_r_um: float
+    cos: float
+    step_um: float
+    overlap_neighbor: float
+    overlap_slid: float
+    cause: str
+
+
+class OutlineRuleDTO(BaseModel):
+    """When the correction log lists a traced outline (``outline_moves``): moved at
+    least ``min_move_um``, overlapping its linked outlines at least ``min_overlap``
+    where Viking draws it, and moved off them by ``min_off_share`` or more."""
+
+    min_move_um: float
+    min_overlap: float
+    min_off_share: float
+
+
 class CorrectionLogCellDTO(BaseModel):
     """One loaded copy of a cell in the correction log.
 
@@ -1031,7 +1081,10 @@ class CorrectionLogCellDTO(BaseModel):
     curve fit (``off``, ``neighbor``) or whose correction was not applied
     (``note`` says why).  ``n_next_to_wider`` counts the moved annotations
     with a linked one at least ``ratio`` times as wide; ``pulls`` are those the
-    correction moved toward it.
+    correction moved toward it.  ``n_outlines`` counts the cell's traced outlines
+    linked to one on another section, ``n_outlines_moved`` those the correction
+    moved at least the rule's ``min_move_um``, and ``outline_moves`` those it
+    moved off their linked outlines (:class:`CorrectionOutlineMoveDTO`).
     """
 
     source: str
@@ -1046,6 +1099,9 @@ class CorrectionLogCellDTO(BaseModel):
     n_moved: int = 0
     n_next_to_wider: int = 0
     pulls: list[CorrectionPullDTO] = Field(default_factory=list)
+    n_outlines: int = 0
+    n_outlines_moved: int = 0
+    outline_moves: list[CorrectionOutlineMoveDTO] = Field(default_factory=list)
 
 
 class CorrectionPullsDTO(CorrectionLogCellDTO):
@@ -1059,6 +1115,7 @@ class CorrectionPullsDTO(CorrectionLogCellDTO):
 
     ratio: float
     ratio_sent_to_viking: bool = False
+    outline_rule: OutlineRuleDTO
 
 
 class CorrectionLogDTO(BaseModel):
@@ -1073,6 +1130,7 @@ class CorrectionLogDTO(BaseModel):
     min_ratio: float
     max_ratio: float
     ratio_sent_to_viking: bool = False
+    outline_rule: OutlineRuleDTO
     cells: list[CorrectionLogCellDTO] = Field(default_factory=list)
 
 

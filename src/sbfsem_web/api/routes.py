@@ -77,6 +77,7 @@ from sbfsem.service.facade import (
     ResultBuffers,
     SbfsemService,
     curve_averaging,
+    outline_rule,
     requested_copy,
 )
 from sbfsem.util.memory import trim_memory
@@ -530,7 +531,8 @@ def correction_log(request: Request,
                                         description="How many times wider the linked annotation "
                                                     "must be")):
     """The annotations Viking's section correction pulled toward a much wider
-    linked one, in every cell loaded on this server under the curve fit
+    linked one, and the traced outlines it moved off the outlines linked to
+    them, in every cell loaded on this server under the curve fit
     (``curvefit``, ``all``); see :mod:`sbfsem.analysis.correction_checks`.
     Names no volume, so the router's guard lets it through: as ``GET
     /neurons``, a Viking user is shown only the volumes they may open.
@@ -543,7 +545,8 @@ def correction_log(request: Request,
     if session is not None and request.app.state.viking.config.gate_volumes:
         cells = [c for c in cells if session.may_read(c.source)]
     return CorrectionLogDTO(ratio=ratio, default_ratio=PULL_DEFAULT_RATIO, min_ratio=PULL_MIN_RATIO,
-                            max_ratio=PULL_MAX_RATIO, ratio_sent_to_viking=False, cells=cells)
+                            max_ratio=PULL_MAX_RATIO, ratio_sent_to_viking=False,
+                            outline_rule=outline_rule(), cells=cells)
 
 
 def _null_is_false(value):
@@ -1962,7 +1965,8 @@ def correction_pulls(request: Request, source: str, neuron_id: int,
                                           description="How many times wider the linked annotation "
                                                       "must be")):
     """The annotations Viking's curve fit pulled toward a much wider linked one in
-    this cell: its rows of ``GET /correction-log``, for the copy named by
+    this cell, and the traced outlines it moved off the outlines linked to them:
+    its rows of ``GET /correction-log``, for the copy named by
     ``?copy=``.  A copy loaded without a section correction is ``off``, not checked.
     """
     svc = service(request)

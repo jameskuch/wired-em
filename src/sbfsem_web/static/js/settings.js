@@ -388,6 +388,39 @@ export function pullTitle(p) {
     + `${um(p.frac)} of the way there${moved}`;
 }
 
+/** When the server lists an outline, until it has said its own (/api/correction-log answers it). */
+export const OUTLINE_RULE = Object.freeze({ min_move_um: 0.25, min_overlap: 0.8, min_off_share: 0.2 });
+
+/** Why an outline moved off its linked outlines, as the log's Why column says it and its hover explains it. */
+export const OUTLINE_CAUSES = Object.freeze({
+  shape: { word: 'shape', help: 'It moved toward a linked outline whose centroid steps away from its own because '
+    + 'that outline’s shape changes (it takes in a lobe or the base of a branch): slid by that step, the two would '
+    + 'overlap less, not more. Viking’s curve fit takes the centroid as a point of the process.' },
+  slide: { word: 'slide', help: 'It moved toward a linked outline that is this one displaced (slid by the step '
+    + 'between their centroids they would overlap more), yet the move lowered its overlap with all its linked outlines.' },
+  other: { word: 'other', help: 'No linked outline’s centroid lies the way it moved and as far: the fit carried it '
+    + 'along with other annotations of the process (often one it pulled toward a much wider annotation).' },
+});
+
+const share = (value, digits = 2) => (Number.isFinite(value) ? value.toFixed(digits) : '—');
+/** An overlap: three places, as a soma's outline loses little of it when it moves. */
+const overlap = (value) => share(value, 3);
+
+/** One outline moved off its linked outlines in words: a log row's hover, and an ID's in the cell panel. */
+export function outlineTitle(m) {
+  const why = m.cause === 'shape'
+    ? `; toward ${m.neighbor_id} (section ${m.neighbor_z}), whose centroid sits ${um(m.step_um)} µm away though `
+      + `the two overlap ${overlap(m.overlap_neighbor)} (${overlap(m.overlap_slid)} slid by that step): a change of shape, not of place`
+    : m.cause === 'slide'
+      ? `; toward ${m.neighbor_id} (section ${m.neighbor_z}, ${um(m.step_um)} µm away), which it would overlap `
+        + `${overlap(m.overlap_slid)} slid by that step (${overlap(m.overlap_neighbor)} as drawn)`
+      : `; toward no linked outline’s centroid (the nearest in direction, ${m.neighbor_id}, is ${um(m.step_um)} µm `
+        + `away at cos ${um(m.cos)}): carried along with the process`;
+  return `Location ${m.location_id} (r ${um(m.r_um)} µm, section ${m.z}) moved ${um(m.move_um)} µm off the `
+    + `${m.n_linked === 1 ? 'outline' : `${m.n_linked} outlines`} linked to it: overlap ${overlap(m.overlap_traced)} where `
+    + `Viking draws it, ${overlap(m.overlap_moved)} moved, ${share(m.off_share)} of the way off${why}`;
+}
+
 /**
  * The log as the card draws it: one entry per checked cell, in the server's
  * order, with its heading and its rows' texts, and the cells that were not
@@ -427,9 +460,47 @@ export function correctionLogView(log, { volumeName = (s) => s } = {}) {
         movedWith: [...(p.moved_with || [])],
         title: pullTitle(p),
       })),
+      outlines: outlinesOf(cell),
     });
   }
   return { ratio, checked, unchecked };
+}
+
+/** A checked cell's outlines moved off their linked outlines: its summary and rows. */
+function outlinesOf(cell) {
+  const moves = cell.outline_moves || [];
+  const n = moves.length;
+  const tested = cell.n_outlines_moved ?? 0;
+  const linked = cell.n_outlines ?? 0;
+  const summary = !linked ? ''
+    : n ? `${n} of the ${tested} traced outline${tested === 1 ? '' : 's'} moved by the rule’s distance or more `
+      + `${n === 1 ? 'was' : 'were'} moved off the outlines linked to ${n === 1 ? 'it' : 'them'} (${linked} linked in all)`
+      : `None moved off: ${tested} of the ${linked} linked traced outline${linked === 1 ? '' : 's'} moved by the rule’s `
+        + 'distance or more, none away from where it overlaps its linked ones';
+  return {
+    summary,
+    rows: moves.map((m) => ({
+      locationId: m.location_id,
+      z: String(m.z),
+      r: um(m.r_um),
+      move: um(m.move_um),
+      overlap: `${overlap(m.overlap_traced)} → ${overlap(m.overlap_moved)}`,
+      off: share(m.off_share),
+      neighborId: m.neighbor_id,
+      step: um(m.step_um),
+      cause: OUTLINE_CAUSES[m.cause]?.word || m.cause,
+      causeHelp: OUTLINE_CAUSES[m.cause]?.help || '',
+      title: outlineTitle(m),
+    })),
+  };
+}
+
+/** The rule in words: the log's card and the cell panel's hover say it. */
+export function outlineRuleText(rule = OUTLINE_RULE) {
+  return `Listed when the correction moved a traced outline ${rule.min_move_um} µm or more, where Viking draws it `
+    + `at least ${Math.round(rule.min_overlap * 100)} % of it (of the smaller of two) overlaps the outlines linked to it, `
+    + `and the move took it at least ${rule.min_off_share} of the way off them: the overlap it lost, as a share of `
+    + 'what the same move takes from a circle of its area lying on a copy of itself.';
 }
 
 /** What the pull line's hover says about the bug (the log's card says it at more length). */
@@ -440,20 +511,46 @@ export const PULLS_HELP = 'Viking’s section correction (Curve fit, or Field + 
   + 'their diameter and not past it. The ratio is the Settings tab’s Correction log’s, kept in this browser; it '
   + 'changes what is listed, not Viking’s correction. Click an ID to select it in the 3D view.';
 
+/** What the outline line's hover says (the log's card says it at more length). */
+export function outlinesHelp(rule = OUTLINE_RULE) {
+  return 'Viking’s section correction (Curve fit, or Field + fit) takes a traced outline’s centroid as a point of '
+    + 'the process, so where an outline takes in a lobe or the base of a branch its centroid steps sideways though '
+    + 'its membrane does not, and the fit moves the next outline toward that step; others it carries along with the '
+    + 'annotations around them. These outlines lined up with the outlines linked to them where Viking draws them, '
+    + `and the correction moved them off. ${outlineRuleText(rule)} Click an ID to select it in the 3D view; `
+    + 'the Settings tab’s Correction log lists them all, with their numbers.';
+}
+
+/** How many of a cell's outline IDs its panel shows; the Settings tab's log lists the rest. */
+export const OUTLINE_IDS_SHOWN = 12;
+/** How many of a cell's outline rows the log shows before "Show all". */
+export const OUTLINE_ROWS_FOLDED = 10;
+
 /**
- * A cell's own pulls (`GET /neurons/{source}/{id}/correction-pulls`) as its Position
- * shift section shows them: `count` for the section's summary, `line` before the IDs,
- * one `{ locationId, title }` per pull.  Null with nothing to show: not checked (no
- * curve fit), or none pulled.
+ * A cell's own pulls and outlines moved off (`GET /neurons/{source}/{id}/correction-pulls`)
+ * as its Position shift section shows them: `count` for the section's summary, `line`
+ * before the pulls' IDs, one `{ locationId, title }` per pull, and `outlines`: its
+ * `line`, the first {@link OUTLINE_IDS_SHOWN} IDs and how many `more`.  Null with
+ * nothing to show: not checked (no curve fit), or neither found.
  */
 export function cellPullsView(answer) {
   const n = answer?.checked ? (answer.pulls?.length ?? 0) : 0;
-  if (!n) return null;
+  const moves = answer?.checked ? (answer.outline_moves || []) : [];
+  const m = moves.length;
+  if (!n && !m) return null;
   const ratio = formatRatio(answer.ratio ?? RATIO_LIMITS.fallback);
+  const shown = moves.slice(0, OUTLINE_IDS_SHOWN);
   return {
-    count: `${n} pulled`,
-    line: `Curve fit pulled ${n} annotation${n === 1 ? '' : 's'} toward one ${ratio} as wide or wider:`,
-    ids: answer.pulls.map((p) => ({ locationId: p.location_id, title: pullTitle(p) })),
+    count: [n ? `${n} pulled` : '', m ? `${m} off` : ''].filter(Boolean).join(', '),
+    line: n ? `Curve fit pulled ${n} annotation${n === 1 ? '' : 's'} toward one ${ratio} as wide or wider:` : '',
+    ids: (answer.pulls || []).map((p) => ({ locationId: p.location_id, title: pullTitle(p) })),
+    outlines: m ? {
+      line: `Curve fit moved ${m} traced outline${m === 1 ? '' : 's'} off the outlines linked to `
+        + `${m === 1 ? 'it' : 'them'}:`,
+      ids: shown.map((o) => ({ locationId: o.location_id, title: outlineTitle(o) })),
+      more: m - shown.length,
+      help: outlinesHelp(answer.outline_rule || OUTLINE_RULE),
+    } : null,
   };
 }
 
@@ -642,6 +739,9 @@ export class SettingsPanel {
         + 'leaving it is pulled toward that center: halfway when its neighbors are a section either side, '
         + 'a third, two thirds or three quarters of the way when they are not. An annotation that moved past '
         + 'the wider one (more than 1 of the way) is not this bug and is not listed. '
+        + 'A second table lists the traced outlines the correction moved off the outlines linked to them: '
+        + 'the fit takes an outline’s centroid as a point of the process, so where an outline takes in a lobe or '
+        + 'the base of a branch, the next one is moved toward that lobe though the membranes line up. '
         + 'A row selects its annotation in the 3D view; ↗ shows it in Viking.' }),
       el('div', { class: 'row settings-actions' }, [
         el('label', { for: 'correction-log-ratio', text: 'Wider by at least' }),
@@ -655,6 +755,69 @@ export class SettingsPanel {
       this.logStatus,
       this.logBody,
     ]));
+  }
+
+  /** The outlines table: one block of rows per cell, a long one folded to {@link OUTLINE_ROWS_FOLDED} rows. */
+  _outlineTable(checked, rule) {
+    const cells = checked.filter((c) => c.outlines.summary);
+    if (!cells.length) return null;
+    const head = el('tr', {}, ['Volume', 'Cell', 'Mode', 'Service', 'Location', 'Z', 'r µm', 'Moved µm',
+      'Overlap', 'Off', 'Toward', 'Step µm', 'Why', ''].map((t) => el('th', { text: t })));
+    head.children[8].title = 'Their shared area over the smaller outline’s, summed over the linked outlines: '
+      + 'where Viking draws it → moved by the correction';
+    head.children[9].title = 'How far off them the move took it: the overlap it lost, as a share of what the same '
+      + 'move takes from a circle of its area lying on a copy of itself (1: straight off)';
+    head.children[11].title = 'From its centroid to that of the linked outline the move points at most';
+    const body = el('tbody');
+    for (const cell of cells) {
+      const where = () => [el('td', { text: cell.volume }), el('td', { text: `c${cell.cellId}` }),
+        el('td', { text: cell.mode, title: `Copy ${cell.copy}` }),
+        el('td', { class: 'num', text: cell.service || '—', title: 'The corrections service’s version' })];
+      const rows = cell.outlines.rows;
+      if (!rows.length) {
+        body.append(el('tr', { class: 'settings-log-none' }, [...where(),
+          el('td', { colspan: 10, class: 'muted', text: cell.outlines.summary })]));
+        continue;
+      }
+      const folded = [];
+      rows.forEach((row, i) => {
+        const tr = el('tr', { title: row.title, 'data-location': row.locationId, 'data-outline': '' },
+          [...(i === 0 ? where() : where().map(() => el('td'))),
+            el('td', {}, [this._idButton(cell, row.locationId)]),
+            el('td', { class: 'num', text: row.z }),
+            el('td', { class: 'num', text: row.r }),
+            el('td', { class: 'num', text: row.move }),
+            el('td', { class: 'num', text: row.overlap }),
+            el('td', { class: 'num', text: row.off }),
+            el('td', {}, [this._idButton(cell, row.neighborId)]),
+            el('td', { class: 'num', text: row.step }),
+            el('td', { class: 'help', text: row.cause, title: row.causeHelp }),
+            el('td', {}, [this._vikingButton(cell, row.locationId)])]);
+        if (i >= OUTLINE_ROWS_FOLDED) {
+          tr.hidden = true;
+          folded.push(tr);
+        }
+        body.append(tr);
+      });
+      if (folded.length) {
+        const more = el('button', { type: 'button', class: 'settings-more',
+          text: `Show all ${rows.length} (${folded.length} more)` });
+        const fold = el('tr', { class: 'settings-log-more' }, [el('td', { colspan: 14 }, [more])]);
+        more.addEventListener('click', () => {
+          const open = folded[0].hidden;
+          for (const tr of folded) tr.hidden = !open;
+          more.textContent = open ? `Show the first ${OUTLINE_ROWS_FOLDED}` : `Show all ${rows.length} (${folded.length} more)`;
+        });
+        body.append(fold);
+      }
+      body.append(el('tr', { class: 'settings-log-sum' }, [el('td', { colspan: 14, class: 'muted', text: cell.outlines.summary })]));
+    }
+    return [
+      el('h4', { class: 'settings-subhead', text: 'Traced outlines moved off the outlines linked to them' }),
+      el('p', { class: 'settings-text muted', text: outlineRuleText(rule) }),
+      el('div', { class: 'settings-scroll' }, [
+        el('table', { class: 'settings-table settings-log-table settings-outline-table' }, [el('thead', {}, [head]), body])]),
+    ];
   }
 
   _ratioChanged() {
@@ -687,8 +850,10 @@ export class SettingsPanel {
     const page = this.annotations || {};
     const view = correctionLogView(log, { volumeName: page.volumeName || ((s) => s) });
     const pulled = view.checked.reduce((sum, c) => sum + c.rows.length, 0);
+    const off = view.checked.reduce((sum, c) => sum + c.outlines.rows.length, 0);
     this.logStatus.textContent = view.checked.length
       ? `${pulled} pull${pulled === 1 ? '' : 's'} toward an annotation ${formatRatio(view.ratio)} as wide or wider, `
+        + `and ${off} traced outline${off === 1 ? '' : 's'} moved off the outlines linked to them, `
         + `in ${view.checked.length} loaded cell${view.checked.length === 1 ? '' : 's'} with a curve fit.`
       : 'No cell loaded on this server has a curve-fit correction (Curve fit, or Field + fit).';
     const blocks = [];
@@ -723,6 +888,8 @@ export class SettingsPanel {
       }
       blocks.push(el('div', { class: 'settings-scroll' }, [
         el('table', { class: 'settings-table settings-log-table' }, [el('thead', {}, [head]), body])]));
+      const outlines = this._outlineTable(view.checked, log.outline_rule || OUTLINE_RULE);
+      if (outlines) blocks.push(...outlines);
     }
     if (view.unchecked.length) {
       blocks.push(el('p', { class: 'settings-text muted', text: 'Not checked: ' + view.unchecked.map((c) =>

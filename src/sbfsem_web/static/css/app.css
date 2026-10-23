@@ -608,6 +608,13 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 10%, transparent);
 .settings-log-table button.settings-viking { font-weight: 700; }
 .settings-log-table button.settings-id:hover,
 .settings-log-table button.settings-viking:hover { background: var(--hover); }
+/* The outlines table's heading, and its "Show all" under a cell's first rows. */
+.settings-subhead { margin: 14px 0 4px; font-size: 13px; font-weight: 600; }
+.settings-log-table button.settings-more {
+  font: inherit; background: none; border: none; padding: 0 3px; border-radius: 3px; color: var(--accent);
+  cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px;
+}
+.settings-log-table button.settings-more:hover { background: var(--hover); }
 .card .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 /* A metric with a definition behind it: dotted, and the cursor says so. */
 .card td.help { cursor: help; text-decoration: underline dotted; text-decoration-color: var(--muted); text-underline-offset: 2px; }
@@ -2499,6 +2506,7 @@ select[aria-expanded="true"] { border-color: var(--accent); }
   text-decoration: underline dotted; text-underline-offset: 2px;
 }
 .shift-pulls button.shift-pull-id:hover { background: var(--hover); }
+.shift-pulls .shift-pulls-more { font-size: 11px; padding: 0 3px; }
 
 /* -- The Position shift legend (shiftlegend.js) --------------------------------
    Over the render, like the chip: bottom right, above the chip's row so the two

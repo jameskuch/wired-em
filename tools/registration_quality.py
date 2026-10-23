@@ -16,7 +16,8 @@ and prints, per cell and over all of them:
 * what the copy does to what one section image shows: the change of the offset
   between two of the cell's annotations on one section within 5 µm (p95, and the
   share over 0.25 µm), and between each synapse and the cell (likewise);
-* the curve fit's pulls toward an annotation at least 4x as wide.
+* the curve fit's pulls toward an annotation at least 4x as wide, and the traced
+  outlines it moved off the outlines linked to them.
 
 A copy the server did not hold before is unloaded again once measured
 (``DELETE ...?copy=``): the server's other users keep theirs, and memory is given
@@ -99,11 +100,12 @@ def _row(f: dict) -> list[str]:
         f"{f['distortion']['p95_um']:.3f}", f"{100 * f['distortion']['share_over']:.1f}",
         f"{f['synapse_drift']['p95_um']:.3f}", f"{100 * f['synapse_drift']['share_over']:.1f}",
         "—" if f.get("pulls") is None else str(f["pulls"]),
+        "—" if f.get("outline_moves") is None else str(f["outline_moves"]),
     ]
 
 
 HEAD = ["registration", "step med", "step p90", "‰ >1.5", "pairs p95", "pairs %>.25", "syn p95",
-        "syn %>.25", "pulls"]
+        "syn %>.25", "pulls", "outlines off"]
 
 
 def _table(rows: list[list[str]]) -> str:
@@ -137,7 +139,9 @@ def summary(cells: dict[str, list[dict]]) -> list[list[str]]:
                     f"{med(lambda f: 100 * f['distortion']['share_over']):.1f}",
                     f"{med(lambda f: f['synapse_drift']['p95_um']):.3f}",
                     f"{med(lambda f: 100 * f['synapse_drift']['share_over']):.1f}",
-                    f"{med(lambda f: f.get('pulls')):.1f}" if any(f.get('pulls') is not None for f in facts) else "—"])
+                    f"{med(lambda f: f.get('pulls')):.1f}" if any(f.get('pulls') is not None for f in facts) else "—",
+                    f"{med(lambda f: f.get('outline_moves')):.1f}"
+                    if any(f.get('outline_moves') is not None for f in facts) else "—"])
     return out
 
 
@@ -170,7 +174,7 @@ def main() -> int:
           "the curve fit lowers it by construction.\npairs: change of the offset between two of the cell's "
           "annotations on one section within 5 µm; syn: change of a synapse's offset from the cell (µm). "
           "Zero is what the image shows.\npulls: annotations the curve fit pulled toward one at least 4x "
-          "as wide.")
+          "as wide; outlines off: traced outlines it moved off the outlines linked to them.")
     if args.json:
         with open(args.json, "w", encoding="utf-8") as out:
             json.dump(cells, out, indent=1)

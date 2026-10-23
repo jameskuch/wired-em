@@ -40,7 +40,15 @@ from .. import progress
 from ..analysis import dendrite as dendrite_analysis
 from ..analysis import synapse as synapse_analysis
 from ..analysis.boundary import IPLBoundaries, load_ipl_boundaries, thickness_summary
-from ..analysis.correction_checks import DEFAULT_RATIO, FIT_MODES, PullScan, scan_neuron
+from ..analysis.correction_checks import (
+    DEFAULT_RATIO,
+    FIT_MODES,
+    OUTLINE_MIN_MOVE_UM,
+    OUTLINE_MIN_OFF,
+    OUTLINE_MIN_OVERLAP,
+    PullScan,
+    scan_neuron,
+)
 from ..analysis.stats import Stats
 from ..analysis.stratification import (
     StratificationResult,
@@ -125,6 +133,7 @@ from .dto import (
     ConnectivityMatrixDTO,
     ConnectivityNodeDTO,
     CorrectionLogCellDTO,
+    CorrectionOutlineMoveDTO,
     CorrectionPullDTO,
     CorrectionPullsDTO,
     DendriteDiameterDTO,
@@ -159,6 +168,7 @@ from .dto import (
     NodeDTO,
     NodeTableDTO,
     NodeTableRowDTO,
+    OutlineRuleDTO,
     RegistrationQualityDTO,
     ResolvedSpecDTO,
     SearchResultDTO,
@@ -1508,6 +1518,12 @@ class SbfsemService:
                      len(pulls), DEFAULT_RATIO, 1000 * (time.perf_counter() - started),
                      ", ".join(f"{p.location_id} {p.move_um:.2f} um toward {p.neighbor_id}"
                                for p in pulls[:8]))
+        if found.outline_moves:
+            log.info("c%s %s: section correction %s moved %d of %d traced outline(s) off the outlines "
+                     "linked to them (%.0f ms): %s", neuron.id, neuron.volume.viking_name, mode,
+                     len(found.outline_moves), found.n_outlines, 1000 * (time.perf_counter() - started),
+                     ", ".join(f"{m.location_id} {m.move_um:.2f} um ({m.cause})"
+                               for m in found.outline_moves[:8]))
         return found
 
     def freshness(self, neuron_id: int, source) -> FreshnessDTO:
@@ -4174,7 +4190,8 @@ class SbfsemService:
         neuron = self.neuron(neuron_id, source)
         key = _Key(Volumes.from_str(source).source, int(neuron_id))
         tag = str(getattr(neuron, "copy_tag", None) or "")
-        cell = self._correction_cell(CorrectionPullsDTO, key, tag, neuron, ratio, {"ratio": ratio})
+        cell = self._correction_cell(CorrectionPullsDTO, key, tag, neuron, ratio,
+                                     {"ratio": ratio, "outline_rule": outline_rule()})
         if not (getattr(neuron, "correction_status", None) or {}).get("requested"):
             cell.mode, cell.note = "off", "Not checked: loaded without a section correction"
         return cell
@@ -4202,6 +4219,8 @@ class SbfsemService:
             cell.n_annotations, cell.n_moved = found.n_annotations, found.n_moved
             cell.n_next_to_wider = found.n_next_to_wider(ratio)
             cell.pulls = [CorrectionPullDTO(**p.as_dict()) for p in found.at(ratio)]
+            cell.n_outlines, cell.n_outlines_moved = found.n_outlines, found.n_outlines_moved
+            cell.outline_moves = [CorrectionOutlineMoveDTO(**m.as_dict()) for m in found.outline_moves]
         return cell
 
     def shift_summary(self, neuron_id: int, source, pair: str = "correction") -> ShiftSummaryDTO:
@@ -4698,6 +4717,13 @@ def _thickness_summary_cached(source: str, grid: int, near_um: float) -> dict:
     return thickness_summary(load_ipl_boundaries(source), grid=grid, near_um=near_um)
 
 
+def outline_rule() -> OutlineRuleDTO:
+    """When the correction log lists a traced outline
+    (:func:`sbfsem.analysis.correction_checks.scan_outlines`)."""
+    return OutlineRuleDTO(min_move_um=OUTLINE_MIN_MOVE_UM, min_overlap=OUTLINE_MIN_OVERLAP,
+                          min_off_share=OUTLINE_MIN_OFF)
+
+
 def registration_quality(neuron: Neuron) -> dict:
     """One copy of a cell (a registration) in numbers: what its transforms and its
     correction moved of the cell's own annotations and the sideways steps of its links
@@ -4705,7 +4731,8 @@ def registration_quality(neuron: Neuron) -> dict:
     moved as one, what it does to the offsets one section image shows
     (:mod:`sbfsem.analysis.registration_quality`: between two of the cell's annotations,
     and between a synapse and the cell), and how many annotations the curve fit pulled
-    toward a much wider one (:mod:`sbfsem.analysis.correction_checks`, default ratio)."""
+    toward a much wider one (:mod:`sbfsem.analysis.correction_checks`, default ratio) and
+    how many traced outlines it moved off the outlines linked to them."""
     from ..analysis.correction_checks import DEFAULT_RATIO
     from ..analysis.registration_quality import RADIUS_UM, section_distortion, synapse_drift
     from ..analysis.shifts import shift_summary
@@ -4726,6 +4753,7 @@ def registration_quality(neuron: Neuron) -> dict:
         "synapse_drift": synapse_drift(neuron),
         "pulls": len(scan.at(DEFAULT_RATIO)) if scan is not None else None,
         "pull_ratio": DEFAULT_RATIO,
+        "outline_moves": len(scan.outline_moves) if scan is not None else None,
     }
 
 

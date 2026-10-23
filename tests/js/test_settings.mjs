@@ -19,6 +19,7 @@ const {
   formatBytes, formatDuration, restartPhase, serverRows, RESTART_WAIT_S,
   RATIO_KEY, RATIO_LIMITS, parseRatio, formatRatio, correctionLogView,
   savedRatio, pullTitle, cellPullsView, PULLS_HELP,
+  OUTLINE_RULE, OUTLINE_CAUSES, OUTLINE_IDS_SHOWN, outlineTitle, outlineRuleText, outlinesHelp,
   EXPERT_RENDER_KEY, EXPERT_RENDER_HELP, expertRender, setExpertRender,
   STALE_RELOAD_KEY, fromBrowserCache, staleStart,
   IPL_METHOD_KEY, IPL_METHOD_CHOICES, IPL_METHOD_DEFAULT, IPL_METHOD_HELP, iplMethod, setIplMethod,
@@ -310,6 +311,67 @@ test('a cell panel shows its pulls with a count, and nothing without a checked p
   assert.equal(cellPullsView({ ...answer, checked: false }), null, 'pulls of an unchecked copy are not shown');
   assert.equal(cellPullsView(null), null);
   assert.match(PULLS_HELP, /halfway when its neighbors are a section either side/);
+});
+
+// InferiorMonkey c16137's 1337465 under Field + fit, 2026-10-22 (tests/fixtures/correction_outlines_c16137.json.gz).
+const OUTLINE = {
+  location_id: 1337465, z: 547, r_um: 4.729, dx_um: 0.387, dy_um: -0.43, move_um: 0.5786, n_linked: 2,
+  overlap_traced: 0.975, overlap_moved: 0.9522, off_share: 0.2931, neighbor_id: 1337464, neighbor_z: 546,
+  neighbor_r_um: 5.107, cos: 0.9987, step_um: 1.1623, overlap_neighbor: 0.9704, overlap_slid: 0.9001, cause: 'shape',
+};
+
+test('an outline moved off in words says how far off, toward what, and why', () => {
+  assert.equal(outlineTitle(OUTLINE), 'Location 1337465 (r 4.73 µm, section 547) moved 0.58 µm off the 2 outlines '
+    + 'linked to it: overlap 0.975 where Viking draws it, 0.952 moved, 0.29 of the way off; toward 1337464 (section 546), '
+    + 'whose centroid sits 1.16 µm away though the two overlap 0.970 (0.900 slid by that step): a change of shape, not of place');
+  assert.match(outlineTitle({ ...OUTLINE, cause: 'slide', overlap_slid: 0.99 }),
+    /toward 1337464 \(section 546, 1\.16 µm away\), which it would overlap 0\.990 slid by that step \(0\.970 as drawn\)$/);
+  assert.match(outlineTitle({ ...OUTLINE, cause: 'other', cos: 0.31, n_linked: 1 }),
+    /off the outline linked to it: .*toward no linked outline’s centroid \(the nearest in direction, 1337464, is 1\.16 µm away at cos 0\.31\): carried along with the process$/);
+  assert.deepEqual(Object.keys(OUTLINE_CAUSES), ['shape', 'slide', 'other']);
+});
+
+test('the log lists a cell’s outlines moved off apart from its pulls, with a summary', () => {
+  const cell = { ...LOG.cells[0], n_outlines: 180, n_outlines_moved: 50, outline_moves: [OUTLINE] };
+  const view = correctionLogView({ ...LOG, cells: [cell, LOG.cells[1]] });
+  const [c1178, c476] = view.checked;
+  assert.equal(c1178.rows.length, 1, 'the pulls are as before');
+  const [row] = c1178.outlines.rows;
+  assert.deepEqual([row.locationId, row.z, row.r, row.move, row.overlap, row.off, row.neighborId, row.step, row.cause],
+    [1337465, '547', '4.73', '0.58', '0.975 → 0.952', '0.29', 1337464, '1.16', 'shape']);
+  assert.equal(row.title, outlineTitle(OUTLINE));
+  assert.match(row.causeHelp, /takes in a lobe or the base of a branch/);
+  assert.equal(c1178.outlines.summary, '1 of the 50 traced outlines moved by the rule’s distance or more was moved off '
+    + 'the outlines linked to it (180 linked in all)');
+  // A cell without traced outlines has no outline block at all; one whose outlines all stayed says so.
+  assert.deepEqual(c476.outlines, { summary: '', rows: [] });
+  const kept = correctionLogView({ ...LOG, cells: [{ ...cell, outline_moves: [] }] }).checked[0].outlines;
+  assert.match(kept.summary, /^None moved off: 50 of the 180 linked traced outlines moved/);
+});
+
+test('the rule is said with the server’s numbers', () => {
+  assert.deepEqual({ ...OUTLINE_RULE }, { min_move_um: 0.25, min_overlap: 0.8, min_off_share: 0.2 });
+  assert.match(outlineRuleText(), /0\.25 µm or more, .* at least 80 % of it .* at least 0\.2 of the way off/);
+  assert.match(outlineRuleText({ min_move_um: 0.5, min_overlap: 0.9, min_off_share: 0.3 }), /0\.5 µm .* 90 % .* 0\.3 of/);
+  assert.match(outlinesHelp(), /Click an ID to select it in the 3D view/);
+});
+
+test('a cell panel shows its outlines moved off after its pulls, the first few, and how many more', () => {
+  const answer = { ...LOG.cells[0], ratio: 4, outline_moves: [OUTLINE], outline_rule: OUTLINE_RULE };
+  const view = cellPullsView(answer);
+  assert.equal(view.count, '1 pulled, 1 off');
+  assert.equal(view.outlines.line, 'Curve fit moved 1 traced outline off the outlines linked to it:');
+  assert.deepEqual(view.outlines.ids, [{ locationId: 1337465, title: outlineTitle(OUTLINE) }]);
+  assert.equal(view.outlines.more, 0);
+  const many = Array.from({ length: OUTLINE_IDS_SHOWN + 3 }, (_, i) => ({ ...OUTLINE, location_id: 100 + i }));
+  const only = cellPullsView({ ...LOG.cells[1], ratio: 4, outline_moves: many });
+  assert.equal(only.count, `${many.length} off`);
+  assert.equal(only.line, '', 'no pulls: no pulls line');
+  assert.deepEqual(only.ids, []);
+  assert.equal(only.outlines.line, `Curve fit moved ${many.length} traced outlines off the outlines linked to them:`);
+  assert.equal(only.outlines.ids.length, OUTLINE_IDS_SHOWN);
+  assert.equal(only.outlines.more, 3);
+  assert.equal(cellPullsView({ ...answer, checked: false }), null, 'nothing from an unchecked copy');
 });
 
 let failed = 0;

@@ -156,6 +156,25 @@ c1178), logs the pulls at 4x, and serves them as `/api/correction-log` (every
 loaded cell, `correction_log`) and `/api/neurons/{source}/{id}/correction-pulls`
 (one copy of one cell, `correction_pulls`).
 
+The same scan (2.36.0) lists the traced outlines the fit moved off the outlines
+linked to them (`scan.outline_moves`, `scan_outlines`). The fit takes an
+outline's centroid as a point of the process, so where an outline takes in a
+lobe or the base of a branch its centroid steps sideways though its membrane does
+not, and the fit moves the next outline toward that step: InferiorMonkey
+c16137's 1337465 (section 547) moved 0.58 um toward 546's lobe, though it lies
+inside 546 (radius ratio 1.1, so no ratio catches it). Per outline, at the
+registered positions (`registered_rings` moves each back by its annotation's
+correction): the *overlap* with its linked outlines on other sections (shared
+area over the smaller one's, summed over them), the same with the outline moved
+by the correction, and `off_share`, the overlap lost over `circle_loss`, what the
+same move takes from a circle of the outline's area lying on a copy of itself.
+Listed when the move is at least `OUTLINE_MIN_MOVE_UM` (0.25 um), the overlap
+where Viking draws it at least `OUTLINE_MIN_OVERLAP` (0.8) and `off_share` at
+least `OUTLINE_MIN_OFF` (0.2); `cause` says why (`shape`, `slide`, `other`).
+`outline_overlaps(..., min_move_um=0)` gives every moved outline's numbers. The
+thresholds, what they list on 11 cells and what leaving outlines in place would
+do are in `docs/context/correction-outlines-2026-10-22.md`.
+
 ## The data model
 
 `Neuron.nodes`, `.edges` and `.synapses` are pandas DataFrames.

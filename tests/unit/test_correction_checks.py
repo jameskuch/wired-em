@@ -273,6 +273,216 @@ def test_c1178_under_field_and_fit_adds_a_short_pull(c1178):
             if q.location_id == 1720976] == [(1720976, 1.0)]
 
 
+# -- traced outlines moved off the outlines linked to them ---------------------------------
+def circle(r: float, cx: float = 0.0, cy: float = 0.0, n: int = 720) -> np.ndarray:
+    t = np.linspace(0.0, 2.0 * np.pi, n, endpoint=False)
+    return np.column_stack([cx + r * np.cos(t), cy + r * np.sin(t)])
+
+
+def lobed(r: float = 5.0) -> np.ndarray:
+    """A circle of radius ``r`` taking in a lobe of 14.6 um^2 on its +x side (a branch's base;
+    c16137's on 544-546 is 12 to 14 um^2)."""
+    import shapely
+
+    shape = shapely.union(shapely.Polygon(circle(r)), shapely.box(r - 1.0, -2.0, r + 3.5, 2.0))
+    return np.asarray(shape.exterior.coords)[:-1]
+
+
+def outline_scan(rows: dict, rings: dict, links: list):
+    """``rows``: ID -> (Z, registered x, y, correction dx, dy), um; ``rings``: ID -> outline."""
+    import shapely
+
+    ids = list(rows)
+    frame = pd.DataFrame({
+        "ID": ids, "Z": [rows[i][0] for i in ids],
+        "Rum": [float(np.sqrt(shapely.Polygon(rings[i]).area / np.pi)) for i in ids],
+        "registered_x_um": [rows[i][1] for i in ids], "registered_y_um": [rows[i][2] for i in ids],
+        "corr_dx_um": [rows[i][3] for i in ids], "corr_dy_um": [rows[i][4] for i in ids],
+    })
+    a, b = np.array([x for x, _ in links]), np.array([y for _, y in links])
+    table, n = cc.outline_overlaps(frame, {i: [r] for i, r in rings.items()}, a, b, min_move_um=0.0)
+    return cc.scan_outlines(frame, {i: [r] for i, r in rings.items()}, a, b), table.set_index("ID"), n
+
+
+def test_circle_loss_is_the_overlap_a_circle_loses_slid_off_its_copy():
+    assert cc.circle_loss(0.0, 5.0) == pytest.approx(0.0)
+    assert cc.circle_loss(10.0, 5.0) == pytest.approx(1.0)
+    assert cc.circle_loss(25.0, 5.0) == pytest.approx(1.0)
+    # Small moves: 2 s / (pi r), the lens of two unit circles a radius apart: 1 - 2/3 + sqrt(3)/(2 pi).
+    assert cc.circle_loss(0.05, 5.0) == pytest.approx(2 * 0.05 / (np.pi * 5.0), rel=1e-3)
+    assert cc.circle_loss(1.0, 1.0) == pytest.approx(1 - (2 / 3 - np.sqrt(3) / (2 * np.pi)))
+
+
+def test_an_outline_moved_toward_a_neighbor_s_lobe_is_moved_off_its_linked_outlines():
+    """The c16137 case by hand: three sections of a soma of r 5 um, the lowest taking in a
+    lobe.  The lobe moves that outline's centroid 1.04 um toward it; the fit puts the middle
+    outline halfway between its neighbors' centroids, 0.52 um toward the lobe, though it lies
+    inside both of them where Viking draws it."""
+    import shapely
+
+    lobe = lobed()
+    step = shapely.Polygon(lobe).centroid.x
+    assert step == pytest.approx(1.04, abs=0.01)
+    found, table, n = outline_scan(
+        {1: (99, step, 0.0, 0.0, 0.0), 2: (100, 0.0, 0.0, step / 2, 0.0), 3: (101, 0.0, 0.0, 0.0, 0.0)},
+        {1: lobe, 2: circle(5.0), 3: circle(5.0)}, [(1, 2), (2, 3)])
+    assert (n, found.n_outlines, found.n_outlines_moved) == (3, 3, 1)
+    (m,) = found.outline_moves
+    assert (m.location_id, m.z, m.n_linked, m.neighbor_id, m.neighbor_z, m.cause) == (2, 100, 2, 1, 99, "shape")
+    assert m.move_um == pytest.approx(step / 2)
+    assert m.overlap_traced == pytest.approx(1.0, abs=1e-4)     # inside both where Viking draws it
+    assert m.overlap_moved < 0.96
+    assert m.off_share > 0.5
+    assert m.cos == pytest.approx(1.0) and m.step_um == pytest.approx(step)
+    # Slid by the step onto the lobed outline's centroid, it would overlap that one less.
+    assert m.overlap_neighbor == pytest.approx(1.0, abs=1e-4) and m.overlap_slid < m.overlap_neighbor
+    assert m.as_dict()["cause"] == "shape" and set(m.as_dict()) >= {"off_share", "overlap_slid", "n_linked"}
+
+
+def test_an_outline_moved_back_onto_its_neighbors_is_not_listed():
+    """A misregistered section: the outline sits 0.6 um off both neighbors and the fit moves it
+    back.  Its overlap rises, so the move is the one the images ask for."""
+    found, table, _ = outline_scan(
+        {1: (99, 0.0, 0.0, 0.0, 0.0), 2: (100, 0.6, 0.0, -0.6, 0.0), 3: (101, 0.0, 0.0, 0.0, 0.0)},
+        {1: circle(5.0), 2: circle(5.0, 0.6), 3: circle(5.0)}, [(1, 2), (2, 3)])
+    assert found.outline_moves == []
+    row = table.loc[2]
+    assert row.overlap_moved == pytest.approx(1.0, abs=1e-4) and row.overlap_traced < 0.93
+    assert row.off_share == pytest.approx(-1.0, abs=0.01)      # straight onto them
+
+
+def test_short_moves_poor_overlaps_and_moves_that_cost_little_are_not_listed():
+    base = {1: circle(5.0), 2: circle(5.0), 3: circle(5.0)}
+    # Straight off both neighbors, but 0.2 um: under the rule's 0.25 um.
+    short, table, _ = outline_scan(
+        {1: (99, 0.0, 0.0, 0.0, 0.0), 2: (100, 0.0, 0.0, 0.0, 0.2), 3: (101, 0.0, 0.0, 0.0, 0.0)},
+        base, [(1, 2), (2, 3)])
+    assert short.outline_moves == [] and short.n_outlines_moved == 0 and table.loc[2].off_share > 0.95
+    # Moved 1 um off, but where Viking draws it, it overlaps its neighbors 0.75 only.
+    poor, table, _ = outline_scan(
+        {1: (99, 1.95, 0.0, 0.0, 0.0), 2: (100, 0.0, 0.0, 0.0, 1.0), 3: (101, -1.95, 0.0, 0.0, 0.0)},
+        {1: circle(5.0, 1.95), 2: circle(5.0), 3: circle(5.0, -1.95)}, [(1, 2), (2, 3)])
+    assert table.loc[2].overlap_traced < cc.OUTLINE_MIN_OVERLAP and poor.outline_moves == []
+    assert poor.n_outlines_moved == 1
+
+
+def test_why_an_outline_moved_off_is_named():
+    # Straight off two neighbors it lies on: the move points at neither of them.
+    other, _, _ = outline_scan(
+        {1: (99, 0.0, 0.0, 0.0, 0.0), 2: (100, 0.0, 0.0, 0.0, 0.5), 3: (101, 0.0, 0.0, 0.0, 0.0)},
+        {1: circle(5.0), 2: circle(5.0), 3: circle(5.0)}, [(1, 2), (2, 3)])
+    assert [(m.location_id, m.cause) for m in other.outline_moves] == [(2, "other")]
+    # Toward a neighbor that is this outline displaced by 2 um, 1.5 um of the way, at a branch
+    # (two outlines on the section above): off the two in place by more than it came onto it.
+    slide, _, _ = outline_scan(
+        {1: (101, 2.0, 0.0, 0.0, 0.0), 2: (100, 0.0, 0.0, 1.5, 0.0), 3: (99, 0.0, 0.0, 0.0, 0.0),
+         4: (101, 0.0, 0.0, 0.0, 0.0)},
+        {1: circle(5.0, 2.0), 2: circle(5.0), 3: circle(5.0), 4: circle(5.0)}, [(1, 2), (2, 3), (2, 4)])
+    (m,) = slide.outline_moves
+    assert (m.cause, m.neighbor_id, m.n_linked) == ("slide", 1, 3)
+    assert m.overlap_slid == pytest.approx(1.0, abs=1e-4) and m.overlap_slid > m.overlap_neighbor
+    # The same move toward a displaced neighbor nearer than the move: carried past it, "other".
+    past, _, _ = outline_scan(
+        {1: (101, 1.0, 0.0, 0.0, 0.0), 2: (100, 0.0, 0.0, 1.5, 0.0), 3: (99, 0.0, 0.0, 0.0, 0.0),
+         4: (101, 0.0, 0.0, 0.0, 0.0)},
+        {1: circle(5.0, 1.0), 2: circle(5.0), 3: circle(5.0), 4: circle(5.0)}, [(1, 2), (2, 3), (2, 4)])
+    assert [(m.cause, m.neighbor_id) for m in past.outline_moves] == [("other", 1)]
+
+
+def test_only_links_to_outlines_on_other_sections_count():
+    found, table, n = outline_scan(
+        {1: (100, 0.0, 0.0, 0.0, 0.0), 2: (100, 0.0, 0.0, 0.0, 0.6)},
+        {1: circle(5.0), 2: circle(5.0)}, [(1, 2), (2, 2)])
+    assert (n, len(table), found.outline_moves) == (0, 0, [])
+
+
+@pytest.fixture(scope="module")
+def c16137():
+    with gzip.open(FIXTURES / "correction_outlines_c16137.json.gz", "rt", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def scan_c16137(doc: dict, mode: str):
+    frame = pd.DataFrame({
+        "ID": doc["ID"], "Z": doc["Z"], "Rum": doc["Rum"],
+        "registered_x_um": doc["registered_x_um"], "registered_y_um": doc["registered_y_um"],
+        "corr_dx_um": doc["corr_um"][mode]["dx"], "corr_dy_um": doc["corr_um"][mode]["dy"],
+    })
+    rings = {i: [np.asarray(r) for r in rr] for i, rr in zip(doc["ID"], doc["rings"], strict=True)}
+    edges = np.array(doc["edges"], dtype=np.int64)
+    table, _ = cc.outline_overlaps(frame, rings, edges[:, 0], edges[:, 1], min_move_um=0.0)
+    return cc.scan_outlines(frame, rings, edges[:, 0], edges[:, 1]), table.set_index("ID")
+
+
+@pytest.mark.parametrize("mode, move, moved, off", [
+    ("all", 0.5786, 0.9522, 0.2931),
+    ("curvefit", 0.6429, 0.9444, 0.3532),
+])
+def test_c16137_547_is_moved_off_toward_546_s_lobe(c16137, mode, move, moved, off):
+    """InferiorMonkey c16137, measured 2026-10-22 (service 1.2.0): on 544-546 the soma's
+    outline takes in the base of a process, so 546's centroid sits 1.16 um from 547's,
+    though 547 lies inside it.  The fit moved 547 toward it, off the membrane Viking draws.
+    Its radius ratio is 1.1, so the 4x rule cannot see it."""
+    found, table = scan_c16137(c16137, mode)
+    (m,) = found.outline_moves
+    assert (m.location_id, m.z, m.neighbor_id, m.neighbor_z, m.cause) == (1337465, 547, 1337464, 546, "shape")
+    assert m.r_um == pytest.approx(4.729, abs=5e-4)
+    assert m.move_um == pytest.approx(move, abs=5e-4)
+    assert m.overlap_traced == pytest.approx(0.9750, abs=5e-4)
+    assert m.overlap_moved == pytest.approx(moved, abs=5e-4)
+    assert m.off_share == pytest.approx(off, abs=5e-4)
+    assert m.step_um == pytest.approx(1.1623, abs=5e-4) and m.cos > 0.99
+    assert m.overlap_neighbor == pytest.approx(0.9704, abs=5e-4)
+    assert m.overlap_slid == pytest.approx(0.9001, abs=5e-4)
+    # 1337447 (539) moved as far, toward 538, and onto both of its neighbors: a section the
+    # fit lined up.  546 moved toward 547 a little and lost nothing.
+    assert table.loc[1337447].off_share == pytest.approx(-1.116 if mode == "all" else -1.025, abs=5e-3)
+    assert table.loc[1337447].overlap_moved > table.loc[1337447].overlap_traced
+    assert table.loc[1337464].off_share < 0
+
+
+def outline_cell(*, corrected: bool = True) -> Neuron:
+    """Three soma outlines (IDs 21-23, sections 99-101) as Viking's VolumeShape gives them:
+    the node at each outline's centroid, the outline moved with its annotation's correction."""
+    import shapely
+
+    lobe = lobed()
+    step = float(shapely.Polygon(lobe).centroid.x)
+    rows = {21: (99, step, lobe), 22: (100, 0.0, circle(5.0)), 23: (101, 0.0, circle(5.0))}
+    moves = {21: (0.0, 0.0), 22: (step / 2, 0.0), 23: (0.0, 0.0)}
+    ids = list(rows)
+    nodes = pd.DataFrame({
+        "ID": ids, "ParentID": [9] * 3, "VolumeX": [rows[i][1] for i in ids], "VolumeY": [0.0] * 3,
+        "Z": [rows[i][0] for i in ids], "Radius": [5.0] * 3, "X": [0.0] * 3, "Y": [0.0] * 3,
+        "OffEdge": [False] * 3, "Terminal": [False] * 3, "TypeCode": [6] * 3,
+    })
+    edges = pd.DataFrame({"ID": [9, 9], "A": [21, 22], "B": [22, 23]})
+    neuron = Neuron(9, "i", nodes=nodes, edges=edges, volume_scale=(1000.0, 1000.0, 1000.0),
+                    omitted_ids=[], data_stamp=datetime(2026, 10, 22, tzinfo=UTC))
+    shift = {i: np.array(moves[i]) if corrected else np.zeros(2) for i in ids}
+    neuron.geometries = pd.DataFrame({
+        "ID": ids, "ParentID": [9] * 3, "Z": [rows[i][0] for i in ids], "Zum": [float(rows[i][0]) for i in ids],
+        "Curve": [[rows[i][2] + shift[i]] for i in ids], "Registered": [True] * 3,
+    })
+    if corrected:
+        neuron.nodes["CorrDXnm"] = [moves[i][0] * 1000.0 for i in ids]
+        neuron.nodes["CorrDYnm"] = [moves[i][1] * 1000.0 for i in ids]
+        neuron.section_correction = {"n_moved": 1}
+    neuron.apply_transform()
+    return neuron
+
+
+def test_a_loaded_cell_s_outlines_are_moved_back_to_where_viking_draws_them_and_checked():
+    neuron = outline_cell()
+    found = cc.scan_neuron(neuron)
+    assert (found.n_outlines, found.n_outlines_moved) == (3, 1)
+    assert [(m.location_id, m.cause) for m in found.outline_moves] == [(22, "shape")]
+    own = neuron.nodes.drop_duplicates("ID")
+    rings = cc.registered_rings(neuron, own, stage_frame(own))
+    assert np.allclose(rings[22][0], circle(5.0))                # the move taken back off
+    assert cc.scan_neuron(outline_cell(corrected=False)).outline_moves == []
+
+
 # -- the service and the endpoint ----------------------------------------------------
 @pytest.fixture
 def client():
@@ -298,6 +508,8 @@ def test_the_log_lists_each_loaded_copy_and_its_pulls_at_the_ratio_asked(client)
 
     log = client.get("/api/correction-log").json()
     assert (log["ratio"], log["default_ratio"], log["min_ratio"], log["max_ratio"]) == (4.0, 4.0, 1.0, 50.0)
+    assert log["outline_rule"] == {"min_move_um": cc.OUTLINE_MIN_MOVE_UM, "min_overlap": cc.OUTLINE_MIN_OVERLAP,
+                                   "min_off_share": cc.OUTLINE_MIN_OFF}
     assert log["ratio_sent_to_viking"] is False
     cells = {c["copy_tag"]: c for c in log["cells"]}
     assert set(cells) == {"curvefit.0", "neighbor.0"}
@@ -309,6 +521,7 @@ def test_the_log_lists_each_loaded_copy_and_its_pulls_at_the_ratio_asked(client)
     first = checked["pulls"][0]
     assert first["neighbor_id"] == 1 and first["moved_with"] == [4]
     assert first["frac"] == pytest.approx(0.5) and first["ratio"] == pytest.approx(20.0)
+    assert (checked["n_outlines"], checked["n_outlines_moved"], checked["outline_moves"]) == (0, 0, [])
     unchecked = cells["neighbor.0"]
     assert not unchecked["checked"] and unchecked["pulls"] == []
     assert unchecked["note"] == "Not checked: this mode has no curve fit"
@@ -386,3 +599,20 @@ def test_a_cell_without_a_correction_is_off_and_a_moved_copy_answers_its_base(cl
     moved = client.get("/api/neurons/i/9/correction-pulls?copy=all.0.mabc").json()
     assert (moved["copy_tag"], moved["mode"], moved["checked"]) == ("all.0.mabc", "all", True)
     assert [p["location_id"] for p in moved["pulls"]] == [3, 9]
+
+
+def test_the_log_and_a_cell_list_the_outlines_moved_off(client):
+    cell = outline_cell()
+    cell.correction_status = {"requested": True, "applied": True, "mode": "all"}
+    cell.section_correction = {"n_moved": 1, "stos_group": "SliceToVolume1", "service_version": "1.2.0"}
+    client.app.state.service.add_neuron(cell)
+    (logged,) = client.get("/api/correction-log").json()["cells"]
+    assert (logged["n_outlines"], logged["n_outlines_moved"]) == (3, 1)
+    (row,) = logged["outline_moves"]
+    assert (row["location_id"], row["neighbor_id"], row["cause"]) == (22, 21, "shape")
+    assert row["overlap_traced"] == pytest.approx(1.0, abs=1e-4) and row["off_share"] > 0.5
+    own = client.get("/api/neurons/i/9/correction-pulls?copy=all.0").json()
+    assert own["outline_moves"] == logged["outline_moves"]
+    assert own["outline_rule"]["min_move_um"] == cc.OUTLINE_MIN_MOVE_UM
+    quality = client.get("/api/neurons/i/9/registration-quality?copy=all.0").json()
+    assert (quality["pulls"], quality["outline_moves"]) == (0, 1)
