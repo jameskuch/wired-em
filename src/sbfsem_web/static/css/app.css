@@ -1615,7 +1615,7 @@ table.rep-matrix tbody tr:hover { background: none; }
 /* Under the cube and its caption when the cube is shown. */
 .view.with-viewcube .pivot-chip { top: 176px; right: 8px; }
 /* Waiting for the click that says where the pivot goes. */
-#viewport canvas.pivot-armed { cursor: crosshair; }
+#viewport canvas.pivot-armed, .compare-viewport canvas.pivot-armed { cursor: crosshair; }
 
 /* -- Render compare -------------------------------------------------------- */
 /* A grid of independent viewports over the same cell.  A pane header carries
@@ -2526,6 +2526,11 @@ select[aria-expanded="true"] { border-color: var(--accent); }
    to the bottom right, where the 3D render has it, and above a Difference pane's scale and numbers. */
 .compare-viewport.has-viewcube .shift-legend { top: auto; bottom: 8px; }
 .compare-pane:has(> .compare-legend:not([hidden])) .compare-viewport.has-viewcube .shift-legend { bottom: 112px; }
+/* Render compare's pivot label (compare.js _pivotUi) is in the same pane: under the cube, or in its corner
+   with the cube hidden, the legend then below it. */
+.compare-viewport .pivot-chip { top: 8px; right: 8px; }
+.compare-viewport.has-viewcube .pivot-chip { top: 176px; }
+.compare-viewport:not(.has-viewcube):has(> .pivot-chip:not([hidden])) .shift-legend { top: 40px; }
 .shift-legend-block { display: flex; flex-direction: column; gap: 4px; }
 .shift-legend-block + .shift-legend-block { border-top: 1px solid rgb(127 127 127 / 0.4); padding-top: 5px; }
 .shift-legend-head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }

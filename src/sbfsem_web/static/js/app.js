@@ -83,7 +83,7 @@ import { movesBody } from './manualmoves.js';
 import { applied as visualizationLook } from './visualizations.js';
 import { dismissApplyAll, visualizationItems, visualizationSelect } from './vismenu.js';
 import { buildFigure } from './helpfigures.js';
-import { ENDED as PIVOT_ENDED, pivotPlace } from './pivot.js';
+import { ENDED as PIVOT_ENDED, pivotAtPointer } from './pivot.js';
 import { buildMovie, loadMovies, movieFor, movieManifest } from './helpmovies.js';
 import {
   REG_FIGURES, REG_HELP, correctionChip, correctionForCell, transformsChip,
@@ -727,6 +727,8 @@ async function boot() {
     // built at the finest Voxel size that fits, as in the 3D render.
     estimates,
     fitPixel: fitPixelForPane,
+    // The pivot's label goes from under the pointer: its hover help with it.
+    onPivotOff: () => hideHelp(),
   });
   compare.setPaneCount(4);
   display = new DisplayPanel({
@@ -3852,7 +3854,7 @@ function hoverCells() {
     if (!record.visible || flatFor(record)) continue;
     const nodes = nodesCache.get(record.key);
     if (nodes) {
-      cells.push({ key: record.key, nodes });
+      cells.push({ key: record.key, nodes, source: record.source });
       continue;
     }
     const gen = loadGeneration(record.key);
@@ -3875,16 +3877,7 @@ function hoverCells() {
  * waited for if one was.
  */
 function pivotAt(clientX, clientY) {
-  const hit = renderer.pickAt(clientX, clientY);
-  const found = renderer.nearestAnnotation(clientX, clientY, hoverCells());
-  const record = found ? state.neurons.get(found.key) : null;
-  const nearest = record ? {
-    point: renderer.toWorld(found.node.xyz_um, record.source), key: found.key, px: found.px, hit: found.hit,
-  } : null;
-  const pointed = hit ? { point: hit.world.toArray(), key: hit.key } : null;
-  const at = pointed?.point ?? nearest?.point;
-  const pictureUm = at ? renderer.umPerPixelAt(at) * ($('viewport').clientHeight || 1) : Infinity;
-  const place = pivotPlace({ pointed, nearest, pictureUm });
+  const place = pivotAtPointer(renderer, clientX, clientY, hoverCells(), $('viewport').clientHeight);
   if (!place) {
     flareStatus(renderer.pivotArmed ? 'Click on a cell: turns will pivot about that point (P or Esc to stop)'
       : 'Point at a cell and press P: turns will pivot about that point');
@@ -5483,7 +5476,7 @@ function hideContextMenu() {
  * says otherwise, and `chosen` is the row that did.
  */
 function contextMenuFor({
-  key, point = null, clientX, clientY, candidates = [], chosen = null, pane = false, at = null,
+  key, point = null, clientX, clientY, candidates = [], chosen = null, pane = false, paneIndex = null, at = null,
 }) {
   hideContextMenu();
   // A panel this menu opened last time; not in hideContextMenu, which every
@@ -5523,7 +5516,7 @@ function contextMenuFor({
       // one must), and the render's keys -- the arrows step the markers -- still work.
       const was = document.getElementById('ctx-menu')?.getBoundingClientRect();
       contextMenuFor({
-        key, point, clientX, clientY, candidates, chosen: row, pane,
+        key, point, clientX, clientY, candidates, chosen: row, pane, paneIndex,
         at: was ? { x: was.left, y: was.top } : null,
       });
       if (!pane) renderer.webgl.domElement.focus();
@@ -5579,15 +5572,17 @@ function contextMenuFor({
     menu.append(holder);
   };
 
-  // Turn about the point right-clicked, or about the middle again (P does both).
-  // Not in a Render compare pane, whose camera is not the 3D render's.
+  // Turn about the point right-clicked, or about the middle again (P does both).  In a
+  // Render compare pane, that pane's (with Sync cameras every pane's: compare.js).
   const pivotItem = () => {
-    if (pane) return;
-    if (renderer.pivotPoint()) {
-      item('Rotate about the middle of the view again (P)', () => renderer.clearPivot('off')).title =
+    const view = pane ? compare?.panes[paneIndex]?.renderer : renderer;
+    if (!view) return;
+    if (view.pivotPoint()) {
+      item('Rotate about the middle of the view again (P)', () => view.clearPivot('off')).title =
         'Turns pivot about the middle of the picture again, as they did before a point was chosen';
     } else if (record) {
-      item('Rotate about this point (P)', () => pivotAt(clientX, clientY)).title =
+      item('Rotate about this point (P)', () => (pane ? compare.pivotAt(paneIndex, clientX, clientY)
+        : pivotAt(clientX, clientY))).title =
         'Every turn pivots about this point from now on, so it stays where it is on the screen '
         + '(the middle of the annotation here, so a process turns about its own axis)';
     }
@@ -5798,11 +5793,11 @@ function contextMenuFor({
  * cell's, and the cell is listed once however many layers it was found in; nothing
  * under the pointer, no menu.
  */
-function contextMenuForPane({ record, candidates = [], clientX, clientY }) {
+function contextMenuForPane({ record, candidates = [], clientX, clientY, pane = null }) {
   if (!record || !state.neurons.has(record.key)) return;
   const rows = listCandidates(candidates.map((c) => ({ ...c, key: record.key })));
   if (!rows.length) return;
-  contextMenuFor({ key: record.key, clientX, clientY, pane: true, candidates: rows });
+  contextMenuFor({ key: record.key, clientX, clientY, pane: true, paneIndex: pane, candidates: rows });
 }
 
 /**
@@ -6900,10 +6895,17 @@ document.addEventListener('pointerdown', (event) => {
 // with a modifier; the canvas takes its own keys.
 document.addEventListener('keydown', (event) => {
   if (!['m', 'p', 'P'].includes(event.key) || event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
-  if (state.view !== 'render' || !renderer || event.defaultPrevented) return;
+  if (event.defaultPrevented) return;
   const target = event.target;
-  if (target === renderer.webgl?.domElement || isTypingTarget(target)) return;
-  if (target?.closest?.('select, [role="listbox"], [role="combobox"], [role="menu"], dialog')) return;
+  if (isTypingTarget(target) || target?.closest?.('select, [role="listbox"], [role="combobox"], [role="menu"], dialog')) return;
+  // In Render compare, P goes to the pane under the pointer (a pane's canvas takes its own).
+  if (state.view === 'compare' && compare && event.key !== 'm') {
+    if (target?.tagName === 'CANVAS' && target.closest?.('.compare-viewport')) return;
+    compare.pivotKey();
+    event.preventDefault();
+    return;
+  }
+  if (state.view !== 'render' || !renderer || target === renderer.webgl?.domElement) return;
   renderer.handleKey(event);
 });
 document.addEventListener('keydown', (event) => {
@@ -6915,6 +6917,12 @@ document.addEventListener('keydown', (event) => {
   // then never reached the canvas (2026-09-19: "how does one deselect it?").
   if (document.getElementById('ctx-menu')) { hideContextMenu(); return; }
   if (state.view === 'render' && renderer?.pivotArmed) { renderer.clearPivot('off'); return; }
+  // Render compare: its header popover first (compare.js closes it), then every pane's pivot.
+  if (state.view === 'compare' && compare?.pivotOn && !compare.popoverOpen
+      && !event.target.closest?.('input, textarea, select, [contenteditable], dialog')) {
+    compare.clearPivots('off');
+    return;
+  }
   if (state.view !== 'render' || !renderer) return;
   if (!renderer.selection) {
     if (renderer.pivotPoint() && !event.target.closest?.('input, textarea, select, [contenteditable]')) {

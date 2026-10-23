@@ -22,6 +22,10 @@
 //   the scale it was set at, or when its cell is no longer drawn (`pivotEnds`), and
 //   with Reset view, a jump to an annotation, Flatten IPL, P, Esc or a click on its
 //   label.  It is the page's alone: never saved with the session or a workspace.
+//
+// Render compare's panes have the same pivot, each its own renderer's (compare.js):
+// with Sync cameras one point serves every pane, set from any of them and let go
+// in all of them together; without it each pane keeps its own.
 
 /** How far a set pivot's view may be zoomed out, as a multiple of its scale when set, before it lets go. */
 export const PIVOT_ZOOM_OUT = 4;
@@ -94,6 +98,28 @@ export function pivotPlace({ pointed = null, nearest = null, pictureUm = Infinit
   if (pointed) return { point: pointed.point, key: pointed.key, snapped: false };
   if (nearest && nearest.px <= SNAP_REACH_PX) return { point: nearest.point, key: nearest.key, snapped: true };
   return null;
+}
+
+/**
+ * Where a pivot asked for at a screen point goes in `view`, a Renderer3D (anything
+ * with its `pickAt`, `nearestAnnotation`, `toWorld` and `umPerPixelAt`): `pivotPlace`
+ * of what is drawn there and of the annotation the readout names there, or null.
+ * `cells` are the `{ key, nodes, source }` `nearestAnnotation` reads, the nodes in
+ * `source`'s frame (`source` null for keys of no volume, a Render compare layer's);
+ * `height` the picture's height, pixels.  The 3D render and every Render compare pane
+ * ask through it.
+ */
+export function pivotAtPointer(view, clientX, clientY, cells, height) {
+  const hit = view.pickAt(clientX, clientY);
+  const found = cells?.length ? view.nearestAnnotation(clientX, clientY, cells) : null;
+  const cell = found ? cells.find((c) => c.key === found.key) : null;
+  const nearest = cell ? {
+    point: view.toWorld(found.node.xyz_um, cell.source ?? null), key: found.key, px: found.px, hit: found.hit,
+  } : null;
+  const pointed = hit ? { point: hit.world.toArray(), key: hit.key } : null;
+  const at = pointed?.point ?? nearest?.point;
+  const pictureUm = at ? view.umPerPixelAt(at) * (height || 1) : Infinity;
+  return pivotPlace({ pointed, nearest, pictureUm });
 }
 
 /**

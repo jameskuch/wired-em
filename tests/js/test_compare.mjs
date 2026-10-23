@@ -234,7 +234,43 @@ export class Renderer3D {
   }
   setShiftPlane(key, z) { this.calls.push(['setShiftPlane', key, z]); }
   cameraState() { return {}; } restoreCamera() {}
-  resetView() { this.framed += 1; this.realFramed = !this.paused; }
+  resetView() { this.clearPivot('reset'); this.framed += 1; this.realFramed = !this.paused; }
+  // The pivot point, as the real one keeps it: set, let go (saying why) or waiting for a click, the app told
+  // through onPivotChange; P sets one where the pointer is (onPivotRequest), and what pivotAt reads.
+  pivotPoint() { return this._pivot ? [...this._pivot] : null; }
+  get pivotArmed() { return !!this._armed; }
+  setPivot(point, opts) {
+    this.calls.push(['setPivot', point, opts ?? null]);
+    this._pivot = [...point]; this._armed = false;
+    this.onPivotChange?.({ on: true, armed: false, reason: null });
+    return true;
+  }
+  clearPivot(reason = 'off') {
+    const was = !!this._pivot || !!this._armed;
+    this._pivot = null; this._armed = false;
+    if (was) this.onPivotChange?.({ on: false, armed: false, reason });
+    return was;
+  }
+  armPivot() {
+    if (this._pivot) this.clearPivot('off');
+    this._armed = true;
+    this.onPivotChange?.({ on: false, armed: true, reason: null });
+    return true;
+  }
+  togglePivot() {
+    if (this._pivot || this._armed) return this.clearPivot('off');
+    if (this.pointerInView && this.onPivotRequest) { this.onPivotRequest(this.pointerAt[0], this.pointerAt[1]); return true; }
+    return this.armPivot();
+  }
+  get pointerInView() { return !!this.pointerAt; }
+  pickAt() { return this.under ? { key: this.under.key, world: { toArray: () => [...this.under.point] } } : null; }
+  nearestAnnotation(x, y, cells) {
+    this.calls.push(['nearestAnnotation', cells.map((c) => [c.key, c.nodes.length])]);
+    const c = this.readout && cells.find((cell) => cell.key === this.readout.key);
+    return c ? { key: c.key, node: c.nodes[0], px: 0, hit: true } : null;
+  }
+  toWorld(p) { return [...p]; }
+  umPerPixelAt() { return 0.01; }
   // The view cube's way in: what it reads and the turns it asks for.
   viewFrame() { return { right: [1, 0, 0], up: [0, 1, 0], back: [0, 0, 1] }; }
   turnTo(dir, up) { this.calls.push(['turnTo', dir, up]); return Promise.resolve(!!this.meshes.size); }
@@ -251,7 +287,8 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sbfsem-compare-test-'));
 for (const name of ['compare.js', 'comparelayers.js', 'api.js', 'jobcard.js', 'loadprogress.js', 'state.js',
   'shifts.js', 'shiftlayer.js', 'shiftpanel.js', 'shiftlegend.js', 'fatlines.js', 'renderoptions.js',
   'render-schema.js', 'compareoptions.js', 'renderform.js', 'renderestimate.js', 'regstatus.js',
-  'renderconflicts.js', 'renderfallback.js', 'conflictpanel.js', 'viewcube.js', 'settings.js', 'registrations.js']) {
+  'renderconflicts.js', 'renderfallback.js', 'conflictpanel.js', 'viewcube.js', 'settings.js', 'registrations.js',
+  'pivot.js']) {
   let text = fs.readFileSync(path.join(jsDir, name), 'utf8');
   text = text.replace("'./render3d.js'", "'./render3d_stub.js'");
   fs.writeFileSync(path.join(tmp, name), text);
@@ -4100,6 +4137,123 @@ test('the cube\'s house resets the shown pane with Sync, every pane without; the
   assert.equal(view.viewCube.view.flipZ, false);
 });
 
+
+// -- the pivot point ------------------------------------------------------------------------
+
+test('pivot: with Sync cameras one point serves every pane, set in any and let go in all; the label says so', () => {
+  const { view, statuses } = makeView(3);
+  view.setViewCube(true);
+  const r = view.panes.map((p) => p.renderer);
+  for (const x of r) {
+    x.meshes.set('L', { n_faces: 1 });
+    x.resetView();          // framed, as a built pane is
+  }
+  assert.equal(view.pivotChip, null, 'no label until a pivot is set');
+  r[0].setPivot([1, 2, 3]);
+  assert.deepEqual(r.map((x) => x.pivotPoint()), [[1, 2, 3], [1, 2, 3], [1, 2, 3]], 'every pane turns about it');
+  const chip = view.pivotChip;
+  assert.equal(chip.hidden, false);
+  assert.equal(chip.parentElement, view.panes[2].viewport, 'the label is with the cube, in the top-right pane');
+  assert.equal(chip.label.textContent, 'Rotating about a point');
+  assert.match(statuses.at(-1)[0], /^Every pane rotates about the ringed point/);
+  r[2].clearPivot('left');
+  assert.deepEqual(r.map((x) => x.pivotPoint()), [null, null, null], 'let go in one pane, let go in all');
+  assert.equal(chip.hidden, true);
+  assert.match(statuses.at(-1)[0], /the point left the picture$/);
+  r[1].setPivot([4, 5, 6]);
+  view.toggleMaximize(view.panes[0]);
+  assert.equal(chip.parentElement, view.panes[0].viewport, 'a pane that fills the grid takes the label');
+  view.toggleMaximize(view.panes[0]);
+  assert.deepEqual(r.map((x) => x.pivotPoint()), [[4, 5, 6], [4, 5, 6], [4, 5, 6]], 'and putting the grid back keeps it');
+  chip.fire('click');
+  assert.deepEqual(r.map((x) => x.pivotPoint()), [null, null, null], 'a click on the label lets go of it');
+});
+
+test('pivot: Reset view in one synced pane, or the cube\'s house, lets go of every pane\'s', () => {
+  const { view } = makeView(2);
+  view.setViewCube(true);
+  const r = view.panes.map((p) => p.renderer);
+  for (const x of r) x.meshes.set('L', { n_faces: 1 });
+  r[1].setPivot([1, 2, 3]);
+  r[0].resetView();
+  assert.deepEqual(r.map((x) => x.pivotPoint()), [null, null]);
+  r[1].setPivot([1, 2, 3]);
+  view.viewCube.home.fire('click');
+  assert.deepEqual(r.map((x) => x.pivotPoint()), [null, null]);
+});
+
+test('pivot: without Sync each pane keeps its own; Sync on gives every pane the first drawn pane\'s, or none', () => {
+  const { view } = makeView(3);
+  const r = view.panes.map((p) => p.renderer);
+  for (const x of r) x.meshes.set('L', { n_faces: 1 });
+  view.setSync(false);
+  r[1].setPivot([1, 1, 1]);
+  assert.deepEqual(r.map((x) => x.pivotPoint()), [null, [1, 1, 1], null], 'set in one pane, only that pane');
+  assert.equal(view.pivotChip.label.textContent, 'Pane 2 rotates about a point');
+  r[2].setPivot([2, 2, 2]);
+  assert.equal(view.pivotChip.label.textContent, 'Panes 2 and 3 rotate about points');
+  r[2].clearPivot('off');
+  assert.deepEqual(r.map((x) => x.pivotPoint()), [null, [1, 1, 1], null], 'let go in one pane, kept in the other');
+  for (const x of r) x.setPivot([3, 3, 3]);
+  assert.equal(view.pivotChip.label.textContent, 'Rotating about a point', 'every drawn pane: said plainly');
+  r[0].setPivot([7, 8, 9]);
+  view.setSync(true);
+  assert.deepEqual(r.map((x) => x.pivotPoint()), [[7, 8, 9], [7, 8, 9], [7, 8, 9]], 'one camera, one pivot: pane 1\'s');
+  view.setSync(false);
+  r[0].clearPivot('off');
+  view.setSync(true);
+  assert.deepEqual(r.map((x) => x.pivotPoint()), [null, null, null], 'pane 1 has none: no pane keeps one');
+});
+
+test('pivot: P over a pane snaps to the annotation of the copy each layer was built from, through the shared helper', async () => {
+  resetServer({ nodes: [{ id: 7, xyz_um: [1, 2, 3], radius_um: 1 }] });
+  const { view } = makeView(1);
+  view.setAnnotations(view.panes[0], true);
+  await view.build(record);
+  await idle(view);
+  const pane = view.panes[0];
+  const r = pane.renderer;
+  const key = pane.layers[0].key;
+  pane.viewport.clientHeight = 600;     // 6 um of picture at the stub's 0.01 um a pixel: 0.1 um is near the middle
+  r.under = { key, point: [1.1, 2, 3] };
+  r.readout = { key };
+  r.pointerAt = [10, 20];
+  r.togglePivot();
+  await until(() => r.pivotPoint(), 'the pivot');
+  assert.deepEqual(r.pivotPoint(), [1, 2, 3], 'the middle of the annotation there');
+  assert.deepEqual(r.calls.filter((c) => c[0] === 'nearestAnnotation').at(-1)[1], [[key, 1], ['A', 1]],
+    'the layer and the overlay, each with the copy\'s annotations');
+  assert.deepEqual(r.calls.filter((c) => c[0] === 'setPivot').at(-1)[2], null, 'on no layer in particular');
+  r.togglePivot();
+  assert.equal(r.pivotPoint(), null, 'P again lets go');
+  r.under = null;
+  r.readout = null;
+  assert.equal(await view.pivotAt(0, 10, 20), false, 'nothing there: no pivot');
+  assert.equal(r.pivotPoint(), null);
+});
+
+test('pivot: a pane framed after the pivot was set takes Sync\'s pivot; P with the keyboard elsewhere goes to the pane under the pointer', async () => {
+  resetServer();
+  const { view } = makeView(2);
+  await view.build(record);
+  await idle(view);
+  const r = view.panes.map((p) => p.renderer);
+  r[0].setPivot([5, 5, 5]);
+  // Pane 2 frames itself again for a new load of the cell, after pane 1.
+  view.panes[1].framedFor = null;
+  view._frame(view.panes[1]);
+  assert.deepEqual(r.map((x) => x.pivotPoint()), [[5, 5, 5], [5, 5, 5]], 'its framing lets go of no pivot');
+  view.pivotKey();
+  assert.deepEqual(r.map((x) => x.pivotPoint()), [null, null], 'the pointer on no pane: P lets go of every pivot');
+  r[1].pointerAt = [3, 4];
+  r[1].under = { key: view.panes[1].layers[0].key, point: [9, 9, 9] };
+  view.pivotKey();
+  await until(() => r[1].pivotPoint(), 'the pivot');
+  assert.deepEqual(r.map((x) => x.pivotPoint()), [[9, 9, 9], [9, 9, 9]]);
+  assert.equal(view.pivotOn, true);
+  assert.equal(view.clearPivots(), true);
+  assert.equal(view.pivotOn, false);
+});
 
 // -- registrations: a layer built from another copy of the cell ----------------------------
 

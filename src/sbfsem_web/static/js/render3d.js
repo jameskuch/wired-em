@@ -4904,6 +4904,9 @@ export class Renderer3D {
 
   get pivotArmed() { return this._pivotArmed; }
 
+  /** Whether the pointer is over the view now (what P sets the pivot under). */
+  get pointerInView() { return !!this._pointer; }
+
   /**
    * Turn about `point` (`[x, y, z]` in the scene's frame) from now on, the point
    * drawn on `key`'s cell: every drag, its glide, the arrow keys, q and e, the

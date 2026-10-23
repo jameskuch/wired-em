@@ -2309,7 +2309,8 @@ are about it anyway) and **Flatten IPL**; and by itself when the point leaves th
 picture, when you zoom out to more than 4× the scale you set it at, or when its cell
 is hidden. The status line says which. **Flip Z** and a volume offset carry it with
 its cell. It belongs to the page: it is not saved with the session or a workspace,
-and a reload starts without it.
+and a reload starts without it. Render compare's panes have it too, one for every pane
+with Sync cameras (see *The pivot point* under [Render compare](#render-compare)).
 
 ### Full screen
 
@@ -2984,6 +2985,22 @@ against each other where they overlap. Up to four per pane.
   same amount. Its house resets the focused pane (with Sync, every pane
   follows) or, without Sync, each pane. The **View cube** box in the 3D
   render's toolbar shows or hides it here too.
+- **The pivot point** (see [Where a turn pivots](#where-a-turn-pivots-and-choosing-the-point)
+  under the 3D render) works in every pane: point at the cell in a pane and press
+  **`p`**, or right-click it → **Rotate about this point (P)**. It goes to the middle of
+  the annotation there, read from the copy of the cell each layer was built from, so a
+  process turns about its own axis. With **Sync cameras** the panes share one camera, so
+  they share one pivot: set in any pane, every pane turns about the same point and
+  shows a ring on it; let go in one, every pane lets go. Without Sync each pane keeps
+  its own, and `p` over a pane sets or lets go of that pane's alone; turning Sync on
+  gives every pane the first drawn pane's pivot, or none. Drags in any pane, the cube's
+  turns and drags, and XY1 keep the point at its pixel in each pane (the browser check
+  measures 0.00 px of movement in each, Sync on and off). The label **Rotating about a point** sits under
+  the view cube (in that pane's corner with the cube hidden); without Sync, when only
+  some panes have one, it names them. A click on it, or `Esc`, lets go of every pane's.
+  It also turns off with the pane's **Reset view** or the cube's house, and by itself as
+  in the 3D render. Hiding a layer keeps it: the point is on the cell, which the other
+  layers still draw.
 - **⋯** is the pane's tool menu: **Reset view** (with Sync cameras every pane
   follows), **Save picture** (a PNG of the pane), **Maximize** / **Restore** (the
   other panes keep their layers and wait, with their rendering paused) and a

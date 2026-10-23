@@ -136,6 +136,14 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   Sync cameras; without Sync every pane turns to the same view about its own pivot, and a drag orbits each
   by the same amount; the house resets each pane; it moves with the pane count and into a maximized pane;
   the 3D render's View cube box hides it too.
+* ``comparepivot`` -- the pivot point in Render compare (2.37.0), on c943 in two panes with a real mouse:
+  with Sync cameras, P over a thin process in pane 1 puts one pivot on its annotation in both panes (a
+  ring in each, the label under the cube in pane 2), and drags in either pane, a Shift-drag, a cube turn,
+  XY1 and a cube drag keep its pixel to 1.5 px in each pane; the right-click menu clears and sets it from
+  pane 2 for both, and P lets go in both; without Sync each pane keeps its own: Reset view in pane 2 lets
+  go of pane 2's alone, P there sets another point, drags, a cube turn, XY1 and a cube drag keep each
+  pane's pixel (a drag in pane 1 leaves pane 2's camera alone), P lets go of one pane's, Esc and the
+  label of every pane's.
 * ``comparereport`` -- Render compare's Report… (reportdialog.js), with real clicks: it lists the panes'
   built layers (a Difference pane is not one) with every pair ticked and the page count the server then
   makes; None and "Differences on screen" pick what they say, and a rendering left out takes its pairs with
@@ -4561,6 +4569,282 @@ def pivot(c: Chrome, r: Report, ctx):
         c.wait_for(f"{status}.includes('IPL no longer flattened')", 240)
 
 
+#: PROJECT and THIN_SPOT for any renderer, given as the first argument (a Render compare pane's).
+PROJECT_IN = PROJECT.replace('((p) => { const R = window.sbfsem.renderer;', '((R, p) => {', 1)
+THIN_SPOT_IN = THIN_SPOT.replace('((frac) => { const R = window.sbfsem.renderer;', '((R, frac) => {', 1)
+assert PROJECT_IN != PROJECT and THIN_SPOT_IN != THIN_SPOT, 'PROJECT or THIN_SPOT changed: make the pane versions again'
+
+
+def comparepivot(c: Chrome, r: Report, ctx):
+    r.start('comparepivot: the pivot point in Render compare panes (P, the right click), Sync cameras on and off')
+    boot(c, ctx.url)
+    load(c, ctx.cell)
+    _compare_tab(c, 2)
+    _click_js(c, "document.getElementById('compare-build')")
+    drawn = f'{COMPARE}.panes.every((p) => !p.renderer.bounds.isEmpty()) && !{COMPARE}.running'
+    if not c.wait_for(drawn, 600):
+        r.check('both panes are built', False)
+        return
+    c.settle(3)
+    status = "document.getElementById('compare-status').textContent"
+    panes = (0, 1)
+
+    def R(i: int) -> str:
+        return f'{COMPARE}.panes[{i}].renderer'
+
+    def box(i: int) -> list[float]:
+        return js(c, f"(() => {{ const b = {R(i)}.webgl.domElement.getBoundingClientRect();"
+                     " return [b.left, b.top, b.width, b.height]; })()")
+
+    def at(i: int, point: list[float]) -> dict:
+        return js(c, f'({PROJECT_IN})({R(i)}, {json.dumps(point)})')
+
+    def still() -> None:
+        """Until no pane's camera moves (a glide, damping, Sync copying)."""
+        ask = f'JSON.stringify({COMPARE}.panes.map((p) => p.renderer.cameraState()))'
+        last = js(c, ask)
+        for _ in range(60):
+            time.sleep(0.1)
+            now = js(c, ask)
+            if now == last:
+                return
+            last = now
+
+    def wheel(x: float, y: float, dy: int) -> None:
+        c.send('Input.dispatchMouseEvent', type='mouseWheel', x=x, y=y, deltaX=0, deltaY=dy)
+        time.sleep(0.03)
+
+    def drag(x0: float, y0: float, dx: float, dy: float = 0, mods: int = 0) -> None:
+        mouse = lambda kind, x, y, b, **k: c.send(  # noqa: E731
+            'Input.dispatchMouseEvent', type=kind, x=x, y=y, button='left', buttons=b, modifiers=mods, **k)
+        mouse('mouseMoved', x0, y0, 0)
+        mouse('mousePressed', x0, y0, 1, clickCount=1)
+        for k in range(1, 21):
+            mouse('mouseMoved', x0 + dx * k / 20, y0 + dy * k / 20, 1)
+            time.sleep(0.01)
+        mouse('mouseReleased', x0 + dx, y0 + dy, 0, clickCount=1)
+        still()
+
+    def low(i: int) -> tuple[float, float]:
+        """Where a drag in pane `i` starts: below the middle, clear of the cube and the headers."""
+        b = box(i)
+        return b[0] + b[2] / 2, b[1] + b[3] * 0.82
+
+    def pivots() -> list:
+        return js(c, f'{COMPARE}.panes.map((p) => p.renderer.pivotPoint())')
+
+    def marks() -> list:
+        return js(c, f"""{COMPARE}.panes.map((p) => {{ const m = p.viewport.querySelector('.pivot-mark');
+            if (!m || m.hidden) return null; const b = m.getBoundingClientRect();
+            return [b.left + b.width / 2, b.top + b.height / 2]; }})""")
+
+    def chip() -> dict:
+        return js(c, f"""(() => {{ const v = {COMPARE}; const chip = v.pivotChip;
+            if (!chip || chip.hidden) return {{ shown: false }};
+            const a = chip.getBoundingClientRect(); const cube = v.viewCube.root.getBoundingClientRect();
+            const host = v.panes.findIndex((p) => chip.parentElement === p.viewport);
+            return {{ shown: true, text: chip.textContent, host,
+                      under: a.top >= cube.bottom - 1 && a.right <= cube.right + 8 && a.right >= cube.left,
+                      xy: [a.left + a.width / 2, a.top + a.height / 2] }}; }})()""")
+
+    def press_p(i: int, x: float, y: float, sets: bool = True) -> None:
+        """P with the pointer at (x, y) over pane `i` and the keyboard on its canvas; `sets`: wait for a pivot."""
+        c.move(x, y)
+        js(c, f'{R(i)}.webgl.domElement.focus()')
+        c.key('p')
+        if sets:
+            c.wait_for(f'{R(i)}.pivotPoint() !== null', 10)
+        c.settle(3)
+
+    def zoom_onto(i: int, point: list[float], stop_um: float = 3.0) -> dict:
+        for _ in range(200):
+            now = at(i, point)
+            if (not now['inside'] or now['depth'] <= stop_um
+                    or js(c, f'{R(i)}.umPerPixelAt({json.dumps(point)})') < 0.004):
+                break
+            wheel(now['x'], now['y'], -100)
+        still()
+        return at(i, point)
+
+    def gap(a: dict, b: dict) -> float:
+        return math.hypot(a['x'] - b['x'], a['y'] - b['y'])
+
+    def cube_at(region: list[int]) -> tuple[float, float]:
+        return tuple(js(c, """(async () => {
+            const m = await import('/static/js/viewcube.js'); const cube = %s.viewCube;
+            const b = cube.stage.getBoundingClientRect();
+            const [x, y] = m.project(cube.view.viewFrame(), %s);
+            return [b.left + b.width / 2 + x, b.top + b.height / 2 + y]; })()"""
+                        % (COMPARE, json.dumps([0.8 * v for v in region])), wait=True))
+
+    def double(x: float, y: float) -> None:
+        c.move(x, y)
+        for count in (1, 2):
+            c.send('Input.dispatchMouseEvent', type='mousePressed', x=x, y=y, button='left', buttons=1,
+                   clickCount=count)
+            c.send('Input.dispatchMouseEvent', type='mouseReleased', x=x, y=y, button='left', buttons=0,
+                   clickCount=count)
+        still()
+
+    def cube_drag() -> None:
+        x, y = cube_at([0, 0, 0])
+        c.press(x, y)
+        for k in range(1, 21):
+            c.move(x - k * 2, y + k, buttons=1)
+            time.sleep(0.02)
+        c.release(x - 40, y + 20)
+        c.wait_for(f'{COMPARE}.panes.every((p) => !p.renderer._spin.yaw && !p.renderer._spin.pitch)', 10)
+        still()
+
+    def keeps(name: str, turn) -> bool:
+        """Each pane that turns about a point keeps it at its pixel through `turn`, and keeps the point."""
+        held = pivots()
+        start = {i: at(i, held[i]) for i in panes if held[i]}
+        turn()
+        js(c, "document.getElementById('ctx-menu')?.remove()")
+        now = pivots()
+        moved = {i: gap(start[i], at(i, now[i])) if now[i] else None for i in start}
+        same = all(now[i] and math.dist(now[i], held[i]) <= 1e-6 for i in start)
+        ok = bool(start) and same and all(m is not None and m <= 1.5 for m in moved.values())
+        r.check(f'{name}: the point stays at its pixel in each pane', ok,
+                ', '.join(f'pane {i + 1} ' + ('let go' if m is None else f'{m:.2f} px') for i, m in moved.items()))
+        return ok
+
+    def right_click(i: int, x: float, y: float) -> list[str]:
+        c.move(x, y)
+        c.press(x, y, 'right')
+        c.release(x, y, 'right')
+        c.settle(2)
+        return js(c, "[...document.querySelectorAll('#ctx-menu .ctx-item')].map((e) => e.textContent.trim())") or []
+
+    def choose(label: str) -> bool:
+        return bool(js(c, """(() => { const item = [...document.querySelectorAll('#ctx-menu .ctx-item')]
+            .find((e) => e.textContent.trim() === %s); if (!item) return false; item.click(); return true; })()"""
+                       % json.dumps(label)))
+
+    def escape() -> None:
+        # A CDP Escape stops this headless Chrome's frames (comparekeys), so it is dispatched.
+        js(c, "(document.activeElement || document).dispatchEvent(new KeyboardEvent('keydown',"
+              " { key: 'Escape', bubbles: true, cancelable: true }))")
+        c.settle(2)
+
+    r.check('Sync cameras is on to start with', js(c, "document.getElementById('compare-sync').checked"))
+    r.check('the view cube is in pane 2', js(c, f'{COMPARE}.viewCube?.root.parentElement === {COMPARE}.panes[1].viewport'))
+
+    # -- Sync cameras: P on a pane gives every pane the one pivot --------------------------------------
+    js(c, f'{R(0)}.resetView(); {COMPARE}._syncFrom({COMPARE}.panes[0])')
+    still()
+    spot = js(c, f'({THIN_SPOT_IN})({R(0)}, 0.5)')
+    r.check('a thin process toward the right of pane 1', bool(spot), spot)
+    if not spot:
+        return
+    process = spot['p']
+    here = zoom_onto(0, process)
+    press_p(0, here['x'], here['y'])
+    point = pivots()
+    r.check('P over pane 1 sets the pivot, and Sync gives pane 2 the same point',
+            point[0] is not None and point[1] is not None and math.dist(point[0], point[1]) <= 1e-9,
+            (point, js(c, status)))
+    if point[0] is None or point[1] is None:
+        return
+    point = point[0]
+    picture = js(c, f'{R(0)}.umPerPixelAt({json.dumps(point)})') * box(0)[3]
+    r.check('on the process: the middle of its annotation, within a quarter of the picture',
+            math.dist(point, process) <= 0.25 * picture, f'{math.dist(point, process):.3f} of {picture:.2f} um')
+    drawn_at = marks()
+    r.check('a ring on the point in each pane', all(
+        drawn_at[i] is not None and math.hypot(drawn_at[i][0] - at(i, point)['x'], drawn_at[i][1] - at(i, point)['y']) <= 2
+        for i in panes), drawn_at)
+    shown = chip()
+    r.check('the label says so, under the view cube in pane 2',
+            shown['shown'] and shown['text'].startswith('Rotating about a point') and shown['under']
+            and shown['host'] == 1, shown)
+    r.check('and the status line names every pane', 'Every pane rotates about the ringed point' in js(c, status),
+            js(c, status))
+
+    keeps('Sync on, a drag in pane 1', lambda: drag(*low(0), 60))
+    keeps('Sync on, a drag in pane 2', lambda: drag(*low(1), -50, 30))
+    keeps('Sync on, a Shift-drag (roll) in pane 2', lambda: drag(*low(1), 60, mods=SHIFT))
+    keeps('Sync on, a view cube turn (an edge)', lambda: double(*cube_at([1, 0, 1])))
+    keeps('Sync on, XY1 (the cube\'s +Z face)', lambda: double(*cube_at([0, 0, 1])))
+    keeps('Sync on, a drag on the view cube', cube_drag)
+
+    # -- the right click and P let go of it in every pane ---------------------------------------------
+    where = at(1, point)
+    items = right_click(1, where['x'], where['y'])
+    r.check('a pane\'s right-click menu offers to turn about the middle again',
+            'Rotate about the middle of the view again (P)' in items, items)
+    choose('Rotate about the middle of the view again (P)')
+    c.settle(2)
+    r.check('which lets go in both panes', pivots() == [None, None] and not chip()['shown'], (pivots(), chip()))
+    items = right_click(1, where['x'], where['y'])      # the same place, on the process
+    r.check('and on the cell then offers Rotate about this point (P)', 'Rotate about this point (P)' in items,
+            (items, where))
+    choose('Rotate about this point (P)')
+    c.wait_for(f'{R(1)}.pivotPoint() !== null', 10)
+    c.settle(2)
+    now = pivots()
+    r.check('which sets it from pane 2 for both', now[0] is not None and now[1] is not None
+            and math.dist(now[0], now[1]) <= 1e-9, now)
+    if now[1] is None:
+        return
+    here = at(1, now[1])
+    press_p(1, here['x'] + 5, here['y'], sets=False)
+    r.check('P over pane 2 lets go in both', pivots() == [None, None]
+            and 'middle of the view again' in js(c, status), (pivots(), js(c, status)))
+
+    # -- without Sync cameras, each pane its own ------------------------------------------------------
+    here = at(0, point)                                  # pane 1's pixel of the same point
+    press_p(0, here['x'], here['y'])
+    _click_js(c, "document.getElementById('compare-sync')")
+    c.settle(2)
+    held = pivots()
+    r.check('Sync off: each pane keeps the pivot it had', not js(c, "document.getElementById('compare-sync').checked")
+            and all(held) and math.dist(held[0], held[1]) <= 1e-9, held)
+    js(c, f'{R(1)}.resetView()')
+    still()
+    now = pivots()
+    r.check('Reset view in pane 2 lets go of its pivot alone', now[1] is None and now[0] is not None
+            and math.dist(now[0], held[0]) <= 1e-9, now)
+    other = js(c, f'({THIN_SPOT_IN})({R(1)}, -0.4)') or js(c, f'({THIN_SPOT_IN})({R(1)}, 0)')
+    r.check('a thin process in pane 2, away from pane 1\'s', bool(other), other)
+    if not other:
+        return
+    here = zoom_onto(1, other['p'])
+    press_p(1, here['x'], here['y'])
+    now = pivots()
+    r.check('P over pane 2 sets its own pivot; pane 1 keeps its', now[1] is not None and now[0] is not None
+            and math.dist(now[0], held[0]) <= 1e-9 and math.dist(now[0], now[1]) > 1.0, now)
+    r.check('the label says every pane turns about a point', chip().get('text', '').startswith('Rotating about a point'),
+            chip())
+    camera_2 = js(c, f'JSON.stringify({R(1)}.cameraState())')
+    keeps('Sync off, a drag in pane 1', lambda: drag(*low(0), 60))
+    r.check('which leaves pane 2\'s camera alone', js(c, f'JSON.stringify({R(1)}.cameraState())') == camera_2)
+    keeps('Sync off, a drag in pane 2', lambda: drag(*low(1), -60, 20))
+    keeps('Sync off, a view cube turn (a corner): each pane about its own point', lambda: double(*cube_at([1, -1, 1])))
+    keeps('Sync off, XY1 (the cube\'s +Z face)', lambda: double(*cube_at([0, 0, 1])))
+    keeps('Sync off, a drag on the view cube', cube_drag)
+
+    where = at(0, pivots()[0])
+    press_p(0, where['x'] + 5, where['y'], sets=False)
+    now = pivots()
+    r.check('P over pane 1 lets go of pane 1\'s alone, and the label names pane 2',
+            now[0] is None and now[1] is not None and chip().get('text', '').startswith('Pane 2 rotates about a point'),
+            (now, chip()))
+    escape()
+    r.check('Esc lets go of every pane\'s, and the label goes', pivots() == [None, None] and not chip()['shown'],
+            (pivots(), chip()))
+    here = at(1, other['p'])
+    press_p(1, here['x'], here['y'])
+    shown = chip()
+    if shown['shown']:
+        c.click(*shown['xy'])
+        c.settle(2)
+    r.check('and so does a click on the label', shown['shown'] and pivots() == [None, None], (shown, pivots()))
+    _click_js(c, "document.getElementById('compare-sync')")
+    c.settle(2)
+
+
 SECTIONS = {
     'notice': notice, 'waiting': waiting, 'draws': draws, 'undo': undo, 'idle': idle,
     'picker': picker, 'save': save, 'analysis': analysis, 'strata': strata, 'strataexport': strataexport, 'twod': twod, 'sheets': sheets, 'volume': volume,
@@ -4590,6 +4874,7 @@ SECTIONS = {
     'viewcube': viewcube,
     'pivot': pivot,
     'comparecube': comparecube,
+    'comparepivot': comparepivot,
     'comparereport': comparereport,
 }
 

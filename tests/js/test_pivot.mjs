@@ -12,7 +12,7 @@ const jsDir = process.env.SBFSEM_JS_DIR
   || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..',
     'src', 'sbfsem_web', 'static', 'js');
 const {
-  ENDED, PIVOT_ZOOM_OUT, SNAP_PICTURE, SNAP_REACH_PX, STALE_DEPTH, pivotEnds, pivotPlace, staleDepth,
+  ENDED, PIVOT_ZOOM_OUT, SNAP_PICTURE, SNAP_REACH_PX, STALE_DEPTH, pivotAtPointer, pivotEnds, pivotPlace, staleDepth,
 } = await import(pathToFileURL(path.join(jsDir, 'pivot.js')).href);
 
 const cases = [];
@@ -91,6 +91,55 @@ test('on empty space beside a thin process, the nearest annotation within reach'
 
 test('nothing near: nowhere to pivot', () => {
   assert.equal(pivotPlace({}), null);
+});
+
+// -- pivotAtPointer --------------------------------------------------------------------
+/** A view that answers what a Renderer3D would: `hit` under the pointer, `found` the readout's annotation. */
+const fakeView = ({ hit = null, found = null, umPerPixel = 0.01, offset = [0, 0, 0] } = {}) => ({
+  asked: [],
+  pickAt(x, y) { this.asked.push(['pickAt', x, y]); return hit && { key: hit.key, world: { toArray: () => hit.point } }; },
+  nearestAnnotation(x, y, cells) { this.asked.push(['nearest', x, y, cells.map((c) => c.key)]); return found; },
+  toWorld(p, source) { this.asked.push(['toWorld', source]); return p.map((v, i) => v + offset[i]); },
+  umPerPixelAt() { return umPerPixel; },
+});
+
+test('the readout\'s annotation on the surface pointed at: its middle, in the drawn frame', () => {
+  const view = fakeView({
+    hit: { key: 'L3', point: [10.2, 20, 30] },
+    found: { key: 'L3', node: { xyz_um: [10, 20, 30] }, px: 0, hit: true },
+    offset: [0, 0, 0],
+  });
+  const cells = [{ key: 'L3', nodes: [{}], source: null }, { key: 'A', nodes: [{}], source: null }];
+  assert.deepEqual(pivotAtPointer(view, 5, 6, cells, 300), { point: [10, 20, 30], key: 'L3', snapped: true });
+  assert.deepEqual(view.asked.find((a) => a[0] === 'nearest'), ['nearest', 5, 6, ['L3', 'A']]);
+  assert.deepEqual(view.asked.find((a) => a[0] === 'toWorld'), ['toWorld', null]);
+});
+
+test('a cell of a volume: its annotation goes through that volume\'s frame', () => {
+  const key = 'NeitzInferiorMonkey/943';
+  const view = fakeView({
+    hit: { key, point: [11, 20, 30] }, found: { key, node: { xyz_um: [1, 20, 30] }, px: 0, hit: true }, offset: [10, 0, 0],
+  });
+  const place = pivotAtPointer(view, 0, 0, [{ key, nodes: [{}], source: 'NeitzInferiorMonkey' }], 300);
+  assert.deepEqual(place, { point: [11, 20, 30], key, snapped: true });
+  assert.deepEqual(view.asked.find((a) => a[0] === 'toWorld'), ['toWorld', 'NeitzInferiorMonkey']);
+});
+
+test('the picture\'s height sets how far the middle may be (a quarter of it)', () => {
+  // 4 um from the middle; 0.01 um a pixel: 300 px is 3 um of picture (too far), 2,000 px 20 um.
+  const view = fakeView({
+    hit: { key: 'L1', point: [14, 20, 30] }, found: { key: 'L1', node: { xyz_um: [10, 20, 30] }, px: 0, hit: true },
+  });
+  const cells = [{ key: 'L1', nodes: [{}] }];
+  assert.equal(pivotAtPointer(view, 0, 0, cells, 300).snapped, false);
+  assert.equal(pivotAtPointer(view, 0, 0, cells, 2000).snapped, true);
+});
+
+test('no annotations known: what is drawn there, and the readout is not asked', () => {
+  const view = fakeView({ hit: { key: 'L1', point: [1, 2, 3] } });
+  assert.deepEqual(pivotAtPointer(view, 0, 0, [], 300), { point: [1, 2, 3], key: 'L1', snapped: false });
+  assert.equal(view.asked.some((a) => a[0] === 'nearest'), false);
+  assert.equal(pivotAtPointer(fakeView(), 0, 0, [], 300), null);
 });
 
 // -- staleDepth ------------------------------------------------------------------------

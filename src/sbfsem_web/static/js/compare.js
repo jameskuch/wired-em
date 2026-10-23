@@ -46,6 +46,7 @@
 import { api } from './api.js';
 import { Renderer3D } from './render3d.js';
 import { ViewCube } from './viewcube.js';
+import { ENDED as PIVOT_ENDED, pivotAtPointer } from './pivot.js';
 import { loadGeneration } from './state.js';
 import { JobCard, formatElapsed } from './jobcard.js';
 import { SliceState, SHIFT_DEFAULTS, normalizeShiftDisplay, pairsFor } from './shifts.js';
@@ -228,10 +229,12 @@ export class CompareView {
    * field's Fine voxel and Face cap) with the fixes, as the 3D render panel does;
    * `fitPixel(record, options)` answers `{ pixel, why }` when that layer's Voxel size
    * is too fine for the cell: the layer is then built at `pixel` (both optional).
+   * `onPivotOff()` is told when the last pane lets go of its pivot point and the label that
+   * said so goes (the app takes its hover help down with it).
    */
   constructor(grid, {
     onStatus, summary, onRunningChange, shiftHost, caps, cell, mainSettings, sendToMain, panel,
-    errorToggle, onContextMenu, volumeInfo, estimates, fitPixel,
+    errorToggle, onContextMenu, volumeInfo, estimates, fitPixel, onPivotOff,
   } = {}) {
     this.grid = grid;
     this.volumeInfo = volumeInfo || (() => null);
@@ -243,6 +246,7 @@ export class CompareView {
     this.sendToMain = sendToMain || null;
     this.onContextMenu = onContextMenu || null;
     this.fitPixel = fitPixel || null;
+    this.onPivotOff = onPivotOff || null;
     // The pane whose options the panel shows, and whether the panel is up.  The
     // layer it edits is that pane's `editing` layer.
     this.focus = 0;
@@ -271,6 +275,12 @@ export class CompareView {
     this._copies = new Map();  // `${cell}#${load}|${tag}` -> { tag, summary }: a registration's copy, loaded once
     this.maximized = null;   // the pane that fills the grid, if one does
     this.viewCube = null;    // the view cube in the grid's top-right corner (setViewCube)
+    // The pivot point (pivot.js), each pane's renderer's own: with Sync cameras one point for
+    // every pane (`_pivotChanged` carries it from the pane it was set in), without it each
+    // pane's.  `_pivotQuiet` stops that while the view itself sets or lets go of pivots
+    // (framing, Sync); `pivotChip` is the label under the view cube that says one is on.
+    this._pivotQuiet = false;
+    this.pivotChip = null;
     this._pop = null;        // the popover open now: { pane, which, el, anchor }
     this._layerSeq = 0;
     // The Position shift layer, shared by every pane that has its box ticked: one
@@ -388,6 +398,7 @@ export class CompareView {
       annotations: false,     // the annotations overlay (discs as rings, outlines)
       annotationsVisible: true,
       annotationsDrawn: null, // the cell load the rings on screen were drawn for
+      annotationsCopy: null,  // ... and the copy of the cell they are of (a tag; null: the tab's)
       zRange: null,           // { min, max } µm shown, null = all
       bannerLayer: null,      // the layer whose failure the banner shows
       framedFor: null,        // the cell load the camera was last framed for
@@ -428,6 +439,9 @@ export class CompareView {
       ...request, record: this.record || this.cell(), pane: pane.index,
     });
     pane.renderer.controls.addEventListener('change', () => this._syncFrom(pane));
+    // P, a click the pane waits for, or the right-click menu: a pivot from the pane's own layers.
+    pane.renderer.onPivotRequest = (x, y) => { this.pivotAt(pane.index, x, y); };
+    pane.renderer.onPivotChange = (change) => this._pivotChanged(pane, change);
     // Every pane draws every frame it is in sight; the cube reads the one it shows.
     pane.renderer.onFrame = () => this.viewCube?.update();
     // Slice keys on any pane step the shared slice (a pane has no annotation selection).
@@ -1475,12 +1489,19 @@ export class CompareView {
     const was = this._syncing;
     this._syncing = true;
     try {
-      for (const p of this.panes) if (p !== front) p.renderer.updateSize?.();
+      // A late framing lets go of that pane's pivot alone; with Sync the front pane's is every pane's again below.
+      this._quietPivots(() => { for (const p of this.panes) if (p !== front) p.renderer.updateSize?.(); });
       if (!this.syncEnabled) return;
       // The pane that was in front, or, when it never drew anything (its build failed while it was in front),
       // the first of the others that has now framed itself: the one camera every pane takes.
       const ref = front.renderer.framed ? front : this.panes.find((p) => p !== front && p.renderer.framed);
-      if (ref) for (const p of this.panes) if (p !== ref) this._copyCamera(ref, p);
+      if (ref) {
+        for (const p of this.panes) {
+          if (p === ref) continue;
+          this._copyCamera(ref, p);
+          this._copyPivot(ref, p);
+        }
+      }
     } finally {
       this._syncing = was;
     }
@@ -2173,9 +2194,14 @@ export class CompareView {
     if (pane.framedFor === token || pane.renderer.bounds.isEmpty()) return;
     const ref = this.panes.find((p) => p !== pane && p.framedFor === token
       && !p.renderer.bounds.isEmpty());
-    pane.renderer.resetView();
+    // Framing lets go of the pane's own pivot, and of no other pane's.
+    this._quietPivots(() => pane.renderer.resetView());
     pane.framedFor = token;
-    if (ref) this._copyCamera(ref, pane);
+    if (ref) {
+      this._copyCamera(ref, pane);
+      // Sync's one pivot reaches a pane that is framed after it was set.
+      if (this.syncEnabled) this._copyPivot(ref, pane);
+    }
   }
 
   _copyCamera(from, to) {
@@ -2278,20 +2304,193 @@ export class CompareView {
    * shift legend moves to its bottom right (app.css). */
   _placeCube() {
     const cube = this.viewCube;
-    if (!cube) return;
-    const host = this.maximized
-      ?? this.panes[Math.min(COLUMNS[this.panes.length] ?? 1, this.panes.length) - 1];
-    for (const p of this.panes) p.viewport.classList.toggle('has-viewcube', cube.visible && p === host);
-    if (host) cube.attach(host.viewport);
+    const host = this._cubeHost();
+    if (cube) {
+      for (const p of this.panes) p.viewport.classList.toggle('has-viewcube', cube.visible && p === host);
+      if (host) cube.attach(host.viewport);
+    }
+    // The pivot's label goes with it (or would, with the cube hidden).
+    this._pivotUi();
+  }
+
+  /** The pane at the grid's top right, or the one filling it: where the cube and the pivot's label go. */
+  _cubeHost() {
+    return this.maximized ?? this.panes[Math.min(COLUMNS[this.panes.length] ?? 1, this.panes.length) - 1] ?? null;
   }
 
   /** The Sync cameras checkbox.  Turning it on lines everything up with the
    * first pane that has a surface, rather than waiting for the next drag. */
   setSync(on) {
     this.syncEnabled = !!on;
-    if (!on) return;
+    // Off, every pane keeps the pivot it has, each its own from now on.
+    if (!on) {
+      this._pivotUi();
+      return;
+    }
     const ref = this.panes.find((p) => !p.renderer.bounds.isEmpty());
-    if (ref) this._syncFrom(ref, { force: true });
+    if (!ref) return;
+    this._syncFrom(ref, { force: true });
+    // One camera, one pivot: that pane's, or none.
+    for (const p of this.panes) if (p !== ref) this._copyPivot(ref, p);
+  }
+
+  // -- the pivot point (pivot.js) ---------------------------------------------------
+
+  /**
+   * Put pane `index`'s pivot where the pointer is (P, a click the pane waits for, the
+   * right-click menu), as the 3D render does: on the middle of the annotation there, so a
+   * process turns about its own axis, or on the point drawn there.  The annotations are
+   * those of the copy each layer was built from (fetched once per load and copy, with the
+   * overlay's).  Not on a layer in particular: hiding the layer it is on keeps it, as the
+   * cell is still there in the others.  With Sync cameras every pane then turns about it
+   * (`_pivotChanged`).  Resolves true when a pivot was set.
+   */
+  async pivotAt(index, clientX, clientY) {
+    const pane = this.panes[index];
+    if (!pane) return false;
+    const cells = await this._pivotCells(pane);
+    if (!this.panes.includes(pane)) return false;
+    const place = pivotAtPointer(pane.renderer, clientX, clientY, cells, pane.viewport.clientHeight);
+    if (!place) {
+      this.onStatus(pane.renderer.pivotArmed
+        ? `Pane ${pane.index + 1}: click on the cell, and turns will pivot about that point (P or Esc to stop)`
+        : 'Point at the cell and press P: turns will pivot about that point');
+      return false;
+    }
+    return pane.renderer.setPivot(place.point);
+  }
+
+  /** What `nearestAnnotation` reads in a pane, `{ key, nodes, source }`: each built layer with the
+   * annotations of the copy it was built from, and the overlay with its own.  A copy whose
+   * annotations could not be fetched is left out (the pivot then goes on the point drawn there). */
+  async _pivotCells(pane) {
+    const record = this.record;
+    if (!record || this._isDiff(pane)) return [];
+    const wanted = pane.layers.filter((l) => l.mesh && l.config.tech !== 'diff')
+      .map((l) => ({ key: l.key, copy: l.builtCopy ?? null }));
+    if (pane.annotationsDrawn) wanted.push({ key: ANNOTATION_KEY, copy: pane.annotationsCopy ?? null });
+    const lists = await Promise.all(wanted.map(({ copy }) => this._loadAnnotations(record, copy)
+      .then((a) => a.nodes, () => null)));
+    return wanted.map((w, i) => ({ key: w.key, nodes: lists[i], source: null })).filter((c) => c.nodes?.length);
+  }
+
+  /**
+   * A pane's pivot was set, let go or armed (its renderer's onPivotChange).  With Sync cameras
+   * the panes share one camera and so one pivot: set in one, every other turns about the same
+   * point; let go in one (P, Esc, Reset view, the point leaving the picture, a zoom out), every
+   * pane lets go.  Without Sync each pane keeps its own.  The label and the status line follow.
+   */
+  _pivotChanged(pane, { on, armed, reason }) {
+    if (this._pivotQuiet) return;
+    if (this.syncEnabled && !armed) {
+      const point = on ? pane.renderer.pivotPoint() : null;
+      this._quietPivots(() => {
+        for (const p of this.panes) {
+          if (p === pane) continue;
+          if (point) p.renderer.setPivot(point);
+          else p.renderer.clearPivot(reason);
+        }
+      });
+    } else {
+      this._pivotUi();
+    }
+    const who = this.syncEnabled ? '' : `Pane ${pane.index + 1}: `;
+    if (armed) this.onStatus(`Pane ${pane.index + 1}: click the point to turn about (P or Esc to stop)`);
+    else if (on) {
+      this.onStatus(`${this.syncEnabled ? 'Every pane rotates' : `Pane ${pane.index + 1} rotates`} about the ringed `
+        + 'point — P, Esc or the label turns it off');
+    } else if (PIVOT_ENDED[reason]) this.onStatus(`${who}rotating about the middle of the view again: ${PIVOT_ENDED[reason]}`);
+    else this.onStatus(`${who}rotating about the middle of the view again`);
+  }
+
+  /** Set or let go of pivots without `_pivotChanged` carrying them to the other panes; the label follows. */
+  _quietPivots(fn) {
+    const was = this._pivotQuiet;
+    this._pivotQuiet = true;
+    try {
+      fn();
+    } finally {
+      this._pivotQuiet = was;
+    }
+    this._pivotUi();
+  }
+
+  /** Give pane `to` the pivot pane `from` has, or let go of its own when `from` has none. */
+  _copyPivot(from, to) {
+    const point = from.renderer.pivotPoint();
+    this._quietPivots(() => {
+      if (point) to.renderer.setPivot(point);
+      else to.renderer.clearPivot('off');
+    });
+  }
+
+  /** Whether any pane turns about a chosen point, or waits for a click to say where. */
+  get pivotOn() {
+    return this.panes.some((p) => p.renderer.pivotPoint?.() || p.renderer.pivotArmed);
+  }
+
+  /** Whether a header popover is open (Esc closes it first). */
+  get popoverOpen() { return !!this._pop; }
+
+  /** Every pane turns about the middle of its picture again (the label, Esc).  True when any pane had a pivot. */
+  clearPivots(reason = 'off') {
+    const was = this.pivotOn;
+    this._quietPivots(() => { for (const p of this.panes) p.renderer.clearPivot(reason); });
+    if (was) this.onStatus('Rotating about the middle of the view again');
+    return was;
+  }
+
+  /** P with the keyboard elsewhere on the page: the pane under the pointer does what its own P does;
+   * with the pointer on no pane, every pane lets go. */
+  pivotKey() {
+    const under = this.panes.find((p) => !p.el.hidden && p.renderer.pointerInView);
+    if (under) return under.renderer.togglePivot();
+    return this.clearPivots('off');
+  }
+
+  /**
+   * The label that says turns pivot about a chosen point: under the view cube, or in the corner of
+   * the same pane with the cube hidden (app.css).  With Sync cameras, or with every pane turning
+   * about one, it says so plainly, else which panes do.  A click lets go of every pivot.
+   */
+  _pivotUi() {
+    const set = this.panes.filter((p) => p.renderer.pivotPoint?.());
+    if (!set.length && !this.pivotChip) return;
+    const chip = this.pivotChip ??= this._makePivotChip();
+    const was = !chip.hidden;
+    chip.hidden = !set.length;
+    if (!set.length) {
+      if (was) this.onPivotOff?.();
+      return;
+    }
+    const drawn = this.panes.filter((p) => !p.renderer.bounds.isEmpty());
+    const every = this.syncEnabled || drawn.every((p) => set.includes(p));
+    const names = set.map((p) => p.index + 1);
+    chip.label.textContent = every ? 'Rotating about a point'
+      : set.length === 1 ? `Pane ${names[0]} rotates about a point`
+        : `Panes ${names.slice(0, -1).join(', ')} and ${names.at(-1)} rotate about points`;
+    const host = this._cubeHost();
+    if (host && chip.parentElement !== host.viewport) host.viewport.append(chip);
+  }
+
+  _makePivotChip() {
+    const chip = el('button', 'pivot-chip');
+    chip.type = 'button';
+    chip.hidden = true;
+    chip.dataset.help = 'Turns pivot about the ringed point, so it stays where it is on the screen: with Sync '
+      + 'cameras one point for every pane, without it each pane its own. To turn about the middle of the picture '
+      + 'again: click here, or press P or Esc. It also turns off by itself with Reset view or the view cube’s house, '
+      + 'when the point leaves the picture, or when you zoom out to more than 4× the scale it was set at. Hiding a '
+      + 'layer keeps it.';
+    chip.dataset.helpDelay = '300';
+    const ring = el('span', 'pivot-chip-ring');
+    ring.setAttribute('aria-hidden', 'true');
+    chip.label = el('span', '', 'Rotating about a point');
+    const x = el('span', 'pivot-chip-x', '×');
+    x.setAttribute('aria-hidden', 'true');
+    chip.append(ring, chip.label, x);
+    chip.addEventListener('click', () => this.clearPivots('off'));
+    return chip;
   }
 
   /**
@@ -2720,6 +2919,7 @@ export class CompareView {
         color: DISC_COLOR, opacity: 0.85, stroke: 0.06, outlines: annotations.outlines,
       });
       pane.annotationsDrawn = token;
+      pane.annotationsCopy = copy;
     }
     pane.renderer.setStyle(ANNOTATION_KEY, { visible: pane.annotationsVisible });
     pane.renderer.setZHide(ANNOTATION_KEY, pane.zRange ?? {});
