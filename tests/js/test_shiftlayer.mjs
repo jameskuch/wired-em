@@ -123,15 +123,24 @@ test('the fields are cached per nodes array: another threshold or color builds n
   assert.notEqual(other.field, a.field, 'a new nodes array is a new field (the cell was loaded again)');
 });
 
-test('a slice layer holds every candidate mark; its window is a draw range over them', () => {
-  const layer = L.buildLayer({ ...base, display: { shiftSlice: true, shiftWindow: 1, shiftRings: true } });
+test('a slice layer holds every candidate mark; the slice is a range of them, the rest drawn faint or not', () => {
+  const layer = L.buildLayer({ ...base, display: { shiftSlice: true, shiftSliceSpan: 1, shiftRings: true } });
   assert.equal(layer.slice, true);
   assert.ok(layer.plane.quad.length === 18 && layer.plane.outline.length === 24);
   const w = layer.windowAt(12);
   assert.deepEqual(w.marks, { first: 1, count: 3 }, 'sections 11 to 13');
-  assert.deepEqual(w.ranges.arrows, { first: 6, count: 18 });
+  // Outside the slice (0.05 by default) draws every mark; the right-click menu measures to the slice's.
+  assert.deepEqual(w.ranges.arrows, { first: 0, count: 10 * S.ARROW_VERTS });
+  assert.deepEqual(w.ranges.rings, S.vertexRange(layer.rings.offsets, { first: 0, count: 10 }));
+  assert.deepEqual(w.ranges.pick.arrows, { first: 6, count: 18 });
   const ringRange = S.vertexRange(layer.rings.offsets, w.marks);
-  assert.deepEqual(w.ranges.rings, ringRange);
+  assert.deepEqual(w.ranges.pick.rings, ringRange);
+  // At 0 the rest is hidden: only the slice is drawn.
+  const hidden = L.buildLayer({ ...base, display: { shiftSlice: true, shiftSliceSpan: 1, shiftRings: true, shiftOutside: 0 } });
+  const h = hidden.windowAt(12);
+  assert.deepEqual(h.ranges.arrows, { first: 6, count: 18 });
+  assert.deepEqual(h.ranges.rings, ringRange);
+  assert.deepEqual(h.ranges.pick, { arrows: h.ranges.arrows, rings: h.ranges.rings });
   assert.equal(w.shown, 3);
   assert.equal(layer.shownFor(12), 3);
   assert.match(layer.facts(12), /^3 of 10 moved shown/);
@@ -187,7 +196,7 @@ test('the memory gives the user\'s thresholds back when the pair returns, and ke
 
 /** Two volumes in slice mode, `a` over sections 10..19 and `b` over 10..13 (fewer nodes). */
 function twoVolumes() {
-  const slice = { shiftSlice: true, shiftWindow: 1 };
+  const slice = { shiftSlice: true, shiftSliceSpan: 1 };
   const la = L.buildLayer({ ...base, display: slice });
   const lb = L.buildLayer({ ...base, nodes: nodes.slice(0, 4), display: slice, summary });
   return [{ key: 'A/1', id: 1, source: 'A', layer: la }, { key: 'B/2', id: 2, source: 'B', layer: lb }];
@@ -293,7 +302,7 @@ class FocusRenderer extends StubRenderer {
 
 test('drawLayer hands the renderer the layer and its style, then the slice; syncSlice alone moves only the window', () => {
   const renderer = new StubRenderer();
-  const layer = L.buildLayer({ ...base, display: { shiftSlice: true, shiftWindow: 2, shiftOpacity: 0.5, shiftThrough: false } });
+  const layer = L.buildLayer({ ...base, display: { shiftSlice: true, shiftSliceSpan: 2, shiftOpacity: 0.5, shiftThrough: false } });
   assert.equal(L.drawLayer(renderer, 'v/1', layer, 15), true);
   assert.deepEqual(renderer.calls[0], ['setShifts', 'v/1', { opacity: 0.5, through: false, width: 2.5 }]);
   const [, , range] = renderer.calls.find((c) => c[0] === 'setShiftWindow');
@@ -338,7 +347,7 @@ test('the chip: loading, nothing moved, a count, the strongest, and the pair dra
   assert.match(chip.help, /true move/);
   assert.ok(chip.help.endsWith('Links across sections: median step 0.2 to 0.1 µm.'), 'the verdict, a sentence');
   // The slice's window is what is shown.
-  const slice = L.buildLayer({ ...base, display: { shiftSlice: true, shiftWindow: 0 } });
+  const slice = L.buildLayer({ ...base, display: { shiftSlice: true, shiftSliceSpan: 0 } });
   assert.equal(L.shiftChip(slice, 15).text, '1 shown');
   // Fell back: the pair drawn is on the chip, and why is the first thing its hover says.
   const fell = L.buildLayer({ ...base, summary: { section_correction: { requested: false }, live_registration: summary.live_registration } });
@@ -366,7 +375,7 @@ function makeController({ displayFor = {}, sources = ['A'], Renderer = StubRende
   for (const [i, source] of sources.entries()) {
     records.set(`${source}/${i + 1}`, {
       key: `${source}/${i + 1}`, id: i + 1, source, color: '#2f6fed', visible: true, summary,
-      display: { showShift: true, shiftSlice: true, shiftWindow: 1, ...displayFor },
+      display: { showShift: true, shiftSlice: true, shiftSliceSpan: 1, ...displayFor },
     });
   }
   const state = { neurons: records, selected: [...records.keys()][0] };
@@ -579,7 +588,7 @@ test('onlyShiftKeys: a change that is the layer\'s alone is redrawn without fetc
 
 test('focusMarks: a chosen annotation\'s arrow and ring at the layer\'s own scale, whatever the threshold or window', () => {
   // Shown only from 0.9 um and in a one-section window far away: the chosen one is still drawn.
-  const layer = L.buildLayer({ ...base, display: { shiftMinSlice: 0.9, shiftSlice: true, shiftWindow: 0 } });
+  const layer = L.buildLayer({ ...base, display: { shiftMinSlice: 0.9, shiftSlice: true, shiftSliceSpan: 0 } });
   const id = 102;                       // section 12, shift (0.5, 0): under the threshold
   assert.ok(![...layer.sel.rows].some((r) => layer.field.id[r] === id), 'the layer itself leaves it out');
   const [mark] = L.focusMarks(layer, [id]);
@@ -653,18 +662,32 @@ test('the controller draws each chosen annotation\'s arrow on its cell and dims 
   assert.deepEqual(renderer.focus.get('A/1'), []);
 });
 
-test('a chosen closed curve fetches its outline once, then draws its ring', async () => {
+test('Original rings and Arrows are the gates for a chosen annotation\'s own ring and arrow', async () => {
   const curve = node(500, 12, 3, 4, { shift: [0.4, 0.3], type: S.CLOSED_CURVE });
   outlineRows = [{ location_id: 500, outline_um: [[2, 3], [4, 3], [4, 5], [2, 5]] }];
   try {
-    const { controller, renderer, records, fetched } = makeController({ Renderer: FocusRenderer, nodeRows: [...nodes, curve] });
-    await controller.refresh(records.get('A/1'));
-    controller.focus([{ slot: 'primary', key: 'A/1', locationId: 500 }]);
-    assert.equal(renderer.focus.get('A/1')[0].ring, null, 'drawn at once without its ring');
+    // Rings off (the default): the arrow alone, and no outline is fetched for it (2026-10-22).
+    const off = makeController({ Renderer: FocusRenderer, nodeRows: [...nodes, curve] });
+    await off.controller.refresh(off.records.get('A/1'));
+    off.controller.focus([{ slot: 'primary', key: 'A/1', locationId: 500 }, { slot: 'above', key: 'A/1', locationId: 103 }]);
+    const bare = off.renderer.focus.get('A/1');
+    assert.deepEqual(bare.map((m) => m.ring), [null, null], 'no ring, a disc\'s or a closed curve\'s');
+    assert.ok(bare.every((m) => m.arrow?.length === S.ARROW_VERTS * 3));
     await new Promise((r) => setTimeout(r, 0));
-    assert.equal(renderer.focus.get('A/1')[0].ring.length, 4 * 2 * 3, 'then with it');
-    controller.focus([{ slot: 'primary', key: 'A/1', locationId: 500 }]);
-    assert.equal(fetched.filter((f) => f[0] === 'outlines').length, 1, 'fetched once');
+    assert.equal(off.fetched.filter((f) => f[0] === 'outlines').length, 0, 'nothing fetched');
+    assert.equal(off.renderer.focus.get('A/1')[0].ring, null);
+    // Rings on: the closed curve's ring is its outline, fetched with the layer.
+    const on = makeController({ Renderer: FocusRenderer, nodeRows: [...nodes, curve], displayFor: { shiftRings: true } });
+    await on.controller.refresh(on.records.get('A/1'));
+    on.controller.focus([{ slot: 'primary', key: 'A/1', locationId: 500 }]);
+    assert.equal(on.renderer.focus.get('A/1')[0].ring.length, 4 * 2 * 3);
+    assert.equal(on.fetched.filter((f) => f[0] === 'outlines').length, 1, 'fetched once, by the layer');
+    // Arrows off, rings on: the ring alone; both off, the layer draws nothing and nothing is focused.
+    on.records.get('A/1').display = { ...on.records.get('A/1').display, shiftArrows: false };
+    await on.controller.refresh(on.records.get('A/1'));
+    on.controller.focus([{ slot: 'primary', key: 'A/1', locationId: 500 }]);
+    assert.equal(on.renderer.focus.get('A/1')[0].arrow, null);
+    assert.equal(on.renderer.focus.get('A/1')[0].ring.length, 4 * 2 * 3);
   } finally {
     outlineRows = [];
   }
@@ -675,14 +698,15 @@ test('a chosen closed curve fetches its outline once, then draws its ring', asyn
 
 /** A renderer that colors slices, as Renderer3D does. */
 class SliceRenderer extends FocusRenderer {
-  constructor() { super(); this.tints = new Map(); }
+  constructor() { super(); this.tints = new Map(); this.fades = new Map(); }
   sliceColors() { return { above: [1, 0, 0], on: [1, 1, 0], below: [0, 0, 1] }; }
   setShiftSliceTint(key, tint) { this.tints.set(key, tint); }
+  setSliceFade(key, spec) { this.fades.set(key, spec); }
 }
 
 test('the slice plane frames its section\'s annotations and arrows, not the whole cell', () => {
   // Sections 10..19, one annotation each at x = 5 i, radius 1, all moved along +x.
-  const layer = L.buildLayer({ ...base, display: { shiftSlice: true, shiftWindow: 2, shiftMinSlice: 0 } });
+  const layer = L.buildLayer({ ...base, display: { shiftSlice: true, shiftSliceSpan: 2, shiftMinSlice: 0 } });
   assert.ok(layer.extents instanceof Map && layer.extents.size === 10);
   const rect = layer.planeAt(14);                      // the node at x = 20, y = 0
   const tail = 20 - layer.scales[[...layer.sel.section].indexOf(14)] * 0.7;
@@ -694,42 +718,65 @@ test('the slice plane frames its section\'s annotations and arrows, not the whol
   assert.ok(rect.x1 - rect.x0 < (cell.max[0] - cell.min[0]) / 2, 'far smaller than the cell');
   // A section with nothing on it frames the window's; outside every window, none.
   const sparse = L.buildLayer({ ...base, nodes: nodes.filter((n) => n.z_section !== 14),
-    display: { shiftSlice: true, shiftWindow: 1, shiftMinSlice: 0 } });
+    display: { shiftSlice: true, shiftSliceSpan: 1, shiftMinSlice: 0 } });
   const around = sparse.planeAt(14);
   assert.ok(around && around.x0 < 15 && around.x1 > 25, 'sections 13 and 15 frame it');
   assert.equal(sparse.planeAt(500), null);
   assert.equal(L.buildLayer(base).extents, null, 'not built outside slice mode');
 });
 
-test('a slice\'s colors: yellow on the plane at full strength, red above and blue below almost nothing', () => {
-  const layer = L.buildLayer({ ...base, display: { shiftSlice: true, shiftWindow: 2, shiftMinSlice: 0 } });
+test('a slice\'s colors: yellow on the plane, red above and blue below, full in the slice and faint past it', () => {
+  const layer = L.buildLayer({ ...base, display: { shiftSlice: true, shiftSliceSpan: 2, shiftMinSlice: 0 } });
   const colors = { above: [1, 0, 0], on: [1, 1, 0], below: [0, 0, 1] };
   const t = L.sliceTint(layer, 14, { colors });
-  const { marks } = layer.windowAt(14);
-  assert.deepEqual(t.parts.map((p) => [p.side, p.first, p.count]), [
-    ['below', marks.first, 2], ['on', marks.first + 2, 1], ['above', marks.first + 3, 2]]);
-  assert.deepEqual(t.parts.map((p) => p.alpha), [0.06, 1, 0.06]);
+  // Sections 10..19 one mark each: 10, 11 past the slice; 12, 13 in it below; 14 on the plane; ...
+  assert.deepEqual(t.parts.map((p) => [p.side, p.inside, p.first, p.count]), [
+    ['below', false, 0, 2], ['below', true, 2, 2], ['on', true, 4, 1], ['above', true, 5, 2], ['above', false, 7, 3]]);
+  assert.deepEqual(t.parts.map((p) => p.alpha), [0.05, 1, 1, 1, 0.05], 'Outside the slice past it, full in it');
+  assert.equal(t.parts.reduce((n, p) => n + p.count, 0), layer.sel.n, 'every mark has a part');
   assert.deepEqual(t.parts[0].rgb, [0, 0, 1]);
-  assert.deepEqual(t.parts[2].rgb, [1, 0, 0]);
+  assert.deepEqual(t.parts[4].rgb, [1, 0, 0]);
   // Flip Z: higher sections are below.
   const flipped = L.sliceTint(layer, 14, { colors, flipZ: true });
-  assert.deepEqual(flipped.parts.map((p) => p.side), ['above', 'on', 'below']);
+  assert.deepEqual(flipped.parts.map((p) => p.side), ['above', 'above', 'on', 'below', 'below']);
   assert.deepEqual(flipped.parts[0].rgb, [1, 0, 0]);
   // A selection on the cell: the plane's section turns pale; the selected arrow keeps the full yellow.
   const hybrid = L.sliceTint(layer, 14, { colors, hybrid: true });
-  assert.deepEqual(hybrid.parts[1].rgb, [1, 1, L.HYBRID_WHITE]);
-  // Off the plane at the setting; outside slice mode, nothing.
-  const faint = L.buildLayer({ ...base, display: { shiftSlice: true, shiftWindow: 2, shiftMinSlice: 0, shiftSliceDim: 0 } });
-  assert.deepEqual(L.sliceTint(faint, 14, { colors }).parts.map((p) => p.alpha), [0, 1, 0]);
+  assert.deepEqual(hybrid.parts[2].rgb, [1, 1, L.HYBRID_WHITE]);
+  // Slice ±0: the plane's section alone at full strength; at the cell's edge a side is empty.
+  const thin = L.buildLayer({ ...base, display: { shiftSlice: true, shiftMinSlice: 0 } });
+  assert.deepEqual(L.sliceTint(thin, 10, { colors }).parts.map((p) => p.count), [0, 0, 1, 0, 9]);
+  // Outside at its setting; outside slice mode, nothing.
+  const faint = L.buildLayer({ ...base, display: { shiftSlice: true, shiftSliceSpan: 2, shiftMinSlice: 0, shiftOutside: 0 } });
+  assert.deepEqual(L.sliceTint(faint, 14, { colors }).parts.map((p) => p.alpha), [0, 1, 1, 1, 0]);
   assert.equal(L.sliceTint(L.buildLayer(base), 14, { colors }), null);
   // Rings: the same parts as vertex ranges of the rings' buffer.
-  const ringed = L.buildLayer({ ...base, display: { shiftSlice: true, shiftWindow: 2, shiftMinSlice: 0, shiftRings: true } });
+  const ringed = L.buildLayer({ ...base, display: { shiftSlice: true, shiftSliceSpan: 2, shiftMinSlice: 0, shiftRings: true } });
   const r = L.sliceTint(ringed, 14, { colors });
-  assert.equal(r.rings[1].count, S.RING_SEGMENTS * 2);
+  assert.equal(r.rings[2].count, S.RING_SEGMENTS * 2);
+  assert.equal(r.rings[0].first, 0);
+});
+
+test('sliceFade: the rest of the cell is faded past the slice\'s Z span, half a section out from its sections', () => {
+  const colors = { above: [1, 0, 0], on: [1, 1, 0], below: [0, 0, 1] };
+  const layer = L.buildLayer({ ...base, display: { shiftSlice: true, shiftSliceSpan: 2, shiftMinSlice: 0 } });
+  const f = L.sliceFade(layer, 14, colors);
+  close(f.lo, 12 * 0.07 - 0.035, 1e-9, 'lo');
+  close(f.hi, 16 * 0.07 + 0.035, 1e-9, 'hi');
+  assert.equal(f.outside, 0.05);
+  assert.deepEqual([f.above, f.below], [[1, 0, 0], [0, 0, 1]]);
+  const thin = L.sliceFade(L.buildLayer({ ...base, display: { shiftSlice: true, shiftOutside: 0.3 } }), 14, colors);
+  close(thin.hi - thin.lo, 0.07, 1e-9, 'one section thick');
+  assert.equal(thin.outside, 0.3);
+  // A cell on one section has no step to read: 70 nm.
+  const one = L.buildLayer({ ...base, nodes: [nodes[0]], display: { shiftSlice: true, shiftMinSlice: 0 } });
+  close(L.sliceFade(one, 10, colors).hi - L.sliceFade(one, 10, colors).lo, 0.07, 1e-9);
+  assert.equal(L.sliceFade(L.buildLayer(base), 14, colors), null, 'not in slice mode');
+  assert.equal(L.sliceFade(layer, null, colors), null, 'not placed yet');
 });
 
 test('syncSlice hands the renderer the plane\'s rect and color and the tint; the selection pales the plane', async () => {
-  const { controller, renderer, records } = makeController({ Renderer: SliceRenderer, displayFor: { shiftWindow: 2 } });
+  const { controller, renderer, records } = makeController({ Renderer: SliceRenderer, displayFor: { shiftSliceSpan: 2 } });
   const record = records.get('A/1');
   await controller.refresh(record);
   const center = controller.centerOf(record);
@@ -747,10 +794,29 @@ test('syncSlice hands the renderer the plane\'s rect and color and the tint; the
   controller.onKey({ key: '[' });
   assert.equal(renderer.tints.get('A/1').parts.find((p) => p.side === 'on').first,
     [...controller.layerOf(record).sel.section].indexOf(center - 1));
-  // Out of slice mode the tint is taken away.
+  // The rest of the cell follows the slice: faded past its sections, moved with each step.
+  const fade = renderer.fades.get('A/1');
+  close(fade.hi - fade.lo, (2 * 2 + 1) * 0.07, 1e-9, 'Slice ±2: five sections thick');
+  close((fade.lo + fade.hi) / 2, (center - 1) * 0.07, 1e-9, 'around the stepped center');
+  assert.equal(fade.outside, 0.05);
+  // A slider drag draws the layer again before its center is placed: the fade is kept, never dropped.
+  const seen = [];
+  const set = renderer.setSliceFade.bind(renderer);
+  renderer.setSliceFade = (key, spec) => { seen.push(spec); set(key, spec); };
+  controller.live(record, { shiftOutside: 0.2 });
+  assert.ok(seen.length && seen.every((f) => f !== null), 'no null in between');
+  assert.equal(renderer.fades.get('A/1').outside, 0.2);
+  // Out of slice mode the tint and the fade are taken away; and when the layer goes.
   record.display = { ...record.display, shiftSlice: false };
   await controller.refresh(record);
   assert.equal(renderer.tints.get('A/1'), null);
+  assert.equal(renderer.fades.get('A/1'), null);
+  record.display = { ...record.display, shiftSlice: true };
+  await controller.refresh(record);
+  assert.ok(renderer.fades.get('A/1'));
+  record.display = { ...record.display, showShift: false };
+  await controller.refresh(record);
+  assert.equal(renderer.fades.get('A/1'), null);
 });
 
 // -- the Correction log's pulls in the cell panel ------------------------------------------------------

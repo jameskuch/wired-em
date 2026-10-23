@@ -2158,7 +2158,8 @@ test('shift: a slice key on any pane steps the shared slice in every ticked pane
   await until(() => shiftCalls(view, 0).length && shiftCalls(view, 2).length, 'the layers');
   // Not in slice mode: the keys are the camera's.
   assert.equal(view.panes[1].renderer.onSliceStep({ key: ']' }), false);
-  view._shiftModel().set({ shiftSlice: true, shiftWindow: 0 });
+  // Outside the slice at 0: only the slice is drawn, so the draw range is the window's.
+  view._shiftModel().set({ shiftSlice: true, shiftSliceSpan: 0, shiftOutside: 0 });
   await until(() => shiftCalls(view, 0).length === 2 && shiftCalls(view, 2).length === 2, 'the slice');
   // It starts on the strongest shift: section 15 (index 5), a window of that section alone.
   assert.equal(view._shiftCenter(), 15);

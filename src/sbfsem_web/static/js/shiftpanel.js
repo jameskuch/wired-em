@@ -11,8 +11,8 @@
 // serve a cell of the main window and the compare panes.
 
 import {
-  PAIR_LABELS, SHIFT_FIGURES, SHIFT_HELP, SHIFT_PAIRS, SCALE_MAX, SCALE_MIN, coherentChipText,
-  dotData, normalizeShiftDisplay, summaryText, thresholdFor, verdictLine,
+  PAIR_LABELS, SHIFT_FIGURES, SHIFT_HELP, SHIFT_PAIRS, SCALE_MAX, SCALE_MIN, SPAN_MAX, SPAN_SLIDER,
+  coherentChipText, dotData, normalizeShiftDisplay, summaryText, thresholdFor, verdictLine,
 } from './shifts.js';
 import { WIDTH_MAX, WIDTH_MIN } from './fatlines.js';
 import { shiftChip } from './shiftlayer.js';
@@ -426,18 +426,19 @@ export function buildShiftPanel(body, record, ctx) {
   let chart = null;
   let chips = null;
   if (display.shiftSlice) {
-    helpFor(slider(body, 'Sections each side', {
-      key: `${record.key}:shiftwindow`, min: 0, max: 50, step: 1,
-      value: Math.min(50, display.shiftWindow), decimals: 0,
-      onLive: (v) => ctx.live({ shiftWindow: Math.round(v) }),
-      onSettle: (v) => ctx.apply({ shiftWindow: Math.round(v) }),
-    }), 'window');
-    helpFor(slider(body, 'Off the plane', {
-      key: `${record.key}:shiftslicedim`, min: 0, max: 1, step: 0.02,
-      value: display.shiftSliceDim, decimals: 2,
-      onLive: (v) => ctx.live({ shiftSliceDim: v }),
-      onSettle: (v) => ctx.apply({ shiftSliceDim: v }),
-    }), 'sliceDim');
+    // One rule (2026-10-22): the slice at full strength, everything else of the cell at Outside the slice.
+    helpFor(slider(body, 'Slice ± sections', {
+      key: `${record.key}:shiftslicespan`, min: 0, max: SPAN_SLIDER, step: 1,
+      value: Math.min(SPAN_SLIDER, display.shiftSliceSpan), decimals: 0,
+      onLive: (v) => ctx.live({ shiftSliceSpan: Math.round(v) }),
+      onSettle: (v) => ctx.apply({ shiftSliceSpan: Math.round(v) }),
+    }), 'span');
+    helpFor(slider(body, 'Outside the slice', {
+      key: `${record.key}:shiftoutside`, min: 0, max: 1, step: 0.01,
+      value: display.shiftOutside, decimals: 2,
+      onLive: (v) => ctx.live({ shiftOutside: v }),
+      onSettle: (v) => ctx.apply({ shiftOutside: v }),
+    }), 'outside');
 
     const center = ctx.center();
     const section = slider(body, 'Section', {
@@ -501,12 +502,15 @@ export function buildShiftPanel(body, record, ctx) {
     onLive: (v) => ctx.live({ shiftOpacity: v }),
     onSettle: (v) => ctx.apply({ shiftOpacity: v }),
   }), 'opacity');
-  helpFor(slider(body, 'Others when selected', {
-    key: `${record.key}:shiftfocusdim`, min: 0, max: 1, step: 0.05,
-    value: display.shiftFocusDim, decimals: 2,
-    onLive: (v) => ctx.live({ shiftFocusDim: v }),
-    onSettle: (v) => ctx.apply({ shiftFocusDim: v }),
-  }), 'focusDim');
+  // A slice has its own emphasis (Outside the slice): the selection's fade is not used there.
+  if (!display.shiftSlice) {
+    helpFor(slider(body, 'Others when selected', {
+      key: `${record.key}:shiftfocusdim`, min: 0, max: 1, step: 0.05,
+      value: display.shiftFocusDim, decimals: 2,
+      onLive: (v) => ctx.live({ shiftFocusDim: v }),
+      onSettle: (v) => ctx.apply({ shiftFocusDim: v }),
+    }), 'focusDim');
+  }
 
   const update = (next, center) => {
     const l = next || ctx.layer();
@@ -519,7 +523,7 @@ export function buildShiftPanel(body, record, ctx) {
       sectionRange.value = String(c);
     }
     if (chart) {
-      const half = l.display.shiftWindow;
+      const half = l.display.shiftSliceSpan;
       chart.update(l.field, {
         window: Number.isFinite(c) ? { from: c - half, to: c + half } : null,
         center: c,
@@ -627,10 +631,10 @@ export function buildShiftStrip(host, model) {
   const sliceLabel = document.createElement('label');
   sliceLabel.className = 'check';
   sliceLabel.append(sliceBox, document.createTextNode(' One slice ±'));
-  const half = number({ min: 0, max: 50, step: 1, className: 'shift-num narrow' });
+  const half = number({ min: 0, max: SPAN_MAX, step: 1, className: 'shift-num narrow' });
   half.addEventListener('change', () => {
     const v = Math.round(Number(half.value));
-    if (Number.isFinite(v) && v >= 0) model.set({ shiftWindow: Math.min(50, v) });
+    if (Number.isFinite(v) && v >= 0) model.set({ shiftSliceSpan: Math.min(SPAN_MAX, v) });
     else update();
   });
   sliceLabel.append(half);
@@ -694,7 +698,7 @@ export function buildShiftStrip(host, model) {
     fit.disabled = d.shiftScale === null;
     if (document.activeElement !== width) width.value = String(d.shiftWidth);
     sliceBox.checked = d.shiftSlice;
-    if (document.activeElement !== half) half.value = String(d.shiftWindow);
+    if (document.activeElement !== half) half.value = String(d.shiftSliceSpan);
     color.value = d.shiftColor;
     maxLabel.hidden = d.shiftColor !== 'magnitude';
     if (document.activeElement !== max) max.value = d.shiftColorMax ? String(d.shiftColorMax) : '';

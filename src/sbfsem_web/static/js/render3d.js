@@ -276,6 +276,8 @@ export class Renderer3D {
     this._nudges = new Map();  // marker slot -> [dx, dy, dz] um: a move not yet applied, drawn ahead
     this.volumeOffsets = new Map(); // source -> THREE.Vector3, microns
     this.zHide = new Map();    // key -> { min, max }: the Z range shown, volume microns
+    // key -> { lo, hi, outside, above, below }: One slice at a time's fade (setSliceFade)
+    this.sliceFade = new Map();
     this._order = new Map();   // key -> draw-order index of a surface layer (setLayerOrder)
     this._hiddenCells = new Set(); // keys setStyle({ visible: false }) hid
     this._paused = false;      // setPaused: draw nothing until told to carry on
@@ -1524,7 +1526,9 @@ export class Renderer3D {
    * Show only a range of the layer (slice mode): `arrows` and `rings` are
    * `{ first, count }` in the vertices of their line buffers (shifts.js's
    * layout), mapped here onto the wide ones.  A draw range, so stepping a slice
-   * uploads nothing.  `null` shows everything.
+   * uploads nothing.  `pick`, the same for what the right-click menu measures to
+   * when it is less than what is drawn (the slice, not the faded rest).  `null`
+   * shows everything.
    */
   setShiftWindow(key, range) {
     const group = this.shifts.get(key);
@@ -1538,7 +1542,8 @@ export class Renderer3D {
       else child.geometry.setDrawRange(0, Infinity);
       const pick = child.userData.pick;
       if (pick) {
-        const own = role === 'arrows' ? shaftRange(spec) : spec;
+        const picked = range?.pick?.[role] ?? spec;
+        const own = role === 'arrows' ? shaftRange(picked) : picked;
         if (own) pick.setDrawRange(own.first, own.count);
         else pick.setDrawRange(0, Infinity);
       }
@@ -1589,8 +1594,8 @@ export class Renderer3D {
   /**
    * Color a slice's window (shiftlayer.js `sliceTint`): for each part, its marks' arrows
    * (and rings) in one color at one alpha, written into the wide lines' color and
-   * alpha; `null` gives every mark back its own color at full strength.  Only the
-   * window is written, and only it is drawn.
+   * alpha; `null` gives every mark back its own color at full strength.  The parts
+   * cover what is drawn: the slice and, when it is not hidden, the faded rest.
    */
   setShiftSliceTint(key, tint) {
     const group = this.shifts.get(key);
@@ -2229,8 +2234,8 @@ export class Renderer3D {
     for (const object of this.highlightGroup.children) {
       if (object.userData.source === source) this._placeHighlight(object);
     }
-    // The Z-range planes are in world space and move with the volume.
-    for (const key of this.zHide.keys()) this._applyZHide(key);
+    // The Z-range and slice planes are in world space and move with the volume.
+    for (const key of this._clippedKeys()) this._applyZHide(key);
     this._recomputeBounds();
   }
 
@@ -2315,7 +2320,8 @@ export class Renderer3D {
       // Only the surface takes the cell's color and opacity.
       if (map !== this.meshes) continue;
       object.traverse((child) => {
-        if (!child.material) return;
+        // A slice's faded copy keeps its own color and strength (sliceGhosts).
+        if (!child.material || child.userData.sliceGhost) return;
         // The wireframe keeps its own color and opacity (a custom line color
         // must survive a cell recolor); app-level code repaints it when it is
         // set to follow the cell.
@@ -2791,7 +2797,8 @@ export class Renderer3D {
     // A mirrored scale inverts every triangle's winding; two-sided materials
     // already draw both faces, but the lighting normals have to follow.
     this.group.updateMatrixWorld(true);
-    for (const key of this.zHide.keys()) this._applyZHide(key);
+    // A slice's red side and blue side trade places with the rest.
+    for (const key of this._clippedKeys()) this._applyZHide(key);
     this._recomputeBounds();
     // Red is the marker drawn above the yellow one and blue the one below: a
     // mirrored Z puts each on the other side, so they trade colors.
@@ -3148,12 +3155,24 @@ export class Renderer3D {
 
   _applyZHide(key) {
     const planes = this._zPlanes(key);
-    const clip = (object) => object?.traverse((child) => {
-      const materials = Array.isArray(child.material) ? child.material : [child.material];
-      for (const material of materials) if (material) material.clippingPlanes = planes;
-    });
+    const slice = this._slicePlanes(key);
+    // The shift layer colors its own marks (setShiftSliceTint); GraphApp, the points and
+    // lines layers and the manual moves are not the cell's annotations.
+    const faded = slice
+      ? new Set([this.meshes, this.skeletons, this.synapses, this.discs, this.annoWires]) : null;
+    const clip = (object, fade) => {
+      if (!object) return;
+      const drawn = [];
+      object.traverse((child) => { if (!child.userData.sliceGhost) drawn.push(child); });
+      for (const child of drawn) {
+        const own = fade ? [...(planes || []), ...fade.inside] : planes;
+        const materials = Array.isArray(child.material) ? child.material : [child.material];
+        for (const material of materials) if (material) material.clippingPlanes = own;
+        if (child.material) sliceGhosts(child, fade, planes);
+      }
+    };
     for (const map of this._cellLayers()) {
-      clip(map.get(key));
+      clip(map.get(key), faded?.has(map) ? slice : null);
     }
     // A highlighted wireframe or synapse set is the cell's geometry again and
     // is cut with it; a highlighted annotation or branch is the thing a range
@@ -3161,6 +3180,52 @@ export class Renderer3D {
     for (const object of this.highlightGroup.children) {
       if (object.userData.key === key && object.userData.clipped) clip(object);
     }
+  }
+
+  /** The cells whose materials carry planes of their own: a Z range, a slice, or both. */
+  _clippedKeys() {
+    return new Set([...this.zHide.keys(), ...this.sliceFade.keys()]);
+  }
+
+  /**
+   * One slice at a time for the rest of a cell (2026-10-22): its surface, rings,
+   * annotation wireframe, skeleton and synapses drawn as they are only between `lo`
+   * and `hi` (the slice, volume microns, the cell's own frame), and outside it at
+   * `outside` of their opacity, in `above` over the slice and `below` under it
+   * (linear RGB: the red and blue markers' colors, as the shift layer's marks are).
+   * Above is the view's, so Flip Z trades the sides.  0 hides what is outside.
+   * `null` gives the cell back whole.  shiftlayer.js `sliceFade` makes the spec.
+   */
+  setSliceFade(key, spec = null) {
+    const held = this.sliceFade.get(key);
+    if (!spec && !held) return;
+    if (spec && held && ['lo', 'hi', 'outside'].every((k) => held[k] === spec[k])
+        && ['above', 'below'].every((k) => String(held[k]) === String(spec[k]))) return;
+    if (spec) this.sliceFade.set(key, { ...spec });
+    else this.sliceFade.delete(key);
+    this._applyZHide(key);
+  }
+
+  /**
+   * The world planes of `key`'s slice: `inside` keeps the slice, `higher` and
+   * `lower` the sections past it with the color each side is drawn in; null with
+   * no slice.  World z = f * (z + shift), as for the Z range.
+   */
+  _slicePlanes(key) {
+    const fade = this.sliceFade.get(key);
+    if (!fade) return null;
+    const source = this._sourceOf(key);
+    const shift = (source && this.volumeOffsets.get(source)?.z) || 0;
+    const f = this.flipZ ? -1 : 1;
+    const atLeast = (z) => new THREE.Plane(new THREE.Vector3(0, 0, f), -(z + shift));
+    const atMost = (z) => new THREE.Plane(new THREE.Vector3(0, 0, -f), z + shift);
+    const [higher, lower] = this.flipZ ? [fade.below, fade.above] : [fade.above, fade.below];
+    return {
+      outside: fade.outside,
+      inside: [atLeast(fade.lo), atMost(fade.hi)],
+      higher: { plane: atLeast(fade.hi), rgb: higher },
+      lower: { plane: atMost(fade.lo), rgb: lower },
+    };
   }
 
   /** Whether a world point on `key` lies inside the Z range shown for it. */
@@ -5353,6 +5418,61 @@ function ownerKey(object) {
  * textures).  A Sprite's quad is one geometry three.js shares among every
  * sprite on the page, so it is left to three.
  */
+/**
+ * The faded copies of one drawn part of a cell, above and below a slice
+ * (Renderer3D.setSliceFade): two children of it over its own geometry, so they
+ * follow its visibility and place, with a material of their own in the side's color
+ * at `outside` of the part's opacity, cut to that side by a plane (and by the cell's
+ * Z range, `zPlanes`).  Never picked, never writing depth.  Their color and strength
+ * are set again before each draw, so the part's own style setters (opacity, color)
+ * reach them and cannot write over them.  `slice` null, or nothing outside, takes them
+ * away.  A part drawn by a shader of its own (the wide lines) is only cut to the slice.
+ */
+function sliceGhosts(child, slice, zPlanes) {
+  const held = child.children.filter((c) => c.userData.sliceGhost);
+  const material = child.material;
+  const able = (child.isMesh || child.isLine || child.isPoints) && !child.isInstancedMesh
+    && material && !Array.isArray(material) && !material.isShaderMaterial;
+  if (!slice || !(slice.outside > 0) || !able) {
+    for (const ghost of held) {
+      child.remove(ghost);
+      ghost.material.dispose();   // the geometry is the part's own
+    }
+    return;
+  }
+  for (const side of ['higher', 'lower']) {
+    let ghost = held.find((g) => g.userData.sliceGhost === side);
+    if (!ghost) {
+      const faint = material.clone();
+      faint.vertexColors = false;
+      faint.transparent = true;
+      faint.depthWrite = false;
+      if ('transmission' in faint) faint.transmission = 0;
+      faint.needsUpdate = true;
+      ghost = new child.constructor(child.geometry, faint);
+      ghost.userData.sliceGhost = side;
+      ghost.raycast = () => {};
+      ghost.layers.mask = child.layers.mask;
+      ghost.frustumCulled = child.frustumCulled;
+      ghost.onBeforeRender = () => {
+        const { outside, rgb } = ghost.userData.fade;
+        const own = child.material;
+        faint.opacity = (own.transparent ? own.opacity : 1) * outside;
+        faint.color?.setRGB(rgb[0], rgb[1], rgb[2]);
+        faint.emissive?.setRGB(rgb[0], rgb[1], rgb[2]);
+        faint.transparent = true;
+        faint.depthWrite = false;
+        faint.depthTest = own.depthTest;   // the rings' Through the surface
+        if ('wireframe' in own) faint.wireframe = own.wireframe;
+      };
+      child.add(ghost);
+    }
+    ghost.renderOrder = child.renderOrder;
+    ghost.userData.fade = { outside: slice.outside, rgb: slice[side].rgb };
+    ghost.material.clippingPlanes = [...(zPlanes || []), slice[side].plane];
+  }
+}
+
 function releaseNode(node) {
   if (node.geometry && !node.isSprite) node.geometry.dispose();
   for (const material of Array.isArray(node.material) ? node.material : [node.material]) {

@@ -197,17 +197,19 @@ export function buildLayer({
     plane: planeColor(dark),
   });
 
-  /** The window of sections `center - half .. center + half`, as draw ranges. */
+  /**
+   * The slice at `center`: `marks`, those of the sections `center - span .. center +
+   * span`, and the draw ranges -- every mark while Outside the slice draws the rest
+   * faint, else the slice alone -- with `pick`, the slice's, for the right-click menu.
+   */
   layer.windowAt = (center) => {
-    const marks = windowRange(sel, center, d.shiftWindow);
-    return {
-      marks,
-      shown: marks.count,
-      ranges: {
-        arrows: arrows ? { first: marks.first * ARROW_VERTS, count: marks.count * ARROW_VERTS } : null,
-        rings: rings ? vertexRange(rings.offsets, marks) : null,
-      },
-    };
+    const marks = windowRange(sel, center, d.shiftSliceSpan);
+    const drawn = d.shiftOutside > 0 ? { first: 0, count: sel.n } : marks;
+    const ranges = (m) => ({
+      arrows: arrows ? { first: m.first * ARROW_VERTS, count: m.count * ARROW_VERTS } : null,
+      rings: rings ? vertexRange(rings.offsets, m) : null,
+    });
+    return { marks, shown: marks.count, ranges: { ...ranges(drawn), pick: ranges(marks) } };
   };
 
   layer.zOf = (section) => zOfSection(field, section);
@@ -404,6 +406,8 @@ export const PLANE_MARGIN = 0.05;
 export const PLANE_PAD_UM = 0.5;
 /** The plane is at least this wide, so one small annotation still has a plane around it. */
 export const PLANE_MIN_UM = 3;
+/** A plane on a section with nothing on it frames the sections this far either side (or the slice's). */
+export const PLANE_REACH = 5;
 
 const lowerBound = (a, v) => {
   let lo = 0;
@@ -419,8 +423,9 @@ const lowerBound = (a, v) => {
  * The slice plane at section `center`, sized to what is on it (2026-10-20: the
  * plane over the whole cell did not fit the view): `{ x0, y0, x1, y1 }` around the
  * annotations of that section (`extents`, `sectionExtents`) and the arrows drawn on
- * it, tails included, with a margin; around the window's annotations when that
- * section has none; null when the window has nothing either.
+ * it, tails included, with a margin; around those of the sections PLANE_REACH either
+ * side (or the slice's, if thicker) when that section has none; null when they have
+ * nothing either.
  */
 export function planeRect(layer, center, extents = null) {
   if (!layer || layer.empty || !Number.isFinite(center)) return null;
@@ -447,7 +452,7 @@ export function planeRect(layer, center, extents = null) {
   };
   take(center, center);
   if (!box) {
-    const half = layer.display.shiftWindow;
+    const half = Math.max(layer.display.shiftSliceSpan, PLANE_REACH);
     take(center - half, center + half);
   }
   if (!box) return null;
@@ -470,41 +475,65 @@ export function towardWhite(rgb, share) {
 export const HYBRID_WHITE = 0.55;
 
 /**
- * The colors of a slice (2026-10-20): the marks on the plane's section in the
- * selection's yellow at full strength, those above it in the red marker's color and
- * those below in the blue one's, both at `shiftSliceDim` of their opacity (almost
- * nothing by default).  "Above" is the upright view's: higher sections, unless
- * `flipZ`.  With an annotation of the cell selected (`hybrid`), the plane's marks are
- * the yellow taken toward white, so the selected one's own arrow (full yellow, wider,
- * edged) stays apart from the rest of its section.
+ * The colors of a slice (2026-10-20, one rule since 2026-10-22): the marks of the
+ * plane's section in the selection's yellow, those of the sections above it in the
+ * red marker's color and those below in the blue one's; at full strength inside the
+ * slice (the plane's section and Slice ± sections either side, `shiftSliceSpan`)
+ * and at `shiftOutside` of their opacity past it.  "Above" is the upright view's:
+ * higher sections, unless `flipZ`.  With an annotation of the cell selected
+ * (`hybrid`), the plane's marks are the yellow taken toward white, so the selected
+ * one's own arrow (full yellow, wider, edged) stays apart from the rest of its section.
  *
  * `colors`: `{ above, on, below }` linear RGB (the renderer's marker colors).  Returns
- * `{ parts: [{ side, first, count, rgb, alpha }], rings }`: mark ranges of the window
- * in draw order (lower sections, the plane, higher sections), and the same as
- * vertex ranges of the rings' buffer when the layer draws rings.  Null outside slice
- * mode.
+ * `{ parts: [{ side, inside, first, count, rgb, alpha }], rings }`: every mark of the
+ * layer in five ranges, in draw order (lower sections past the slice, lower ones in
+ * it, the plane's, higher ones in it, higher ones past it), and the same as vertex
+ * ranges of the rings' buffer when the layer draws rings.  Null outside slice mode.
  */
 export function sliceTint(layer, center, { colors, flipZ = false, hybrid = false } = {}) {
   if (!layer || layer.empty || !layer.slice || !Number.isFinite(center) || !colors) return null;
-  const { marks } = layer.windowAt(center);
   const { sel } = layer;
-  const lo = marks.first;
-  const hi = marks.first + marks.count;
-  const a = Math.min(Math.max(lowerBound(sel.section, center), lo), hi);
-  const b = Math.min(Math.max(lowerBound(sel.section, center + 1), a), hi);
-  const off = normalizeShiftDisplay(layer.display).shiftSliceDim;
+  const d = normalizeShiftDisplay(layer.display);
+  const span = d.shiftSliceSpan;
+  const at = (section) => lowerBound(sel.section, section);
+  const [s0, p0, p1, s1] = [at(center - span), at(center), at(center + 1), at(center + span + 1)];
   const lower = flipZ ? 'above' : 'below';
   const higher = flipZ ? 'below' : 'above';
   const on = hybrid ? towardWhite(colors.on, HYBRID_WHITE) : colors.on;
+  const part = (side, inside, first, end, rgb) => ({
+    side, inside, first, count: end - first, rgb, alpha: inside ? 1 : d.shiftOutside,
+  });
   const parts = [
-    { side: lower, first: lo, count: a - lo, rgb: colors[lower], alpha: off },
-    { side: 'on', first: a, count: b - a, rgb: on, alpha: 1 },
-    { side: higher, first: b, count: hi - b, rgb: colors[higher], alpha: off },
+    part(lower, false, 0, s0, colors[lower]),
+    part(lower, true, s0, p0, colors[lower]),
+    part('on', true, p0, p1, on),
+    part(higher, true, p1, s1, colors[higher]),
+    part(higher, false, s1, sel.n, colors[higher]),
   ];
   const rings = layer.rings
     ? parts.map((p) => ({ ...p, ...vertexRange(layer.rings.offsets, { first: p.first, count: p.count }) }))
     : null;
   return { parts, rings };
+}
+
+/**
+ * The rest of the cell under a slice (Renderer3D.setSliceFade): the slice's Z span,
+ * from half a section below its lowest section to half a section above its highest
+ * (the cell's own microns), what is outside it drawn at `shiftOutside` in the red and
+ * blue markers' colors.  `colors` as `sliceTint` takes them.  Null outside slice mode.
+ */
+export function sliceFade(layer, center, colors) {
+  if (!layer || layer.empty || !layer.slice || !Number.isFinite(center) || !colors) return null;
+  const d = normalizeShiftDisplay(layer.display);
+  const a = layer.zOf(center - d.shiftSliceSpan);
+  const b = layer.zOf(center + d.shiftSliceSpan);
+  // One section's thickness; a cell on one section has no step to read, so 70 nm.
+  const step = Math.abs(layer.field.zMap.dz);
+  const half = (step > 0 ? step : 0.07) / 2;
+  return {
+    lo: Math.min(a, b) - half, hi: Math.max(a, b) + half, outside: d.shiftOutside,
+    above: colors.above, below: colors.below,
+  };
 }
 
 // -- drawing a layer ----------------------------------------------------------------------------------
@@ -517,6 +546,7 @@ export function sliceTint(layer, center, { colors, flipZ = false, hybrid = false
 export function drawLayer(renderer, key, layer, center = null) {
   if (!layer || layer.empty || !(layer.arrows || layer.rings)) {
     renderer.removeShifts(key);
+    renderer.setSliceFade?.(key, null);
     return false;
   }
   renderer.setShifts(key, layer.forRenderer, {
@@ -527,10 +557,13 @@ export function drawLayer(renderer, key, layer, center = null) {
 }
 
 /**
- * Move a drawn layer's window and plane to `center`: a draw range, the plane's place
- * and size, and the window's colors (red above the plane, yellow on it, blue below;
- * `sliceTint`).  `hybrid`: an annotation of the cell is selected.  The colors come from
- * the renderer (`sliceColors`), so its marker colors and the light viewport hold.
+ * Move a drawn layer's slice to `center`: the draw ranges, the plane's place and
+ * size, the marks' colors (red above the plane, yellow on it, blue below, faint past
+ * the slice; `sliceTint`) and the rest of the cell faded past the slice
+ * (`sliceFade`).  `hybrid`: an annotation of the cell is selected.  The colors come
+ * from the renderer (`sliceColors`), so its marker colors and the light viewport hold.
+ * A layer in slice mode whose center is not known yet keeps the cell's fade: it is
+ * placed a moment later (`drawLayer` before the controller's centers).
  */
 export function syncSlice(renderer, key, layer, center, { hybrid = false } = {}) {
   if (!layer || layer.empty) return;
@@ -539,10 +572,12 @@ export function syncSlice(renderer, key, layer, center, { hybrid = false } = {})
     const colors = renderer.sliceColors?.(key) ?? null;
     renderer.setShiftPlane(key, layer.zOf(center), layer.planeAt?.(center) ?? null, colors?.on ?? null);
     renderer.setShiftSliceTint?.(key, sliceTint(layer, center, { colors, flipZ: !!renderer.flipZ, hybrid }));
+    renderer.setSliceFade?.(key, sliceFade(layer, center, colors));
   } else {
     renderer.setShiftWindow(key, null);
     renderer.setShiftPlane(key, null);
     renderer.setShiftSliceTint?.(key, null);
+    if (!layer.slice) renderer.setSliceFade?.(key, null);
   }
 }
 
@@ -639,7 +674,7 @@ export function chipSummary(entries, centers, volumeTag = (source) => source) {
       slice: e.layer.slice,
       section: center,
       z: e.layer.slice && Number.isFinite(center) ? e.layer.zOf(center) : 0,
-      half: e.layer.display.shiftWindow,
+      half: e.layer.display.shiftSliceSpan,
       shown: shown(e),
       truncated: e.layer.sel.truncated && !e.layer.slice,
     });
@@ -658,7 +693,7 @@ export function chipSummary(entries, centers, volumeTag = (source) => source) {
     for (const e of slicing) {
       if (seen.has(e.source)) continue;
       seen.add(e.source);
-      parts.push(`section ${centers.get(e.source)} ±${e.layer.display.shiftWindow}`);
+      parts.push(`section ${centers.get(e.source)} ±${e.layer.display.shiftSliceSpan}`);
     }
   }
   if (slicing.length < live.length) parts.push('all sections');

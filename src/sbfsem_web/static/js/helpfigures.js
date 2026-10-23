@@ -291,22 +291,32 @@ function threshold() {
   );
 }
 
-/** "One slice at a time": a band of sections, the arrows on it, the rest left out. */
+/** The marker colors a slice is drawn in (render3d.js HIGHLIGHT, ABOVE_ and BELOW_HIGHLIGHT). */
+const SLICE_ON = '#ffe14d';
+const SLICE_ABOVE = '#ff5c5c';
+const SLICE_BELOW = '#8fd0ff';
+
+/**
+ * "One slice at a time" (2026-10-22): the plane's section in yellow and Slice ± sections
+ * either side, red above and blue below, at full strength; the rest of the cell faint
+ * in the same red and blue (Outside the slice).
+ */
 function slice() {
-  const ys = Array.from({ length: 13 }, (_, i) => 14 + i * 7.5);
-  const center = 6;
-  const half = 2;
+  const ys = Array.from({ length: 11 }, (_, i) => 18 + i * 8.5);
+  const center = 5;
+  const half = 1;
   const parts = [];
   ys.forEach((y, i) => {
     const inBand = Math.abs(i - center) <= half;
+    // The view's up is the higher section: the lines are drawn top down.
+    const color = i === center ? SLICE_ON : (i < center ? SLICE_ABOVE : SLICE_BELOW);
     parts.push(line(26, y, 196, y, '', { stroke: inBand ? VP_INK : VP_MUTED, 'stroke-width': i === center ? 1.6 : 0.8,
       'stroke-opacity': inBand ? 0.9 : 0.4 }));
-    if (inBand) {
-      [60, 112, 160].forEach((x, k) => {
-        const len = 10 + ((i * 7 + k * 5) % 9);
-        parts.push(arrow(x, y, x + len, y - 0.1, { stroke: hex(rampSample(RAMP, len / 20)), width: 2, head: 6 }));
-      });
-    }
+    [60, 112, 160].forEach((x, k) => {
+      const len = 10 + ((i * 7 + k * 5) % 9);
+      parts.push(g({ opacity: inBand ? 1 : 0.22 },
+        arrow(x, y, x + len, y - 0.1, { stroke: color, width: 2, head: 6 })));
+    });
   });
   const top = ys[center - half] - 3.5;
   const bottom = ys[center + half] + 3.5;
@@ -316,7 +326,9 @@ function slice() {
     parts,
     path(`M 210 ${r1(top)} L 214 ${r1(top)} L 214 ${r1(bottom)} L 210 ${r1(bottom)}`, 'hf-muted'),
     label(220, ys[center] - 2, 'the slice'),
-    small(220, ys[center] + 10, '± N sections'),
+    small(220, ys[center] + 10, 'Slice ± sections'),
+    small(220, ys[1] + 2, 'above: faint red'),
+    small(220, ys[9] + 2, 'below: faint blue'),
     small(16, 120, 'side on: a line per section'),
     small(290, 120, '[ ] ↑ ↓ step it', 'end'),
   );

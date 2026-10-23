@@ -103,12 +103,15 @@ test('with a real layer: every window maps onto the wide buffers exactly', () =>
   const nodes = Array.from({ length: 30 }, (_, i) => node(i + 1, 100 + (i % 10), i * 3, [0.3 + 0.01 * i, 0.1]));
   const summary = { section_correction: { requested: true, applied: true, n_moved: 30 } };
   const layer = L.buildLayer({
-    nodes, summary, display: { shiftSlice: true, shiftWindow: 1, shiftRings: true, shiftMinSlice: 0 },
+    nodes, summary, display: { shiftSlice: true, shiftSliceSpan: 1, shiftRings: true, shiftMinSlice: 0 },
   });
   const fatArrows = F.fatArrows(layer.arrows.positions, layer.arrows.colors);
   const fatRings = F.fatSegments(layer.rings.positions, layer.rings.colors);
   for (const center of [99, 100, 104, 109, 110]) {
-    const { ranges, shown } = layer.windowAt(center);
+    const { ranges: drawn, shown } = layer.windowAt(center);
+    // Drawn: every mark (the rest faint, Outside the slice); the slice's own are what is picked.
+    assert.equal(F.fatRange(drawn.arrows, 'arrows').count, layer.sel.n * F.ARROW_FAT_VERTS);
+    const ranges = drawn.pick;
     const a = F.fatRange(ranges.arrows, 'arrows');
     assert.equal(a.count, shown * F.ARROW_FAT_VERTS, `center ${center}: ${shown} arrows`);
     assert.equal(a.first % F.ARROW_FAT_VERTS, 0);

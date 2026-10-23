@@ -45,8 +45,13 @@ export const SHIFT_DEFAULTS = Object.freeze({
   shiftMin: 0.25,
   shiftMinSlice: 0.05,
   shiftSlice: false,
-  // The slice shows the center section +/- this many sections.
-  shiftWindow: 5,
+  // One slice at a time (2026-10-22): the slice is the plane's section and this many
+  // sections either side of it, drawn at full strength; everything else of the cell
+  // (its other arrows and rings, its surface, rings, skeleton and synapses) at
+  // `shiftOutside` of its opacity, red above the slice and blue below.  Replaces
+  // shiftWindow (the sections drawn at all) and shiftSliceDim (the strength of those
+  // off the plane), whose two meanings overlapped.
+  shiftSliceSpan: 0,
   shiftColor: 'magnitude',
   // "Full color at", um; null = Auto (the 95th percentile of the moved).
   shiftColorMax: null,
@@ -59,9 +64,9 @@ export const SHIFT_DEFAULTS = Object.freeze({
   // this share of its opacity: 0 hides them, 1 leaves them as they are.  Almost
   // nothing by default (2026-10-20: "deemphasis ... to almost nothing").
   shiftFocusDim: 0.06,
-  // One slice at a time: the marks above and below the plane's section (red and
-  // blue) at this share of their opacity; those on it (yellow) at full strength.
-  shiftSliceDim: 0.06,
+  // One slice at a time: everything of the cell outside the slice at this share of its
+  // opacity; 0 hides it ("make opacity 0.05 what they currently are", 2026-10-22).
+  shiftOutside: 0.05,
 });
 
 export const SHIFT_KEYS = Object.freeze(Object.keys(SHIFT_DEFAULTS));
@@ -103,8 +108,9 @@ export const RING_SEGMENTS = 16;
 /** Vertices per arrow (LineSegments: shaft, two barbs). */
 export const ARROW_VERTS = 6;
 export const CLOSED_CURVE = 6;
-export const WINDOW_DEFAULT = 5;
-export const WINDOW_MAX = 1000;
+/** The most sections either side a slice takes in (the panel's slider stops at SPAN_SLIDER). */
+export const SPAN_MAX = 100;
+export const SPAN_SLIDER = 20;
 
 /** The ring polygon's unit circle, RING_SEGMENTS + 1 points (the last closes it). */
 const UNIT_COS = Float64Array.from({ length: RING_SEGMENTS + 1 }, (_, k) => Math.cos((2 * Math.PI * k) / RING_SEGMENTS));
@@ -142,9 +148,9 @@ export function normalizeShiftDisplay(saved) {
   num('shiftOpacity', 0.05, 1);
   num('shiftWidth', WIDTH_MIN, WIDTH_MAX);
   num('shiftFocusDim', 0, 1);
-  num('shiftSliceDim', 0, 1);
-  out.shiftWindow = isNumber(display.shiftWindow)
-    ? clamp(Math.round(display.shiftWindow), 0, WINDOW_MAX) : d.shiftWindow;
+  num('shiftOutside', 0, 1);
+  out.shiftSliceSpan = isNumber(display.shiftSliceSpan)
+    ? clamp(Math.round(display.shiftSliceSpan), 0, SPAN_MAX) : d.shiftSliceSpan;
   return out;
 }
 
@@ -855,7 +861,7 @@ export function summaryText(display, k = 1, pair = null) {
   const d = normalizeShiftDisplay(display);
   if (!d.showShift) return 'off';
   const parts = [PAIR_SHORT[pair || d.shiftPair]];
-  parts.push(d.shiftSlice ? `section ±${d.shiftWindow}` : 'all sections');
+  parts.push(d.shiftSlice ? `section ±${d.shiftSliceSpan}` : 'all sections');
   parts.push(`≥${thresholdFor(d)} µm`);
   const badge = badgeText(k);
   if (badge) parts.push(badge);
@@ -910,7 +916,8 @@ export const SHIFT_HELP = Object.freeze({
     + 'which way an arrow points reads at a glance.',
   rings: 'The annotation where it was: a ring of its own radius at the arrow\'s tail (a closed curve\'s '
     + 'traced outline, moved the same way), beside the real ring and joined to it by the arrow. At ×1 it '
-    + 'is the true earlier position; exaggerated, it goes back with the tail.',
+    + 'is the true earlier position; exaggerated, it goes back with the tail. Off, no ring is drawn, the '
+    + 'selected annotation\'s included (Arrows does the same for the arrows).',
   scale: 'Draws each tail (and each original ring) this many times farther from the head than the true '
     + 'move, so a tenth of a micrometer shows beside a 10 µm soma. The head never moves.\n\n'
     + 'Auto is 2.5 % of the cell\'s bounding box over the 95th percentile of its moves, between ×1 and '
@@ -921,13 +928,23 @@ export const SHIFT_HELP = Object.freeze({
   min: 'Hides moves shorter than this, in true micrometers, so the few that matter are not lost among '
     + 'thousands of tiny ones. Every section and One slice keep a value each (0.25 and 0.05 µm to start). '
     + 'With every section shown, at most the 2,000 longest are drawn.',
-  slice: 'Shows only one section and the sections either side of it, with a faint plane at that section. '
-    + 'Looked at down Z (Look down Z), it is the two-dimensional field of moves on those sections.\n\n'
+  slice: 'One rule for the whole cell: the slice (a section, with a faint plane at it, and Slice ± sections '
+    + 'either side) is drawn at full strength, and everything else of the cell -- the other '
+    + 'arrows and rings, the surface, the annotation rings, the skeleton -- at Outside the slice of its '
+    + 'opacity, in red above the slice and blue below (the red and blue markers\' colors; Flip Z trades '
+    + 'them). The arrows of the plane\'s own section are yellow. Looked at down Z (Look down Z), it is the '
+    + 'two-dimensional field of moves on that section.\n\n'
     + 'Step it with ↑ and ↓ (while no annotation is selected), [ and ], or PageUp and PageDown; Shift, '
     + 'PageUp and PageDown step ten, Home and End go to the first and last section with a shown arrow. '
     + 'The camera never moves.',
-  window: 'How many sections either side of the slice are shown: a single section holds only two or '
-    + 'three annotations of a typical cell, so a few sections each side make a readable field.',
+  span: 'How thick the slice is: the plane\'s section and this many sections either side of it are drawn '
+    + 'at full strength, the plane\'s own arrows in yellow and the others in red above it and blue below. '
+    + '0 is the plane\'s section alone. A section holds only two or three annotations of a typical cell, '
+    + 'so a few sections each side make a fuller field.',
+  outside: 'How strong everything of this cell outside the slice is drawn, as a share of its own opacity: '
+    + 'the arrows and rings of the other sections, and the surface, annotation rings, annotation '
+    + 'wireframe, skeleton and synapses above and below it -- in red above the slice and blue below. 0 '
+    + 'hides them; 0.05 leaves a trace of the cell around the slice; 1 draws them as strong as the slice.',
   lookDownZ: 'Turn the view to look straight down the section axis (XY1), where the arrows are the '
     + 'two-dimensional vector field of the sections shown.',
   yDown: 'Look down the section axis with X to the right and Y down, the way an image is indexed.',
@@ -940,17 +957,12 @@ export const SHIFT_HELP = Object.freeze({
   through: 'On: the arrows and rings are drawn over the surface, so the ones inside or behind the cell '
     + 'show. Off: the surface hides them where it is in front, like any other object.',
   opacity: 'How opaque the arrows and rings are. An arrow\'s tail is always fainter than its head.',
-  sliceDim: 'One slice at a time: the arrows and rings of the slice\'s own section are drawn in yellow at full '
-    + 'strength, on a plane the size of that section\'s annotations; those of the sections above it (higher '
-    + 'sections, unless Flip Z is on) in red and those below in blue, at this share of their opacity -- the '
-    + 'colors of the red, yellow and blue markers. 0 hides them, 1 draws them as strong as the plane\'s. With '
-    + 'an annotation of the cell selected, its own arrow keeps the full yellow and the rest of its section turns '
-    + 'pale yellow.',
   focusDim: 'While an annotation is selected, its own arrow is drawn in its marker\'s color -- yellow for the '
     + 'selection, red for the marker above it, blue for the one below -- wider and over everything, with the '
-    + 'ring where it was in the same color. Every other arrow and ring is drawn at this share of its opacity: '
-    + '0 hides them, 1 leaves them as they are. An annotation this pair did not move has no arrow, and nothing '
-    + 'is dimmed for it.',
+    + 'ring where it was in the same color when Original rings is on. Every other arrow and ring is drawn at '
+    + 'this share of its opacity: 0 hides them, 1 leaves them as they are. An annotation this pair did not '
+    + 'move has no arrow, and nothing is dimmed for it. One slice at a time has its own emphasis (Outside '
+    + 'the slice), so this is not used there.',
   width: 'How wide the arrows are on the screen, in pixels, whatever the zoom. The head grows with it; '
     + 'the original rings are drawn a little thinner.',
   apply: 'Turn on Viking\'s section correction for this cell so there is a shift to show: Field + fit for a '
@@ -966,7 +978,7 @@ export const SHIFT_FIGURES = Object.freeze({
   scale: 'scale',
   min: 'threshold',
   slice: 'slice',
-  window: 'slice',
+  span: 'slice',
   color: 'color',
   colorMax: 'ramp',
   through: 'through',

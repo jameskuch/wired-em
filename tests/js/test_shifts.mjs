@@ -91,14 +91,14 @@ test('moveCounts counts each stage on the cell\'s own nodes', () => {
 test('the persisted keys are the spec\'s, with its defaults', () => {
   assert.deepEqual([...S.SHIFT_KEYS].sort(), [
     'shiftArrows', 'shiftColor', 'shiftColorMax', 'shiftFocusDim', 'shiftMin', 'shiftMinSlice', 'shiftOpacity',
-    'shiftPair', 'shiftRings', 'shiftScale', 'shiftSlice', 'shiftSliceDim', 'shiftThrough', 'shiftWidth',
-    'shiftWindow', 'showShift',
+    'shiftOutside', 'shiftPair', 'shiftRings', 'shiftScale', 'shiftSlice', 'shiftSliceSpan', 'shiftThrough',
+    'shiftWidth', 'showShift',
   ]);
   assert.deepEqual(S.SHIFT_DEFAULTS, {
     showShift: false, shiftPair: 'correction', shiftArrows: true, shiftRings: false, shiftScale: null,
-    shiftMin: 0.25, shiftMinSlice: 0.05, shiftSlice: false, shiftWindow: 5, shiftColor: 'magnitude',
+    shiftMin: 0.25, shiftMinSlice: 0.05, shiftSlice: false, shiftSliceSpan: 0, shiftColor: 'magnitude',
     shiftColorMax: null, shiftThrough: true, shiftOpacity: 0.9, shiftWidth: 2.5, shiftFocusDim: 0.06,
-    shiftSliceDim: 0.06,
+    shiftOutside: 0.05,
   });
   assert.ok(Object.isFrozen(S.SHIFT_DEFAULTS));
   assert.deepEqual(S.normalizeShiftDisplay({}), S.SHIFT_DEFAULTS);
@@ -112,27 +112,31 @@ test('the persisted keys are the spec\'s, with its defaults', () => {
 test('a value the controls cannot produce falls back instead of reaching the math', () => {
   const d = S.normalizeShiftDisplay({
     showShift: 'yes', shiftPair: 'sideways', shiftColor: 'rainbow', shiftScale: 0, shiftMin: -3,
-    shiftMinSlice: NaN, shiftWindow: 7.6, shiftOpacity: 5, shiftColorMax: -1, shiftSlice: 1,
+    shiftMinSlice: NaN, shiftSliceSpan: 7.6, shiftOpacity: 5, shiftColorMax: -1, shiftSlice: 1,
   });
   assert.deepEqual(d, {
-    ...S.SHIFT_DEFAULTS, shiftScale: null, shiftMin: 0, shiftWindow: 8, shiftOpacity: 1,
+    ...S.SHIFT_DEFAULTS, shiftScale: null, shiftMin: 0, shiftSliceSpan: 8, shiftOpacity: 1,
   });
   assert.equal(S.normalizeShiftDisplay({ shiftScale: 500 }).shiftScale, 100);
   assert.equal(S.normalizeShiftDisplay({ shiftScale: 0.2 }).shiftScale, 1);
-  assert.equal(S.normalizeShiftDisplay({ shiftWindow: -4 }).shiftWindow, 0);
+  assert.equal(S.normalizeShiftDisplay({ shiftSliceSpan: -4 }).shiftSliceSpan, 0);
   // The arrows' width, CSS pixels: 1 to 8, a value from elsewhere is the default.
   assert.equal(S.normalizeShiftDisplay({ shiftWidth: 40 }).shiftWidth, 8);
   assert.equal(S.normalizeShiftDisplay({ shiftWidth: 0.2 }).shiftWidth, 1);
   assert.equal(S.normalizeShiftDisplay({ shiftWidth: '3' }).shiftWidth, 2.5);
   assert.equal(S.normalizeShiftDisplay({ shiftWidth: 4.5 }).shiftWidth, 4.5);
-  assert.equal(S.normalizeShiftDisplay({ shiftWindow: 1e9 }).shiftWindow, S.WINDOW_MAX);
+  assert.equal(S.normalizeShiftDisplay({ shiftSliceSpan: 1e9 }).shiftSliceSpan, S.SPAN_MAX);
+  // The keys these replaced (2026-10-22) are dropped from a saved display, not read.
+  assert.equal('shiftWindow' in S.normalizeShiftDisplay({ shiftWindow: 5, shiftSliceDim: 0.5 }), false);
+  assert.equal(S.normalizeShiftDisplay({ shiftWindow: 5, shiftSliceDim: 0.5 }).shiftOutside, 0.05);
   assert.equal(S.normalizeShiftDisplay({ shiftColorMax: 0.8 }).shiftColorMax, 0.8);
   // The others' share while an annotation is selected: 0 to 1.
   assert.equal(S.normalizeShiftDisplay({ shiftFocusDim: 0 }).shiftFocusDim, 0);
   assert.equal(S.normalizeShiftDisplay({ shiftFocusDim: 3 }).shiftFocusDim, 1);
   assert.equal(S.normalizeShiftDisplay({ shiftFocusDim: 'dim' }).shiftFocusDim, 0.06);
-  assert.equal(S.normalizeShiftDisplay({ shiftSliceDim: -1 }).shiftSliceDim, 0);
-  assert.equal(S.normalizeShiftDisplay({ shiftSliceDim: null }).shiftSliceDim, 0.06);
+  assert.equal(S.normalizeShiftDisplay({ shiftOutside: -1 }).shiftOutside, 0);
+  assert.equal(S.normalizeShiftDisplay({ shiftOutside: 2 }).shiftOutside, 1);
+  assert.equal(S.normalizeShiftDisplay({ shiftOutside: null }).shiftOutside, 0.05);
 });
 
 test('the threshold and the cap follow the view: All sections or one slice', () => {
@@ -823,7 +827,9 @@ test('the badge, the chip, and the header summary', () => {
   assert.equal(S.summaryText({}), 'off');
   assert.equal(S.summaryText({ showShift: true }, 13.5), 'Correction · all sections · ≥0.25 µm · ×14');
   assert.equal(S.summaryText({ showShift: true, shiftSlice: true, shiftPair: 'transforms' }, 1),
-    'Transforms · section ±5 · ≥0.05 µm');
+    'Transforms · section ±0 · ≥0.05 µm');
+  assert.equal(S.summaryText({ showShift: true, shiftSlice: true, shiftSliceSpan: 3 }, 1),
+    'Correction · section ±3 · ≥0.05 µm');
   assert.equal(S.summaryText({ showShift: true, shiftPair: 'both' }, 1, 'correction'), 'Correction · all sections · ≥0.25 µm');
 });
 
@@ -867,8 +873,8 @@ test('a volume without current transforms offers the correction alone, whatever 
 });
 
 test('every control has a help text and the empty state a line', () => {
-  for (const key of ['master', 'pair', 'arrows', 'rings', 'scale', 'min', 'slice', 'window', 'lookDownZ',
-    'yDown', 'color', 'colorMax', 'through', 'opacity', 'width', 'apply']) {
+  for (const key of ['master', 'pair', 'arrows', 'rings', 'scale', 'min', 'slice', 'span', 'outside',
+    'lookDownZ', 'yDown', 'color', 'colorMax', 'through', 'opacity', 'focusDim', 'width', 'apply']) {
     assert.ok(S.SHIFT_HELP[key] && S.SHIFT_HELP[key].length > 20, key);
   }
   // A figure is named only for a control that has help, and the explanations say what they draw.

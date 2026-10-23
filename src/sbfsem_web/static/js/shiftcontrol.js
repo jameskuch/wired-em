@@ -55,7 +55,6 @@ export class ShiftController {
     this.thresholds = new ThresholdMemory();
     this._tokens = new Map();
     this._focus = [];               // the chosen annotations: [{ slot, key, locationId }]
-    this._outlinesAsked = new Set();   // cells whose outlines a chosen closed curve fetched
     this._bindChip();
   }
 
@@ -137,6 +136,7 @@ export class ShiftController {
     this.layers.delete(record.key);
     this.panels.delete(record.key);
     this.renderer.removeShifts(record.key);
+    this.renderer.setSliceFade?.(record.key, null);
     this._afterChange();
     this._drawFocus();
   }
@@ -335,15 +335,16 @@ export class ShiftController {
       const layer = record ? this.layerOf(record) : null;
       const group = this.renderer.shifts.get(item.key);
       if (!layer || layer.empty || !group || group.visible === false) continue;
-      const outlines = this.cachedOutlines(record);
-      const [mark] = focusMarks(layer, [item.locationId], outlines ?? []);
+      // Arrows and Original rings are the gates for a chosen annotation's own arrow and
+      // ring too (2026-10-22: a ring was drawn for the selection with the rings off).
+      // With the rings on, the outlines were fetched with the layer.
+      const { shiftArrows, shiftRings } = layer.display;
+      const outlines = shiftRings ? (this.cachedOutlines(record) ?? []) : [];
+      const [mark] = focusMarks(layer, [item.locationId], outlines);
       if (!mark) continue;
-      // A closed curve's ring is its outline, fetched once for it if the rings are off.
-      if (mark.curve && !mark.ring && !outlines && !this._outlinesAsked.has(item.key)) {
-        this._outlinesAsked.add(item.key);
-        this.outlinesFor(record).then(() => this._drawFocus(), () => {});
-      }
-      out.push({ slot: item.slot, key: item.key, mark: { ...mark, width: layer.display.shiftWidth } });
+      const shown = { ...mark, arrow: shiftArrows ? mark.arrow : null, ring: shiftRings ? mark.ring : null };
+      if (!shown.arrow && !shown.ring) continue;
+      out.push({ slot: item.slot, key: item.key, mark: { ...shown, width: layer.display.shiftWidth } });
     }
     return out;
   }

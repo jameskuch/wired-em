@@ -35,7 +35,8 @@ transforms switch where a volume has none):
 * ``focus`` -- a selected annotation's own arrow is drawn in its marker's color (yellow, then the
   red marker above it), over a dark edge and on top, even when the threshold leaves it out of the
   layer; the other arrows are dimmed to Others when selected and come back when it is deselected
-  (asked for 2026-10-19: "I don't know which arrow is the movement of this annotation").
+  (asked for 2026-10-19: "I don't know which arrow is the movement of this annotation").  Its ring
+  where it was is drawn only with Original rings on (2026-10-22).
 * ``moves`` -- an annotation moved by hand (2026-10-19): ``g`` opens the move panel with the
   annotation's X, Y, Z and the viewport's axes, the arrow keys move it along the chosen axis (the
   ring is drawn ahead, the move is kept on the cell), Enter applies it (the server's copy is named
@@ -44,10 +45,12 @@ transforms switch where a volume has none):
   copy's annotations and outlines while its surface builds, once each, and draws the rings with the
   surface, not before it (2026-10-20); its polls ask the server to wait (``?wait=1``, which the page
   sends only over HTTP/2, so here it is turned on by hand) and are no more than one a second.
-* ``slicecolors`` -- One slice at a time (2026-10-20): the plane is the size of its section's
-  annotations and their arrows, not the cell; the window's arrows on the plane's section are drawn in the selection's
-  yellow at full strength, those above in red and below in blue at Off the plane (0.06); a selected
-  annotation of the cell pales the section's yellow and keeps the selection fade off; a step recolors.
+* ``slicecolors`` -- One slice at a time (2026-10-20, one rule since 2026-10-22): the plane is the size of
+  its section's annotations and their arrows, not the cell; the arrows on the plane's section are drawn
+  in the selection's yellow, those above in red and below in blue, at full strength in the slice (Slice
+  ± sections) and at Outside the slice (0.05) past it; the surface is cut to the slice and faded past it
+  in the same red and blue, and whole again out of slice mode; a selected annotation of the cell pales
+  the section's yellow and keeps the selection fade off; a step recolors.
 * ``moveset`` -- moving a set by hand (2026-10-20): Its section moves every annotation of the
   section by the same step, Sections from the blue marker to the red one moves the run, a
   ⌘/Ctrl-click adds one, Enter applies them all, and a click on a section in the list ticks
@@ -462,7 +465,8 @@ def s_slice(c: Chrome, r: Report, ctx):
     # The slice plane is a faint sheet over everything: the count is of the arrows alone.
     hide_plane = "(window.__group(%s).userData.plane || []).forEach((p) => { p.visible = false; })" % json.dumps(key)
     total = js(c, "window.__arrows(%s).geometry.getAttribute('position').count" % json.dumps(key))
-    apply(c, key, {'shiftSlice': True, 'shiftWindow': 0, 'shiftMinSlice': 0})
+    # Outside the slice at 0: the rest is hidden, so only the slice is drawn.
+    apply(c, key, {'shiftSlice': True, 'shiftSliceSpan': 0, 'shiftOutside': 0, 'shiftMinSlice': 0})
     layer = js(c, """(() => { const g = window.__group(%s); const l = g.userData.layer; const a = window.__arrows(%s);
       return { n: l.sel.n, range: [a.geometry.drawRange.start, a.geometry.drawRange.count],
                pick: [a.userData.pick.drawRange.start, a.userData.pick.drawRange.count],
@@ -488,6 +492,14 @@ def s_slice(c: Chrome, r: Report, ctx):
                % json.dumps(key))
     r.check('stepping the slice moves the draw range and uploads nothing',
             after[2] == versions and (after[0], after[1]) != tuple(layer['range']), [layer['range'], after])
+    # At 0.05 (the default) every arrow is drawn, the rest faint; the right-click menu measures to the slice's.
+    apply(c, key, {'shiftOutside': 0.05})
+    faint = js(c, """(() => { const a = window.__arrows(%s);
+      return { range: [a.geometry.drawRange.start, a.geometry.drawRange.count],
+               pick: [a.userData.pick.drawRange.start, a.userData.pick.drawRange.count] }; })()""" % json.dumps(key))
+    r.check('Outside the slice above 0 draws every arrow and picks only the slice\'s',
+            bool(faint and faint['range'][0] == 0 and faint['range'][1] >= total
+                 and faint['pick'][1] * 9 < faint['range'][1] * 2), [faint, total])
     apply(c, key, {'shiftSlice': False})
     js(c, "(() => { const R = window.sbfsem.renderer; R.meshes.get(%s).visible = true; R.setAxesVisible(true); })()"
        % json.dumps(key))
@@ -723,12 +735,20 @@ def s_focus(c: Chrome, r: Report, ctx):
     if not plan:
         return
     before = js(c, FOCUS_STATE % (q, q))
+    # Original rings off (the default) is the gate for the selection's ring too (2026-10-22).
+    js(c, 'window.sbfsem.renderer.select(window.__focusCands.low); true')
+    c.settle(2)
+    bare = js(c, FOCUS_STATE % (q, q))
+    r.check('with Original rings off, selecting it draws its arrow alone (an edge under it), no ring',
+            bare and bare['slots'] == ['primary'] * 2, bare)
+    js(c, 'window.sbfsem.renderer.clearSelection(); true')
+    apply(c, key, {'shiftRings': True})
     js(c, 'window.sbfsem.renderer.select(window.__focusCands.low); true')
     c.settle(2)
     on = js(c, FOCUS_STATE % (q, q))
     r.check('before a selection nothing is focused and nothing dimmed', before and not before['slots']
             and before['dim'] == 1 and abs(before['opacity'] - 0.9) < 1e-6, before)
-    r.check('selecting it draws its arrow and its ring where it was, an edge under each, all on top',
+    r.check('with them on, its arrow and its ring where it was, an edge under each, all on top',
             on and on['slots'] == ['primary'] * 4 and on['onTop'], on)
     r.check('in the selection\'s own color', on and on['colors'] and on['colors'][1] == on['tint']
             and on['colors'][3] == on['tint'], on)
@@ -782,6 +802,7 @@ def s_focus(c: Chrome, r: Report, ctx):
     r.check('the marker table gives the selected annotation\'s true shift', bool(table) and table[0] > 0
             and abs(float(table[1]) - plan['mag']) < 0.006, [table, plan['mag'], row])
     js(c, 'window.sbfsem.renderer.clearSelection(); true')
+    apply(c, key, {'shiftRings': False})
 
 
 # -- manual moves ----------------------------------------------------------------------------------
@@ -949,7 +970,7 @@ def s_slicecolors(c: Chrome, r: Report, ctx):
     ctx.key = key
     q = json.dumps(key)
     switch_on(c, key)
-    apply(c, key, {'shiftSlice': True, 'shiftWindow': 3, 'shiftMinSlice': 0})
+    apply(c, key, {'shiftSlice': True, 'shiftSliceSpan': 3, 'shiftMinSlice': 0})
     st = js(c, SLICE_STATE % q)
     w = st['plane'][2] - st['plane'][0]
     h = st['plane'][3] - st['plane'][1]
@@ -967,12 +988,20 @@ def s_slicecolors(c: Chrome, r: Report, ctx):
             and st['plane'][1] <= fr[1] and st['plane'][3] >= fr[3]
             and w * h < 0.6 * st['cell'][0] * st['cell'][1] and w < fw * 1.5 + 4 and h < fh * 1.5 + 4,
             [round(w, 1), round(h, 1), round(ew, 1), round(eh, 1), round(fw, 1), round(fh, 1), st['cell']])
+    # One rule (2026-10-22): the slice (the plane's section +/- 3) at full strength, the rest at 0.05.
     on = '1.00|' + ','.join(str(v) for v in st['colors']['on'])
-    above = '0.06|' + ','.join(str(v) for v in st['colors']['above'])
-    below = '0.06|' + ','.join(str(v) for v in st['colors']['below'])
-    r.check('the plane\'s section is drawn yellow at full strength, above it red and below it blue at 0.06',
-            st['groups'].get(on, 0) > 0 and st['groups'].get(above, 0) > 0 and st['groups'].get(below, 0) > 0
-            and set(st['groups']) == {on, above, below}, st['groups'])
+    above, below = (','.join(str(v) for v in st['colors'][side]) for side in ('above', 'below'))
+    want = {on, f'1.00|{above}', f'1.00|{below}', f'0.05|{above}', f'0.05|{below}'}
+    r.check('the plane\'s section is yellow, red above and blue below: full in the slice, 0.05 past it',
+            set(st['groups']) == want and all(st['groups'][k] > 0 for k in want), st['groups'])
+    fade = js(c, """(() => { const R = window.sbfsem.renderer; const f = R.sliceFade.get(%s); const l = window.__group(%s).userData.layer;
+      const ghosts = []; R.meshes.get(%s).traverse((o) => { if (o.userData.sliceGhost) ghosts.push(o.userData.sliceGhost); });
+      const solid = R._meshPart(%s, 'surface');
+      return f && { thick: f.hi - f.lo, step: Math.abs(l.field.zMap.dz), outside: f.outside, ghosts,
+                    planes: (solid.material.clippingPlanes || []).length }; })()""" % (q, q, q, q))
+    r.check('the surface is cut to the slice\'s seven sections and faded past them, red above and blue below',
+            bool(fade and abs(fade['thick'] - 7 * fade['step']) < 1e-6 and fade['outside'] == 0.05
+                 and sorted(fade['ghosts']) == ['higher', 'higher', 'lower', 'lower'] and fade['planes'] == 2), fade)
     pick = js(c, """(() => { const R = window.sbfsem.renderer; const l = window.__group(%s).userData.layer;
       const center = window.sbfsem.shifts.centerOf(window.sbfsem.state.neurons.get(%s));
       const i = [...l.sel.section].indexOf(center); const r = l.sel.rows[i]; const f = l.field;
@@ -991,6 +1020,10 @@ def s_slicecolors(c: Chrome, r: Report, ctx):
     r.check('a step moves the plane and recolors the new window', step['center'] == st['center'] + 1
             and step['groups'].get(on, 0) > 0 and step['plane'] != st['plane'], [st['center'], step['center'], step['groups']])
     apply(c, key, {'shiftSlice': False})
+    back = js(c, """(() => { const R = window.sbfsem.renderer; let n = 0;
+      R.meshes.get(%s).traverse((o) => { if (o.userData.sliceGhost) n += 1; });
+      return { fade: R.sliceFade.has(%s), ghosts: n, planes: (R._meshPart(%s, 'surface').material.clippingPlanes || []).length }; })()""" % (q, q, q))
+    r.check('out of slice mode the surface is whole again', back == {'fade': False, 'ghosts': 0, 'planes': 0}, back)
 
 
 def s_moveset(c: Chrome, r: Report, ctx):

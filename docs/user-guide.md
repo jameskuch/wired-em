@@ -1888,17 +1888,28 @@ current transforms) lowers the thresholds so it shows something, and switching
 back gives yours back (within the page session; after a reload the lowered
 value stays until you move it).
 
-**One slice at a time.** Tick it to show only the annotations of one section
-and the **Sections each side** around it (5 by default), with a translucent
-plane at that section, sized to that section's annotations (and the arrows drawn on
-it) with a small margin, not to the whole cell. The slice is drawn in the markers'
-colors: the arrows and rings of the plane's own section in the selection's yellow at
-full strength, those of the sections above it in red and those below it in blue
-(above is the upright view's: higher sections, unless Flip Z is on), faded to **Off
-the plane** of their opacity (0.06 by default, almost nothing; 0 hides them). While
+**One slice at a time.** Tick it to look at one section at a time, under one rule
+for everything of the cell: **the slice is drawn at full strength, and the rest of
+the cell at Outside the slice of its opacity.** The slice is the plane's section
+and **Slice ± sections** either side of it (0 by default: the section alone). A
+translucent plane marks that section, sized to its annotations (and the arrows drawn
+on it) with a small margin, not to the whole cell. The colors are the markers': the
+arrows and rings of the plane's own section in the selection's yellow, those of the
+sections above it in red and those below it in blue (above is the upright view's:
+higher sections, unless Flip Z is on). **Outside the slice** (0.05 by default; 0
+hides it, 1 draws it as strong as the slice) applies to the other sections' arrows
+and rings and to the cell's surface, annotation rings, annotation wireframe,
+skeleton and synapses alike: past the slice they are drawn in the same faint red
+above and blue below, and the surface keeps its own color only in the band the slice
+cuts through it. Looking down Z, that leaves the slice's arrows over a trace of the
+cell; from the side, the cell's band at that section between a red top and a blue
+bottom. (These two controls replace *Sections each side*, which hid every section
+past it, and *Off the plane*, which faded the sections inside it: two fades that
+overlapped, so widening the window looked like it did nothing.) While
 an annotation of the cell is selected, the plane's section turns pale yellow, so the
 selected annotation's own arrow (full yellow, wider, edged) stays apart from the rest
-of its section, and the selection's fade (**Others when selected**) is not applied on
+of its section, and the selection's fade (**Others when selected**, hidden while the
+slice is on) is not applied on
 top. The section slider, the per-section chart (one dot per
 annotation, the size of its shift against its section; click or drag across it)
 and the chips for the sections where the annotations moved together (`939 · 6 ·
@@ -1951,8 +1962,9 @@ several cells it lists each one's exaggeration. Selecting an annotation adds
 **The selected annotation's own arrow.** With an annotation selected (a triple
 click: the yellow ring), its arrow is drawn in the selection's yellow, wider than
 the rest, over a dark edge and over everything, with the ring where it was in the
-same color; the red marker's and the blue marker's arrows are drawn in red and
-blue. It is drawn whatever **Only shifts above**, the 2,000 cap or the slice leave
+same color while **Original rings** is on; the red marker's and the blue marker's arrows are drawn in red and
+blue. **Arrows** and **Original rings** are the switches for these too: with the
+rings off, no ring is drawn, the selection's included. It is drawn whatever **Only shifts above**, the 2,000 cap or the slice leave
 out, at the exaggeration the layer uses (the badge). Every other arrow and ring is
 drawn at **Others when selected** of its opacity (0.06 by default, almost nothing;
 0 hides them, 1 leaves them as they are), until the selection goes. An annotation the pair did not
