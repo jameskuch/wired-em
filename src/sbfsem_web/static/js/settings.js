@@ -5,7 +5,9 @@
 // layers' normals, or straight along Z as MATLAB did), three cards for this browser (which build the page is, clearing its cached
 // files, resetting what it saved), the Correction log (annotations Viking's
 // curve fit pulled toward a much wider linked one, in every loaded cell this
-// account may see: /api/correction-log), and one for the server (its state,
+// account may see: /api/correction-log; since Viking's service stopped running the
+// fit on 2026-10-27, only a cell read from a file saved before then), and one for
+// the server (its state,
 // clearing its cached renders, replacing its build processes, restarting it),
 // which only an admin is offered: the server decides, through /api/admin/whoami.
 //
@@ -503,6 +505,12 @@ export function outlineRuleText(rule = OUTLINE_RULE) {
     + 'what the same move takes from a circle of its area lying on a copy of itself.';
 }
 
+/** Why the log lists no cell corrected now: Viking's service no longer runs the fit (2026-10-27). */
+export const NO_FIT_NOW = 'Viking’s corrections service no longer runs a curve fit: it removed the fit as a '
+  + 'default on 2026-10-27, after the field alone measured as good on 11 cells, and this viewer has asked for the '
+  + 'residual field alone since, which pulls nothing this way. So no cell corrected now is checked; a cell read '
+  + 'from a file saved before then, under Curve fit or Field + fit, still is.';
+
 /** What the pull line's hover says about the bug (the log's card says it at more length). */
 export const PULLS_HELP = 'Viking’s section correction (Curve fit, or Field + fit) takes a soma’s or a large '
   + 'outline’s center as a point of the process, so a thin process leaving it is pulled toward that center: '
@@ -733,6 +741,7 @@ export class SettingsPanel {
     this.logBody = el('div', { class: 'settings-log' });
     this.root.append(el('section', { class: 'card settings-wide', id: 'correction-log' }, [
       el('h3', { text: 'Correction log' }),
+      el('p', { class: 'settings-text', text: NO_FIT_NOW }),
       el('p', { class: 'settings-text', text: 'Annotations Viking’s section correction (Curve fit, or Field + fit) '
         + 'moved toward a much wider annotation linked to them, in the cells loaded on this server that you may see. '
         + 'Viking’s curve fit takes a soma’s or a large outline’s center as a point of the process, so a thin process '
@@ -855,7 +864,7 @@ export class SettingsPanel {
       ? `${pulled} pull${pulled === 1 ? '' : 's'} toward an annotation ${formatRatio(view.ratio)} as wide or wider, `
         + `and ${off} traced outline${off === 1 ? '' : 's'} moved off the outlines linked to them, `
         + `in ${view.checked.length} loaded cell${view.checked.length === 1 ? '' : 's'} with a curve fit.`
-      : 'No cell loaded on this server has a curve-fit correction (Curve fit, or Field + fit).';
+      : `No cell loaded on this server has a curve-fit correction. ${NO_FIT_NOW}`;
     const blocks = [];
     if (view.checked.length) {
       const head = el('tr', {}, ['Volume', 'Cell', 'Mode', 'Service', 'Location', 'Z', 'r µm', 'Moved µm',

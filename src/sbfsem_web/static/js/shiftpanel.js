@@ -371,7 +371,7 @@ export function buildShiftPanel(body, record, ctx) {
       const apply = document.createElement('button');
       apply.type = 'button';
       apply.className = 'full';
-      apply.textContent = `Apply ${(MODE_LABELS[ctx.correction?.()] || MODE_LABELS.curvefit).toLowerCase()}`;
+      apply.textContent = `Apply ${(MODE_LABELS[ctx.correction?.()] || MODE_LABELS.neighbor).toLowerCase()}`;
       helpFor(apply, 'apply');
       apply.addEventListener('click', () => ctx.applyCorrection());
       body.append(apply);

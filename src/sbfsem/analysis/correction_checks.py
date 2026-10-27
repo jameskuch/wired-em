@@ -12,6 +12,12 @@ extent, was not deployed yet).  On InferiorMonkey c1178 under Curve fit,
 Location 1328721 (r 0.74 um) moved 10.6 um toward 1557441 (r 9.9 um), 0.495 of
 the way.
 
+Viking's service no longer runs the fit by default: 1.5.0 removed it on
+2026-10-27, after an 11-cell measurement found the field alone as good, and
+this viewer has asked for the residual field alone since (2.42.0).  A cell is
+checked only when its correction ran the fit, now one read from a file saved
+before then; every other is listed with :data:`NO_CURVE_FIT`.
+
 The check, per annotation *i* of the cell (its own, one row per ID), with *d*
 its correction move (registered to corrected, :func:`~sbfsem.analysis.shifts.stage_frame`)
 and *j* the widest annotation linked to it (``neuron.edges``, both directions,
@@ -77,6 +83,7 @@ __all__ = [
     "DEFAULT_RATIO",
     "FIT_MODES",
     "MAX_FRAC",
+    "NO_CURVE_FIT",
     "MAX_RATIO",
     "MIN_COS",
     "MIN_MOVE_UM",
@@ -97,8 +104,12 @@ __all__ = [
     "scan_outlines",
 ]
 
-#: The correction modes that run Viking's curve fit, where the pull happens.
+#: The correction modes that ran Viking's curve fit, where the pull happens:
+#: since 2026-10-27 only a cell read from a file saved before then carries one.
 FIT_MODES = ("curvefit", "all")
+#: Why a cell corrected now is not checked: the correction log's note.
+NO_CURVE_FIT = ("Not checked: corrected by the residual field alone; Viking's service "
+                "no longer runs a curve fit (removed as a default on 2026-10-27)")
 #: How many times wider the neighbor must be, unless asked otherwise: the
 #: extent ratio [Viking-Server]'s fix leaves out (the user's choice, 2026-10-20).
 DEFAULT_RATIO = 4.0

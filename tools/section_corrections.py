@@ -3,15 +3,19 @@
     .venv/bin/python tools/section_corrections.py                 # volumes, sets, rebuild status
     .venv/bin/python tools/section_corrections.py i 21768         # one cell, before and after
     .venv/bin/python tools/section_corrections.py i 21768 --worst 15
-    .venv/bin/python tools/section_corrections.py i 21768 --live --mode curvefit   # as the web app
+    .venv/bin/python tools/section_corrections.py i 21768 --live                   # as the web app
+    .venv/bin/python tools/section_corrections.py i 21768 --mode points           # CorrectPoints
 
 For a cell it prints the step along each Viking link from one section to the
 next (the sideways jump a misregistered section makes), before and after the
 correction: median, 90th and 99th percentile, the largest, and the worst
-links one by one with how far each end moved.  ``--mode`` picks the
-correction (neighbor, the residual field, by default; curvefit or all ask the
-service to correct the whole structure); ``--live`` first draws the cell
-through the volume's current section transforms, as the web app does.
+links one by one with how far each end moved.  ``--mode`` picks how the
+residual field is asked for: ``neighbor`` (the default, as the web app asks it)
+has the service correct the whole structure (``CorrectStructures``, mode 0);
+``points`` samples the field at this cell's own positions (``CorrectPoints``).
+Viking's curve fit modes went with service 1.5.0 (2026-10-27), and no request
+here carries any mode number but 0.  ``--live`` first draws the cell through the
+volume's current section transforms, as the web app does.
 ``--url`` points at another service (``http://host:port`` for cleartext);
 ``--group`` picks a StosGroup.
 """
@@ -28,7 +32,6 @@ import pandas as pd
 # and /shift-summary measure it the same way.
 from sbfsem.analysis.shifts import steps
 from sbfsem.io.corrections import (
-    CORRECTION_MODES,
     CorrectionsClient,
     CorrectionsError,
     apply_offsets,
@@ -90,12 +93,12 @@ def cell(client: CorrectionsClient, source: str, cell_id: int, group: str | None
         print(f"no published set for {volume}" + (f" named {group}" if group else ""))
         return
     before = steps(neuron)
-    if mode == "neighbor":
+    if mode == "points":
         correction = fetch_offsets(neuron, client, cset)
         stamp = ""
     else:
-        correction = fetch_structure_offsets(neuron, client, cset, mode, timeout=600)
-        st = client.answer_stamp(volume, cset.stos_group, [cell_id], mode=mode)
+        correction = fetch_structure_offsets(neuron, client, cset, "neighbor", timeout=600)
+        st = client.answer_stamp(volume, cset.stos_group, [cell_id])
         stamp = (f"; service {st['service_version']}, annotations as of "
                  f"{st['annotation_watermark']}")
     apply_offsets(neuron, correction)
@@ -125,9 +128,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--url", default=None, help="service URL (default: corrections.codepharm.net)")
     parser.add_argument("--group", default=None, help="StosGroup (default: the first by name)")
     parser.add_argument("--worst", type=int, default=10, help="how many of the largest steps to list")
-    parser.add_argument("--mode", default="neighbor",
-                        choices=[m for m in CORRECTION_MODES if m != "none"],
-                        help="the correction (default: neighbor, the residual field)")
+    parser.add_argument("--mode", default="neighbor", choices=["neighbor", "points"],
+                        help="how the residual field is asked for: neighbor (CorrectStructures, "
+                             "the default, as the web app) or points (CorrectPoints)")
     parser.add_argument("--live", action="store_true",
                         help="draw the cell through the current section transforms first")
     args = parser.parse_args(argv)

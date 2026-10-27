@@ -1,10 +1,13 @@
 // Registration in Render compare: which copy of the cell a layer is built from.
 //
 // A copy is the cell loaded with Viking's current section transforms on or off,
-// and Viking's section correction off or in one of its modes.  The server holds
-// one copy per setting side by side (all eight of them, if asked) and names each
-// by its tag, `<correction>.<0|1>` (facade.copy_tag: "all.1" is the current
-// transforms with Field + fit, "off.0" the stored positions).  A layer's
+// and Viking's section correction, its residual field, off or on.  The server holds
+// one copy per setting side by side (all four of them, if asked) and names each
+// by its tag, `<correction>.<0|1>` (facade.copy_tag: "neighbor.1" is the current
+// transforms with the residual field, "off.0" the stored positions).  Viking's
+// service ran a curve fit too until 2026-10-27, "curvefit" and "all" (Field + fit);
+// a layer, tag or report saved with either is read as the residual field
+// (`correctionSetting`), as the server reads it.  A layer's
 // `registration` is null -- the cell as the page loaded it, the tab's own copy,
 // with the person's own moves if it has any -- or `{ live, corrections }`, the
 // plain copy of that setting.  Asked for 2026-10-20: the same cell with the same
@@ -12,24 +15,27 @@
 //
 // Pure: no page, no server; loads under node (tests/js/test_registrations.mjs).
 
-import { MODE_LABELS } from './regstatus.js';
+import { MODE_LABELS, correctionSetting } from './regstatus.js';
 
-/** Viking's correction, off or one of its modes, in the order the choices list them. */
-export const CORRECTIONS = Object.freeze(['off', 'neighbor', 'curvefit', 'all']);
+/** Viking's correction, off or its residual field, in the order the choices list them. */
+export const CORRECTIONS = Object.freeze(['off', 'neighbor']);
 
-/** As the cell panel's Registration header says them ("current + field + fit"). */
-const SHORT = Object.freeze({ neighbor: 'field', curvefit: 'fit', all: 'field + fit' });
+/** As the cell panel's Registration header says them ("current + field"). */
+const SHORT = Object.freeze({ neighbor: 'field' });
 
-/** A correction's name as the Correction select says it ("Field + fit"), or "no correction". */
+/** A correction's name as the Registration section says it ("Residual field"), or "no correction". */
 export function correctionName(corrections) {
-  return MODE_LABELS[corrections] ?? 'no correction';
+  const setting = correctionSetting(corrections);
+  return setting === 'off' ? 'no correction' : MODE_LABELS[setting];
 }
 
-/** A registration as stored: null (the cell as loaded) or `{ live, corrections }`. */
+/**
+ * A registration as stored: null (the cell as loaded) or `{ live, corrections }`, a
+ * retired correction (Curve fit, Field + fit) read as the residual field.
+ */
 export function normalizeRegistration(reg) {
   if (!reg || typeof reg !== 'object') return null;
-  const corrections = CORRECTIONS.includes(reg.corrections) ? reg.corrections : 'off';
-  return { live: !!reg.live, corrections };
+  return { live: !!reg.live, corrections: correctionSetting(reg.corrections) };
 }
 
 /** The server's name for the copy (`facade.copy_tag`), or null for the cell as loaded. */
@@ -38,15 +44,18 @@ export function registrationTag(reg) {
   return r ? `${r.corrections}.${r.live ? 1 : 0}` : null;
 }
 
-/** The registration a tag names (`"all.1"`), or null for one that names no plain copy. */
+/**
+ * The registration a tag names (`"neighbor.1"`; a retired mode's, `"all.1"`, names the
+ * same), or null for one that names no plain copy.
+ */
 export function registrationOfTag(tag) {
   const m = /^(off|neighbor|curvefit|all)\.([01])$/.exec(String(tag ?? ''));
-  return m ? { live: m[2] === '1', corrections: m[1] } : null;
+  return m ? { live: m[2] === '1', corrections: correctionSetting(m[1]) } : null;
 }
 
 /**
  * A copy's tag in words, as the report names it: a plain copy by its registration, the
- * tab's copy with a person's own moves (`all.1.m<token>`) with that said, an unknown tag as it is.
+ * tab's copy with a person's own moves (`neighbor.1.m<token>`) with that said, an unknown tag as it is.
  */
 export function copyLabel(tag, { hasTransforms = true } = {}) {
   const m = /^((?:off|neighbor|curvefit|all)\.[01])(\.m.+)?$/.exec(String(tag ?? ''));
@@ -68,7 +77,7 @@ export function copyLoadBody(record, reg) {
 }
 
 /**
- * In words: "Current transforms + Field + fit", "Stored positions, no
+ * In words: "Current transforms + Residual field", "Stored positions, no
  * correction".  `hasTransforms` false (a volume whose transforms are not read
  * here): the transforms are not named, since on and off draw the same.
  */
@@ -80,9 +89,8 @@ export function registrationLabel(reg, { hasTransforms = true } = {}) {
 }
 
 /**
- * Short: "current + field + fit", "stored".  `compact` joins without spaces
- * ("current+field+fit"), for a chip: cut short anywhere after "current+field", it
- * still shows whether more follows, so the eight stay told apart.
+ * Short: "current + field", "stored".  `compact` joins without spaces
+ * ("current+field"), for a chip.
  */
 export function registrationShort(reg, { hasTransforms = true, compact = false } = {}) {
   const r = normalizeRegistration(reg);
@@ -94,8 +102,8 @@ export function registrationShort(reg, { hasTransforms = true, compact = false }
 
 /**
  * Every registration a layer can be put on, in the order they are offered: the
- * stored positions first, then each correction; with the transforms read, each
- * of those with and without them (8), else without (4).
+ * stored positions first, then the correction; with the transforms read, each
+ * of those with and without them (4), else without (2).
  */
 export function registrationChoices({ hasTransforms = true } = {}) {
   const lives = hasTransforms ? [false, true] : [false];
@@ -111,22 +119,20 @@ export const MAX_SWEEP_PANES = 6;
 export const MAX_SWEEP_LAYERS = 4;
 
 /**
- * What a sweep starts with ticked: no registration at all, each step alone, and
- * all of them -- the stored positions, the current transforms, the transforms
- * with each correction, and the volume's own default correction on the stored
- * positions (6 with the transforms; 4 without).
+ * What a sweep starts with ticked: every registration -- the stored positions, the
+ * current transforms, the transforms with the correction, and the correction on the
+ * stored positions (4 with the transforms; 2 without).  `defaultCorrection`, the
+ * volume's own, is the residual field whatever it names (a server from before
+ * 2026-10-27 says Curve fit or Field + fit), so it no longer changes the sweep.
  */
-export function defaultSweep({ hasTransforms = true, defaultCorrection = 'all' } = {}) {
+// eslint-disable-next-line no-unused-vars
+export function defaultSweep({ hasTransforms = true, defaultCorrection = 'neighbor' } = {}) {
   if (!hasTransforms) return CORRECTIONS.map((corrections) => ({ live: false, corrections }));
-  const fallback = CORRECTIONS.includes(defaultCorrection) && defaultCorrection !== 'off'
-    ? defaultCorrection : 'all';
   return [
     { live: false, corrections: 'off' },
     { live: true, corrections: 'off' },
     { live: true, corrections: 'neighbor' },
-    { live: true, corrections: 'curvefit' },
-    { live: true, corrections: 'all' },
-    { live: false, corrections: fallback },
+    { live: false, corrections: 'neighbor' },
   ];
 }
 

@@ -986,25 +986,55 @@ def test_an_unknown_method_is_a_400_on_the_mesh_and_export_routes(client):
             assert r.status_code == 400 and "method must be one of" in r.json()["detail"], path
 
 
-def test_the_web_app_corrects_by_curve_fit_unless_asked_otherwise(client):
-    # The user's decision of 2026-09-24; the library's own default stays off.
-    assert client.app.state.service.correction_mode == "curvefit"
+def test_the_web_app_corrects_by_the_field_unless_asked_otherwise(client):
+    # Viking's service removed its curve fit as a default on 2026-10-27 (1.5.0): the
+    # residual field on every volume, ending the user's decisions of 2026-09-24 (the
+    # fit) and 2026-10-20 (field + fit on the Neitz lab's volumes).  The library's own
+    # default stays off.
+    assert client.app.state.service.correction_mode == "neighbor"
 
 
-def test_the_web_app_corrects_the_neitz_volumes_by_field_and_fit(client):
-    # The user's decision of 2026-10-20: a Neitz lab cell is drawn through the
-    # current section transforms and corrected by the field, then the fit; the
-    # page learns each volume's default from /api/volumes.
+def test_the_web_app_corrects_every_volume_by_the_field(client):
+    # A cell is drawn through the current section transforms and corrected by the
+    # field; the page learns each volume's default from /api/volumes.
     svc = client.app.state.service
     volumes = {v["name"]: v for v in client.get("/api/volumes").json()}
     for name in ("NeitzInferiorMonkey", "NeitzNasalMonkey", "NeitzTemporalMonkey", "NeitzCped"):
-        assert svc.default_correction(name) == "all"
+        assert svc.default_correction(name) == "neighbor"
         assert volumes[name]["lab"] == "Neitz"
-        assert volumes[name]["default_correction"] == "all"
+        assert volumes[name]["default_correction"] == "neighbor"
         assert volumes[name]["default_registration"] is True
     for name in ("RC1", "RC2", "RPC1", "RPC2"):
         assert volumes[name]["lab"] == "Marc"
-        assert volumes[name]["default_correction"] == "curvefit"
+        assert volumes[name]["default_correction"] == "neighbor"
+
+
+def test_an_old_environment_naming_a_retired_mode_is_the_field(monkeypatch):
+    """A server whose environment still names curvefit or all (the unit, secrets.env)
+    corrects by the field: no request carries 2 or 3."""
+    from fastapi.testclient import TestClient
+
+    from sbfsem_web.app import create_app
+
+    monkeypatch.setenv("SBFSEM_SECTION_CORRECTIONS", "curvefit")
+    monkeypatch.setenv("SBFSEM_SECTION_CORRECTIONS_NEITZ", "all")
+    app = create_app()
+    with TestClient(app) as old:
+        svc = old.app.state.service
+        assert svc.default_correction("RC1") == svc.default_correction("NeitzCped") == "neighbor"
+
+
+def test_a_load_naming_a_retired_mode_is_accepted(client):
+    """A saved session, Look or API caller from before 2026-10-27 may send curvefit or
+    all: never a 422 for that."""
+    svc = client.app.state.service
+    svc.offline = True
+    for name in ("curvefit", "all", "CurveFit", "Field + fit", True, "neighbor", "off"):
+        r = client.post("/api/neurons", json={"id": 987654321, "source": "i",
+                                              "section_corrections": name})
+        assert r.status_code != 422, (name, r.text)
+    assert client.post("/api/neurons", json={"id": 1, "source": "i",
+                                             "section_corrections": "sideways"}).status_code == 422
 
 
 def test_index_stamps_asset_urls(client):

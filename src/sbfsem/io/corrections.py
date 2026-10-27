@@ -29,14 +29,22 @@ adds them to ``Xum``/``Yum``, while ``VolumeX``/``VolumeY`` keep Viking's values
 
 The service also corrects whole structures (``CorrectStructures``, 2026-09-24),
 in one of Viking's ``CorrectionMode``\\ s (:data:`CORRECTION_MODES`): the
-residual field (``neighbor``), a leave-one-out Catmull-Rom fit along each traced
-process (``curvefit``), or both, the field first (``all``).  It maps each
-Location's section X/Y through the StosGroup itself and returns the correction
-on top of that mapping; :func:`fetch_structure_offsets` applies that correction
-to this cell's own positions, which with the live registration on are the same
-mapping; a Location the service places more than :data:`PLACEMENT_LIMIT_NM`
-away is left alone.  ``neighbor`` keeps sampling the field with
-``CorrectPoints`` at this cell's positions.
+residual field (``neighbor``, 0, the proto's default) or nothing (``none``).
+It maps each Location's section X/Y through the StosGroup itself and returns
+the correction on top of that mapping; :func:`fetch_structure_offsets` applies
+that correction to this cell's own positions, which with the live registration
+on are the same mapping; a Location the service places more than
+:data:`PLACEMENT_LIMIT_NM` away is left alone.  :func:`correct_neuron` and
+:class:`CorrectionsProvider` correct this way; :func:`fetch_offsets` still
+samples the field with ``CorrectPoints`` at this cell's positions.
+
+Until 2026-10-27 the service also ran a leave-one-out Catmull-Rom fit along each
+traced process (``curvefit``), alone or after the field (``all``).  It removed
+the fit as a default in service 1.5.0, after an 11-cell measurement found the
+field alone as good (mean linked-outline overlap 0.792, field then fit 0.791,
+with a quarter of the losses), and 1.5.1 answers the old numbers with the field.
+Those two names are read here as ``neighbor`` (:data:`RETIRED_MODES`), so a
+saved setting still loads, and nothing here asks for the fit.
 
 The messages are few and flat, so they are encoded here from the proto's field
 numbers (the ``*_SCHEMA`` tables) instead of generated protobuf classes:
@@ -63,7 +71,9 @@ __all__ = [
     "DEFAULT_TARGET",
     "SERVICE",
     "CORRECTION_MODES",
+    "RETIRED_MODES",
     "correction_mode",
+    "request_mode",
     "CorrectionsError",
     "CorrectionsUnavailable",
     "CorrectionNotFound",
@@ -97,33 +107,55 @@ SERVICE = "Viking.SectionCorrectionServiceTypes.gRPC.V2.AnnotateSectionCorrectio
 POINTS_PER_REQUEST = 20_000
 
 #: Viking's ``CorrectionMode``, numbered as protocol V2 numbers it: what a
-#: correction applies.  ``neighbor`` is the published residual field;
-#: ``curvefit`` a leave-one-out Catmull-Rom fit along each traced process;
-#: ``all`` both, the field first.  ``all`` is 0, proto3's default, so a request
-#: that leaves the mode out asks for ``all``.  ``none`` maps and corrects
-#: nothing.  (V1 numbered them none 0, neighbor 1, curvefit 2, all 3.)
-CORRECTION_MODES: dict[str, int] = {"none": 1, "neighbor": 2, "curvefit": 3, "all": 0}
+#: correction applies.  ``neighbor`` is the published residual field, and 0,
+#: proto3's default, so a request carries no mode at all (the encoder leaves a
+#: default out, as protobuf does); ``none`` maps and corrects nothing.  The
+#: proto reserves 2 and 3 (1.5.2 gives raw 2, 3 and 4 to a curve fit
+#: experiment), and nothing here sends them.  (V1 numbered them none 0,
+#: neighbor 1, curvefit 2, all 3; this client sent V2 neighbor 2, curvefit 3,
+#: all 0 from 2026-10-26 until 2026-10-27.)
+CORRECTION_MODES: dict[str, int] = {"neighbor": 0, "none": 1}
+
+#: The modes the service ran until 2026-10-27, read as ``neighbor``: its curve
+#: fit (``curvefit``) and the field then the fit (``all``), and the numbers
+#: this client sent for ``curvefit`` and ``neighbor`` (3 and 2; ``"0"`` has
+#: always meant off here, ``"1"`` on).  A saved session, Look, workspace or
+#: API call that names one is corrected by the field, and its status says
+#: ``neighbor``.
+RETIRED_MODES: frozenset[str] = frozenset({"curvefit", "all", "fieldfit", "2", "3"})
 
 
 def correction_mode(value) -> str:
-    """A correction setting as one name: ``off``, ``neighbor``, ``curvefit`` or ``all``.
+    """A correction setting as one name: ``off`` or ``neighbor``.
 
     ``True`` is ``neighbor``: what the on/off switch always meant, the residual
-    field.  ``False``, ``None``, ``"none"`` and the usual spellings of off are
-    ``off``.  Case, ``-`` and ``_`` are ignored (``"CurveFit"``, ``"curve_fit"``).
+    field, and so is every retired mode (:data:`RETIRED_MODES`: ``curvefit``,
+    ``all``).  ``False``, ``None``, ``"none"`` and the usual spellings of off
+    are ``off``.  Case, spaces, ``-``, ``_`` and ``+`` are ignored
+    (``"CurveFit"``, ``"curve_fit"``, ``"Field + fit"``).
     """
     if value is None or value is False:
         return "off"
     if value is True:
         return "neighbor"
-    text = str(value).strip().lower().replace("-", "").replace("_", "").replace(" ", "")
+    text = str(value).strip().lower()
+    for mark in ("-", "_", " ", "+"):
+        text = text.replace(mark, "")
     if text in ("", "off", "none", "0", "false", "no"):
         return "off"
-    if text in ("1", "true", "yes", "on", "field", "residual"):
+    if text in ("1", "true", "yes", "on", "field", "residual", "residualfield", "neighbor"):
         return "neighbor"
-    if text in CORRECTION_MODES:
-        return text
-    raise ValueError(f"not a correction mode: {value!r} (off, neighbor, curvefit or all)")
+    if text in RETIRED_MODES:
+        return "neighbor"
+    raise ValueError(f"not a correction mode: {value!r} (off or neighbor; the retired "
+                     "curvefit and all are read as neighbor)")
+
+
+def request_mode(mode: str) -> str:
+    """The :data:`CORRECTION_MODES` name a request for ``mode`` carries: ``none``
+    for off, else ``neighbor`` (a retired mode included).  Raises ``ValueError``
+    for a name :func:`correction_mode` does not know."""
+    return "none" if correction_mode(mode) == "off" else "neighbor"
 
 
 # -- errors -----------------------------------------------------------------
@@ -167,12 +199,10 @@ def names_volume(exc: Exception, *volume_names: str) -> bool:
 
 
 #: The correction modes one call answers, held together after it says their
-#: volume is unavailable: ``CorrectStructures`` maps each Location's section
-#: X/Y through the volume's transforms for ``curvefit`` and ``all`` alike;
-#: ``neighbor`` (``CorrectPoints``) samples the published field at positions
-#: mapped here.
-SAME_CALL: dict[str, tuple[str, ...]] = {
-    "neighbor": ("neighbor",), "curvefit": ("curvefit", "all"), "all": ("curvefit", "all")}
+#: volume is unavailable.  ``neighbor`` is the only one left: the curve fit's
+#: ``curvefit`` and ``all`` shared a ``CorrectStructures`` call until
+#: 2026-10-27.
+SAME_CALL: dict[str, tuple[str, ...]] = {"neighbor": ("neighbor",)}
 
 
 class CorrectionNotFound(CorrectionsError):
@@ -430,7 +460,7 @@ CORRECT_STRUCTURES_REQUEST_SCHEMA: Schema = {
     1: ("set", _SET_ID, False),
     2: ("structure_ids", "int64", True),
     3: ("include_children", "bool", False),
-    4: ("correction", "int32", False),  # CORRECTION_MODES; 0 (unset) is all
+    4: ("correction", "int32", False),  # CORRECTION_MODES; 0 (unset) is the field
     # The curve fit's extent ratio, once [Viking-Server] adds it to the request
     # (a neighbor more than this many times the node's XY extent is left out of
     # the fit; Slack #ai 1792522897.715849, not in V2 on 2026-10-26).  Then the
@@ -712,18 +742,20 @@ class CorrectionsClient:
             "set": {"volume_name": volume_name, "stos_group": stos_group},
             "structure_ids": [int(s) for s in structure_ids],
             "include_children": bool(include_children),
-            "correction": CORRECTION_MODES[mode],
+            # 0 or 1, never a reserved number (request_mode).
+            "correction": CORRECTION_MODES[request_mode(mode)],
         }
 
     def correct_structures(self, volume_name: str, stos_group: str, structure_ids: Iterable[int],
-                           *, include_children: bool = True, mode: str = "all",
+                           *, include_children: bool = True, mode: str = "neighbor",
                            timeout: float | None = None) -> pd.DataFrame:
         """Viking's correction of whole structures: one row per Location.
 
         ``location_id``, ``structure_id``, ``z``; ``x``, ``y``: the corrected
         position, volume nm -- the Location's section X/Y mapped through
         ``stos_group``, then corrected; ``dx``, ``dy``: the correction alone.
-        ``mode`` is a :data:`CORRECTION_MODES` name.  The answer's stamp
+        ``mode`` is a :data:`CORRECTION_MODES` name (a retired one asks for
+        ``neighbor``, :func:`request_mode`).  The answer's stamp
         (:meth:`answer_stamp`'s, as the answer was made) is in ``attrs["stamp"]``.
         """
         request = self._structures_request(volume_name, stos_group, structure_ids,
@@ -746,7 +778,7 @@ class CorrectionsClient:
         return frame
 
     def answer_stamp(self, volume_name: str, stos_group: str, structure_ids: Iterable[int],
-                     *, include_children: bool = True, mode: str = "all") -> dict:
+                     *, include_children: bool = True, mode: str = "neighbor") -> dict:
         """What ``CorrectStructures`` would stamp its answer to this request with
         now, from the service's SQL aggregates and set catalog alone (well under
         a second): ``service_version``, ``field_built_utc`` (``None`` when the
@@ -962,6 +994,7 @@ PLACEMENT_LIMIT_NM = 20_000.0
 
 
 def _structures_key(client: CorrectionsClient, cset: CorrectionSet, neuron, mode: str) -> str:
+    # ``mode`` is a request_mode name: a retired one is kept under ``neighbor``.
     stamp = neuron.data_stamp.isoformat() if getattr(neuron, "data_stamp", None) else "unstamped"
     # v2: trusted by PLACEMENT_LIMIT_NM, not by empty X/Y columns.  v3: and by
     # the service's own stamp, not the set's build time alone.  v4: that stamp
@@ -986,7 +1019,7 @@ def _stamp_record(stamp: dict | None) -> dict | None:
 
 
 def fetch_structure_offsets(neuron, client: CorrectionsClient, cset: CorrectionSet,
-                            mode: str = "curvefit", *, cache=None, allow_fetch: bool = True,
+                            mode: str = "neighbor", *, cache=None, allow_fetch: bool = True,
                             timeout: float | None = None) -> CellCorrection:
     """``CorrectStructures`` for ``neuron`` and its child structures, as offsets.
 
@@ -1002,13 +1035,14 @@ def fetch_structure_offsets(neuron, client: CorrectionsClient, cset: CorrectionS
     ``GetAnswerStamp`` (:meth:`CorrectionsClient.answer_stamp`: about 0.1 s,
     against 6 s for RC1 c410's fit) instead of the fit.  Equal stamps mean an
     identical answer ([Viking-Server]), so the kept one is used; a stamp that
-    moved -- a new service version, a rebuilt field (``all``), an annotation
-    of the structures added, changed or deleted -- asks ``CorrectStructures``
-    again.
+    moved -- a new service version, a rebuilt field, an annotation of the
+    structures added, changed or deleted -- asks ``CorrectStructures`` again.
+    ``mode`` is read by :func:`request_mode`: a retired one asks for the field.
     ``allow_fetch=False`` uses the kept answer without asking, and so does a
     stamp the service cannot give, with the error in ``stamp_error`` and
     ``extras["service_note"]``.
     """
+    mode = request_mode(mode)
     nodes = neuron.nodes
     key = _structures_key(client, cset, neuron, mode)
     kept = (cache.get(key) if cache is not None else None) or {}
@@ -1074,12 +1108,13 @@ def correct_neuron(neuron, client: CorrectionsClient | None = None, *,
                    mode: str = "neighbor") -> CellCorrection | None:
     """Apply Viking's section correction to a freshly loaded neuron.
 
-    ``mode`` ``neighbor`` samples the published residual field at each
-    annotation (``CorrectPoints``); ``curvefit`` and ``all`` ask the service to
-    correct the whole structure (``CorrectStructures``).  ``None`` (the neuron
-    untouched) when the volume has no published set, or not the
-    ``stos_group`` asked for.  Service failures propagate as
-    :class:`CorrectionsError`.
+    ``mode`` ``neighbor`` (or ``True``, or a retired mode, :func:`correction_mode`)
+    asks the service to correct the whole structure by the published residual
+    field (``CorrectStructures``, :func:`fetch_structure_offsets`); off does
+    nothing.  ``None`` (the neuron untouched) when the volume has no published
+    set, or not the ``stos_group`` asked for.  Service failures propagate as
+    :class:`CorrectionsError`.  Until 2026-10-27 ``neighbor`` sampled the field
+    at the cell's positions (``CorrectPoints``, still :func:`fetch_offsets`).
     """
     mode = correction_mode(mode)
     if mode == "off":
@@ -1095,11 +1130,7 @@ def correct_neuron(neuron, client: CorrectionsClient | None = None, *,
         cset = choose_set(client.correction_sets(volume_name), stos_group)
         if cset is None:
             return None
-        if mode == "neighbor":
-            correction = fetch_offsets(neuron, client, cset, cache=cache)
-            correction.extras["mode"] = mode
-        else:
-            correction = fetch_structure_offsets(neuron, client, cset, mode, cache=cache)
+        correction = fetch_structure_offsets(neuron, client, cset, mode, cache=cache)
     finally:
         if own:
             client.close()
@@ -1175,7 +1206,9 @@ class CorrectionsProvider:
     def held(self, volume_name: str, mode: str, structure: int | None = None) -> str:
         """Why this volume (or, with ``structure``, that structure of it) is
         not asked for ``mode`` just now: the service's error and until when
-        (UTC); empty when it may be asked.  A held volume holds every structure."""
+        (UTC); empty when it may be asked.  A held volume holds every structure.
+        A retired ``mode`` is the field's (:func:`request_mode`)."""
+        mode = request_mode(mode)
         now = time.monotonic()
         with self._lock:
             until, error = self._held.get((volume_name, mode), (0.0, ""))
@@ -1305,12 +1338,15 @@ class CorrectionsProvider:
     def correct(self, neuron, mode: str = "neighbor") -> CellCorrection | None:
         """Apply Viking's correction to ``neuron`` in ``mode`` (see :func:`correct_neuron`).
 
-        ``None`` when its volume has no published set.  While the service is
+        ``None`` when ``mode`` is off or its volume has no published set.  While the service is
         paused, or the volume or this structure is held after a failure in the
         service, only offsets on disk are used, and so they are when the
         service cannot say whether a ``CorrectStructures`` answer on disk is
         still its answer.
         """
+        if correction_mode(mode) == "off":
+            return None
+        mode = request_mode(mode)
         volume_name = neuron.volume.viking_name
         if not volume_name:
             return None  # see correct_neuron: no name would list every volume's sets
@@ -1323,16 +1359,11 @@ class CorrectionsProvider:
         # Sets asked for within sets_ttl_s are fresh during a pause as well.
         fresh = fresh and not self.paused
         try:
-            if mode == "neighbor":
-                correction = fetch_offsets(neuron, self.client, cset, cache=self.cache,
-                                           allow_fetch=fresh and not held)
-                correction.extras["mode"] = mode
-            else:
-                correction = fetch_structure_offsets(
-                    neuron, self.client, cset, mode, cache=self.cache,
-                    allow_fetch=fresh and not held, timeout=self.structures_timeout)
-                if correction.stamp_error is not None:
-                    self._unchecked(volume_name, cset, mode, correction, structure)
+            correction = fetch_structure_offsets(
+                neuron, self.client, cset, mode, cache=self.cache,
+                allow_fetch=fresh and not held, timeout=self.structures_timeout)
+            if correction.stamp_error is not None:
+                self._unchecked(volume_name, cset, mode, correction, structure)
         except CorrectionsUnavailable as exc:
             if held:
                 raise CorrectionsError(held) from exc

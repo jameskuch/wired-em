@@ -7,7 +7,11 @@ hand-written codec is held to what protobuf's own serializer writes and reads.
 The end-to-end tests run a local gRPC server that answers the way
 ``CorrectionsService`` does over protocol V2 (``CorrectPoints`` adds the
 sampled offset and answers the sections in request order; a section with no
-map comes back not found and untrusted).
+map comes back not found and untrusted; ``CorrectStructures`` answers mode 0,
+the field, and 1, none, and refuses any other number with INVALID_ARGUMENT, as
+service 1.5.0 did on 2026-10-27).  The NONE and NEIGHBOR request bytes were
+encoded by protoc from a proto with V2's ``CorrectStructuresRequest`` fields
+and ``CorrectionMode`` numbers (2026-10-27).
 """
 
 from __future__ import annotations
@@ -32,8 +36,8 @@ GOLDEN = {
     "rebuild_status": "0801120608e09ed7d5062204626f6f6d2a05312e342e30320e496e666572696f724d6f6e6b65793a0766697474696e6740034808",
     "section_request_negative_z": "0a180a0e496e666572696f724d6f6e6b6579120647726964313610ffffffffffffffffff01",
     "list_volumes_response": "0a500a0e496e666572696f724d6f6e6b6579122268747470733a2f2f6578616d706c652f696e666572696f722f56696b696e67584d4c1a1a68747470733a2f2f6578616d706c652f616e6e6f746174696f6e",
-    "correct_structures_request": "0a200a0e496e666572696f724d6f6e6b6579120e536c696365546f566f6c756d6531120488aa010518012003",
-    "correct_structures_request_all": "0a200a0e496e666572696f724d6f6e6b6579120e536c696365546f566f6c756d6531120488aa01051801",
+    "correct_structures_request_none": "0a200a0e496e666572696f724d6f6e6b6579120e536c696365546f566f6c756d6531120488aa010518012001",
+    "correct_structures_request_neighbor": "0a200a0e496e666572696f724d6f6e6b6579120e536c696365546f566f6c756d6531120488aa01051801",
     "correct_structures_response": "0a33089bd50f1088aa0118940622120900000000e40a00411100000000488a04412a120900000000000029401100000000000024c00a02080512320a05312e342e30120608b882c9d5061a19313a353532353a36333932383233343237323432333030303022060880f7c4d506",
     "answer_stamp": "0a05312e342e301a19313a353532353a363339323832333432373234323330303030220c0880f7c4d50610c0efd9c901",
 }
@@ -47,8 +51,9 @@ def golden(name: str) -> bytes:
 def test_the_client_speaks_protocol_v2():
     # V1 answers every call UNIMPLEMENTED since 2026-10-26 15:13 UTC (service 1.4.0).
     assert corr.SERVICE == "Viking.SectionCorrectionServiceTypes.gRPC.V2.AnnotateSectionCorrections"
-    # V2's CorrectionMode: ALL is 0, the default, then NONE, NEIGHBOR, CURVE_FIT.
-    assert corr.CORRECTION_MODES == {"none": 1, "neighbor": 2, "curvefit": 3, "all": 0}
+    # V2's CorrectionMode since service 1.5.0 (2026-10-27): NEIGHBOR 0, the default, and
+    # NONE 1; 2 and 3 are reserved, and 1.5.2 gives raw 2, 3 and 4 to a curve fit experiment.
+    assert corr.CORRECTION_MODES == {"neighbor": 0, "none": 1}
 
 
 def test_encode_matches_protobuf_for_a_correct_points_request():
@@ -186,6 +191,8 @@ class FakeService:
         self.moves: dict[int, tuple[float, float]] = {}
         self.structure_requests: list[dict] = []
         self.stamp_requests: list[dict] = []
+        # Every CorrectionMode number the client sent, refused or not.
+        self.modes_sent: list[int] = []
         self.fail_structures: bool | set[int] = False
         self.fail_code = "UNKNOWN"
         # The volumes it publishes a set for, and the (status, details) it
@@ -233,6 +240,26 @@ class FakeService:
             if failing:
                 context.abort(getattr(grpc.StatusCode, failing[0]), failing[1])
 
+        def field_at(z, x, y):
+            """CorrectPoints' rule for one point: (dx, dy, trusted, found)."""
+            entry = self.field.get(z, self.field.get("*"))
+            if entry is None:
+                return 0.0, 0.0, False, False
+            dx, dy, radius = entry
+            near = bool(np.hypot(x, y) <= radius)
+            return (dx, dy, near, True) if near else (0.0, 0.0, False, True)
+
+        def mode_of(request, context):
+            # As service 1.5.0 answered it: 0 (left out of the request) the field,
+            # 1 none, any other number refused.
+            number = request["correction"]
+            self.modes_sent.append(number)
+            names = {n: name for name, n in corr.CORRECTION_MODES.items()}
+            if number not in names:
+                context.abort(grpc.StatusCode.INVALID_ARGUMENT,
+                              f"unknown correction mode {number}")
+            return names[number]
+
         def correct(request, context):
             volume_down(request, context)
             if request["set"]["stos_group"] != "Grid16":
@@ -258,13 +285,11 @@ class FakeService:
                 out.append({"found": entry is not None, "points": points})
             return {"sections": out}
 
-        def stamp(request):
+        def stamp(mode):
             # What an answer to this request depends on: the field only in the
-            # modes that sample it (V2's AnswerStamp).
-            mode = {n: name for name, n in corr.CORRECTION_MODES.items()}[request["correction"]]
+            # mode that samples it (V2's AnswerStamp).
             return {"service_version": self.version,
-                    "field_built_utc": ({"seconds": self.built}
-                                        if mode in ("neighbor", "all") else None),
+                    "field_built_utc": ({"seconds": self.built} if mode == "neighbor" else None),
                     "annotation_fingerprint": self.fingerprint,
                     "annotation_watermark": {"seconds": 1790000000}}
 
@@ -277,18 +302,25 @@ class FakeService:
                               "Exception was thrown by handler.")
             if request["set"]["stos_group"] != "Grid16":
                 context.abort(grpc.StatusCode.NOT_FOUND, "no correction set")
-            # 0, left out of the request, is ALL.
-            mode = {n: name for name, n in corr.CORRECTION_MODES.items()}[request["correction"]]
-            fit = self.fit.get(mode, (0.0, 0.0))
+            # 0, left out of the request, is NEIGHBOR: the field where the service
+            # places each Location, unless the test gave the mode one offset for all.
+            mode = mode_of(request, context)
             wanted = set(request["structure_ids"])
             out = []
             for loc in self.locations:
                 if loc["structure_id"] in wanted or request["include_children"]:
-                    dx, dy = self.moves.get(loc["location_id"], fit)
+                    if loc["location_id"] in self.moves:
+                        dx, dy = self.moves[loc["location_id"]]
+                    elif mode in self.fit:
+                        dx, dy = self.fit[mode]
+                    elif mode == "neighbor":
+                        dx, dy = field_at(loc["z"], loc["x"], loc["y"])[:2]
+                    else:
+                        dx, dy = 0.0, 0.0
                     out.append({**{k: loc[k] for k in ("location_id", "structure_id", "z")},
                                 "position": {"x": loc["x"] + dx, "y": loc["y"] + dy},
                                 "offset": {"x": dx, "y": dy}})
-            return {"locations": out, "stamp": stamp(request)}
+            return {"locations": out, "stamp": stamp(mode)}
 
         def rebuild_status(request, context):
             return {"in_progress": False, "last_completed_utc": {"seconds": self.rebuilt},
@@ -298,7 +330,7 @@ class FakeService:
             self.stamp_requests.append(request)
             if self.stamp_error:
                 context.abort(getattr(grpc.StatusCode, self.stamp_error[0]), self.stamp_error[1])
-            return stamp(request)
+            return stamp(mode_of(request, context))
 
         return grpc.method_handlers_generic_handler(corr.SERVICE, {
             "GetRebuildStatus": unary("GetRebuildStatus", corr.EMPTY_SCHEMA,
@@ -323,6 +355,8 @@ def service():
         # Section 937 is published but has no support where the cell is.
         937: (500.0, 500.0, 0.0),
     })
+    # c9's Locations where make_neuron has them, as the service maps them.
+    fake.locations = locations_of(make_neuron())
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
     server.add_generic_rpc_handlers((fake.handler(),))
     port = server.add_insecure_port("127.0.0.1:0")
@@ -332,6 +366,16 @@ def service():
         yield fake, f"http://127.0.0.1:{port}"
     finally:
         server.stop(None)
+
+
+def locations_of(neuron, structure_id: int | None = None) -> list[dict]:
+    """``neuron``'s annotations as the fake's ``CorrectStructures`` knows them: at
+    their stored positions in volume nm (no live registration in these tests)."""
+    sx, sy = map(float, neuron.volume_scale[:2])
+    sid = int(neuron.id if structure_id is None else structure_id)
+    return [{"location_id": int(r.ID), "structure_id": sid, "z": int(r.Z),
+             "x": float(r.VolumeX) * sx, "y": float(r.VolumeY) * sy}
+            for r in neuron.nodes.drop_duplicates("ID").itertuples()]
 
 
 def make_neuron(with_curve: bool = True, source: str = "i") -> Neuron:
@@ -381,12 +425,15 @@ def test_correct_neuron_moves_trusted_annotations_only(service):
     np.testing.assert_array_equal(neuron.geometries.iloc[0]["Curve"][0], ring_before)
     summary = neuron.section_correction
     assert summary["n_annotations"] == 5
-    assert summary["n_found"] == 3  # 936 x2 and 937
-    assert summary["n_trusted"] == 1
+    # The service corrects every Location of the structure, by nothing where the
+    # field has no support; each is placed where the cell has it.
+    assert summary["n_found"] == summary["n_trusted"] == 5
     assert summary["n_moved"] == 1
     assert summary["max_um"] == pytest.approx(np.hypot(0.12, 0.08))
-    assert fake.calls == ["ListCorrectionSets", "CorrectPoints"]
-    assert fake.points_seen == 5
+    assert summary["mode"] == "neighbor"
+    # The field is asked of CorrectStructures, with no mode on the wire: 0, NEIGHBOR.
+    assert fake.calls == ["ListCorrectionSets", "CorrectStructures"]
+    assert fake.modes_sent == [0]
 
 
 def test_a_closed_curve_moves_with_its_annotation(service):
@@ -427,7 +474,8 @@ def test_cached_offsets_are_not_fetched_again(service, tmp_path):
         first = corr.correct_neuron(make_neuron(), client, cache=cache)
         again = make_neuron()
         second = corr.correct_neuron(again, client, cache=cache)
-    assert fake.calls.count("CorrectPoints") == 1
+    assert fake.calls.count("CorrectStructures") == 1
+    assert fake.calls.count("GetAnswerStamp") == 1  # the answer on disk, checked
     assert second.cached and not first.cached
     assert second.token == first.token
     assert again.section_correction["cached"] is True
@@ -492,7 +540,7 @@ def test_provider_falls_back_to_what_it_remembers(service, tmp_path):
             offline.correct(other)
     finally:
         offline.close()
-    assert fake.calls.count("CorrectPoints") == 1
+    assert fake.calls.count("CorrectStructures") == 1
 
 
 def test_provider_pauses_after_a_failure(monkeypatch):
@@ -517,6 +565,8 @@ def web(service, tmp_path):
     """A service with corrections on, c1178's annotations from the cassette."""
     from pathlib import Path
 
+    from sbfsem.core.volumes import Volumes
+    from sbfsem.io.loader import NeuronLoader
     from sbfsem.io.odata import ODataClient
     from sbfsem.service.facade import SbfsemService
 
@@ -524,9 +574,12 @@ def web(service, tmp_path):
     fake.field.clear()
     fake.field["*"] = (120.0, -80.0, 1e12)
     cassettes = Path(__file__).resolve().parents[1] / "cassettes"
+    odata = ODataClient("i", cache=DiskCache(cassettes), offline=True)
+    # c1178 and its child structures, as the service's CorrectStructures finds them.
+    fake.locations = locations_of(
+        NeuronLoader(Volumes.from_str("i"), client=odata).load(1178, include_synapses=False))
     svc = SbfsemService(cache_dir=tmp_path, section_corrections=True, corrections_url=url)
-    svc._clients["NeitzInferiorMonkey"] = ODataClient(
-        "i", cache=DiskCache(cassettes), offline=True)
+    svc._clients["NeitzInferiorMonkey"] = odata
     yield fake, svc
     svc.close()
 
@@ -643,19 +696,36 @@ def test_exports_say_the_positions_were_corrected(service, tmp_path):
     np.testing.assert_allclose(back.nodes["CorrDXnm"], [120.0] * 5)
 
 
-# -- CorrectStructures and the modes (2026-09-24; protocol V2 2026-10-26) -------
+# -- CorrectStructures and the modes (2026-09-24; protocol V2 2026-10-26; field only 2026-10-27)
 def test_encode_correct_structures_like_protobuf():
     request = {"set": {"volume_name": "InferiorMonkey", "stos_group": "SliceToVolume1"},
                "structure_ids": [21768, 5], "include_children": True}
     schema = corr.CORRECT_STRUCTURES_REQUEST_SCHEMA
-    curvefit = {**request, "correction": corr.CORRECTION_MODES["curvefit"]}
-    assert corr.encode(curvefit, schema) == golden("correct_structures_request")
-    # ALL is 0, proto3's default, so protobuf leaves it out, as the codec does;
-    # the service reads an absent mode as ALL.
-    everything = {**request, "correction": corr.CORRECTION_MODES["all"]}
-    assert corr.encode(everything, schema) == golden("correct_structures_request_all")
-    assert corr.decode(golden("correct_structures_request_all"), schema)["correction"] == 0
-    assert corr.decode(golden("correct_structures_request"), schema) == curvefit
+    none = {**request, "correction": corr.CORRECTION_MODES["none"]}
+    assert corr.encode(none, schema) == golden("correct_structures_request_none")
+    assert corr.decode(golden("correct_structures_request_none"), schema) == none
+    # NEIGHBOR is 0, proto3's default, so protobuf leaves it out, as the codec does;
+    # the service reads an absent mode as NEIGHBOR.
+    field = {**request, "correction": corr.CORRECTION_MODES["neighbor"]}
+    assert corr.encode(field, schema) == golden("correct_structures_request_neighbor")
+    assert corr.decode(golden("correct_structures_request_neighbor"), schema)["correction"] == 0
+
+
+def test_no_request_carries_a_mode_the_service_reserves():
+    """1.5.2 gives raw 2, 3 and 4 to a curve fit experiment: 3 is the fit alone,
+    without the field.  Whatever name a request is made with, a saved or retired
+    one included, it carries 0 (left out) or 1, and never anything else."""
+    with corr.CorrectionsClient("http://127.0.0.1:9") as client:
+        for name in ("neighbor", "Neighbor", "curvefit", "CurveFit", "all", "ALL", "Field + fit", True,
+                     "on", "1", "2", "3", "field"):
+            request = client._structures_request("RC1", "grid16", [410], True, name)
+            assert request["correction"] == 0, name
+            assert b"\x20" not in corr.encode(request, corr.CORRECT_STRUCTURES_REQUEST_SCHEMA)[-2:], name
+        for name in ("none", "off", False, None, "0"):
+            assert client._structures_request("RC1", "grid16", [410], True, name)["correction"] == 1, name
+        for name in ("4", "sideways"):
+            with pytest.raises(ValueError):
+                client._structures_request("RC1", "grid16", [410], True, name)
 
 
 def test_decode_correct_structures_response_and_its_stamp():
@@ -683,12 +753,17 @@ def test_correction_mode_names():
     assert corr.correction_mode(True) == "neighbor"  # what the old switch meant
     for off in (False, None, "off", "none", "0", "", "No"):
         assert corr.correction_mode(off) == "off"
-    assert corr.correction_mode("CurveFit") == "curvefit"
-    assert corr.correction_mode("curve_fit") == "curvefit"
-    assert corr.correction_mode("ALL") == "all"
     assert corr.correction_mode("1") == "neighbor"
-    with pytest.raises(ValueError):
-        corr.correction_mode("sideways")
+    assert corr.correction_mode("Residual field") == "neighbor"
+    # The modes Viking's service ran until 2026-10-27, read as the field: from a
+    # saved session, a Look, an environment variable or an API caller.
+    for retired in ("CurveFit", "curve_fit", "curvefit", "ALL", "all", "Field + fit", "2", "3"):
+        assert corr.correction_mode(retired) == "neighbor", retired
+    assert {"curvefit", "all"} <= corr.RETIRED_MODES
+    for unknown in ("sideways", "4"):
+        with pytest.raises(ValueError):
+            corr.correction_mode(unknown)
+    assert (corr.request_mode("curvefit"), corr.request_mode("off")) == ("neighbor", "none")
 
 
 def make_structure_neuron(source: str = "i") -> Neuron:
@@ -702,25 +777,29 @@ def make_structure_neuron(source: str = "i") -> Neuron:
 
 @pytest.fixture
 def structures(service):
-    """The fake knows Locations 1, 2, 3 and 5 of c9 (not 4); curvefit adds
-    (+120, -80) nm to each, all (+60, +40)."""
+    """The fake knows Locations 1, 2, 3 and 5 of c9 (not 4); the field adds
+    (+120, -80) nm to each."""
     fake, url = service
     fake.locations = [{"location_id": i, "structure_id": 9, "z": z, "x": 7500.0, "y": 15000.0}
                       for i, z in ((1, 935), (2, 936), (3, 937), (5, 936))]
-    fake.fit = {"curvefit": (120.0, -80.0), "all": (60.0, 40.0)}
+    fake.fit = {"neighbor": (120.0, -80.0)}
     return fake, url
 
 
-def test_curvefit_moves_what_the_service_corrected(structures):
+@pytest.mark.parametrize("mode", ["neighbor", "curvefit", "all", True])
+def test_the_field_moves_what_the_service_corrected(structures, mode):
+    """A retired mode (a saved session, an API call) asks for the field, as the
+    field itself does: no number but 0 goes on the wire."""
     fake, url = structures
     neuron = make_structure_neuron()
     before = neuron.nodes.set_index("ID")[["Xum", "Yum"]].copy()
     with corr.CorrectionsClient(url) as client:
-        result = corr.correct_neuron(neuron, client, mode="curvefit")
+        result = corr.correct_neuron(neuron, client, mode=mode)
     assert result is not None
     (request,) = fake.structure_requests
     assert request["structure_ids"] == [9] and request["include_children"] is True
-    assert request["correction"] == corr.CORRECTION_MODES["curvefit"] == 3
+    assert request["correction"] == corr.CORRECTION_MODES["neighbor"] == 0
+    assert fake.modes_sent == [0]
     shift = (neuron.nodes.set_index("ID")[["Xum", "Yum"]] - before).round(9)
     for i in (1, 2, 3):
         assert shift.loc[i].tolist() == [0.12, -0.08]
@@ -729,7 +808,7 @@ def test_curvefit_moves_what_the_service_corrected(structures):
     for i in (4, 5):
         assert shift.loc[i].tolist() == [0.0, 0.0]
     s = neuron.section_correction
-    assert s["mode"] == "curvefit"
+    assert s["mode"] == "neighbor"
     assert (s["n_annotations"], s["n_found"], s["n_trusted"], s["n_moved"]) == (5, 4, 3, 3)
     assert fake.calls == ["ListCorrectionSets", "CorrectStructures"]
 
@@ -741,22 +820,27 @@ def test_a_line_placed_where_the_cell_has_it_is_corrected(structures):
     fake.locations[-1]["x"] = 67500.0  # Location 5 where the cell has it: 9,000 px x 7.5 nm
     neuron = make_structure_neuron()
     with corr.CorrectionsClient(url) as client:
-        corr.correct_neuron(neuron, client, mode="curvefit")
+        corr.correct_neuron(neuron, client, mode="neighbor")
     assert neuron.section_correction["n_trusted"] == 4
     row = neuron.nodes.set_index("ID").loc[5]
     assert (row["CorrDXnm"], row["CorrDYnm"]) == (120.0, -80.0)
 
 
 def test_structure_offsets_are_kept_per_mode(structures, tmp_path):
+    """The field's answer is kept once, whatever name asked for it; none, the
+    other mode, is kept apart."""
     fake, url = structures
     cache = DiskCache(tmp_path)
     with corr.CorrectionsClient(url) as client:
-        first = corr.correct_neuron(make_structure_neuron(), client, cache=cache, mode="curvefit")
+        cset = corr.choose_set(client.correction_sets("InferiorMonkey"))
+        first = corr.correct_neuron(make_structure_neuron(), client, cache=cache, mode="neighbor")
         again = corr.correct_neuron(make_structure_neuron(), client, cache=cache, mode="curvefit")
-        both = corr.correct_neuron(make_structure_neuron(), client, cache=cache, mode="all")
-    assert [r["correction"] for r in fake.structure_requests] == [3, 0]  # curvefit, all
-    assert again.cached and again.token == first.token
-    assert both.token != first.token and both.summary()["mode"] == "all"
+        also = corr.correct_neuron(make_structure_neuron(), client, cache=cache, mode="all")
+        none = corr.fetch_structure_offsets(make_structure_neuron(), client, cset, "none", cache=cache)
+    assert [r["correction"] for r in fake.structure_requests] == [0, 1]  # the field, none
+    assert again.cached and again.token == first.token and again.summary()["mode"] == "neighbor"
+    assert also.cached and also.token == first.token
+    assert not none.cached and none.token != first.token and none.extras["mode"] == "none"
 
 
 def test_a_service_version_keys_the_cache_instead_of_restarts(structures, tmp_path):
@@ -766,12 +850,12 @@ def test_a_service_version_keys_the_cache_instead_of_restarts(structures, tmp_pa
     fake.version = "1.1.0"
     provider = corr.CorrectionsProvider(url, cache=DiskCache(tmp_path), sets_ttl_s=0)
     try:
-        provider.correct(make_structure_neuron(), "curvefit")
+        provider.correct(make_structure_neuron(), "neighbor")
         fake.rebuilt += 3600  # restarted, same version
-        kept = provider.correct(make_structure_neuron(), "curvefit")
+        kept = provider.correct(make_structure_neuron(), "neighbor")
         assert kept.cached and len(fake.structure_requests) == 1
         fake.version = "1.1.1"
-        fresh = provider.correct(make_structure_neuron(), "curvefit")
+        fresh = provider.correct(make_structure_neuron(), "neighbor")
         assert not fresh.cached and len(fake.structure_requests) == 2
     finally:
         provider.close()
@@ -782,15 +866,19 @@ def test_service_version_is_read_from_the_status_and_the_answers(structures):
     fake.version = "1.4.0"
     with corr.CorrectionsClient(url) as client:
         assert client.rebuild_status()["service_version"] == "1.4.0"
-        frame = client.correct_structures("InferiorMonkey", "Grid16", [9], mode="curvefit")
-        stamp = client.answer_stamp("InferiorMonkey", "Grid16", [9], mode="curvefit")
+        frame = client.correct_structures("InferiorMonkey", "Grid16", [9])
+        stamp = client.answer_stamp("InferiorMonkey", "Grid16", [9])
+        none = client.answer_stamp("InferiorMonkey", "Grid16", [9], mode="none")
     assert list(frame.columns) == ["location_id", "structure_id", "z", "x", "y", "dx", "dy"]
     assert frame["location_id"].tolist() == [1, 2, 3, 5]
     assert frame[["dx", "dy"]].drop_duplicates().to_numpy().tolist() == [[120.0, -80.0]]
     assert frame.attrs["stamp"]["service_version"] == stamp["service_version"] == "1.4.0"
-    assert stamp["annotation_fingerprint"] == "f1" and stamp["field_built_utc"] is None
+    # The field's answer names the field it sampled; none's samples nothing.
+    assert stamp["annotation_fingerprint"] == "f1"
+    assert stamp["field_built_utc"] == datetime.fromtimestamp(fake.built, tz=UTC)
+    assert none["field_built_utc"] is None
     # GetAnswerStamp takes the very request CorrectStructures does.
-    assert fake.stamp_requests == fake.structure_requests
+    assert fake.stamp_requests[:1] == fake.structure_requests
 
 
 def test_the_sets_name_their_sections(service):
@@ -825,25 +913,25 @@ def test_the_answer_stamp_keeps_a_cached_answer_until_it_moves(structures, tmp_p
     cache = DiskCache(tmp_path)
     provider = corr.CorrectionsProvider(url, cache=cache, sets_ttl_s=0)
     try:
-        first = provider.correct(make_structure_neuron(), "curvefit")
+        first = provider.correct(make_structure_neuron(), "neighbor")
         assert not first.cached and fake.stamp_requests == []  # the answer came with its stamp
-        kept = provider.correct(make_structure_neuron(), "curvefit")
+        kept = provider.correct(make_structure_neuron(), "neighbor")
         assert kept.cached and kept.token == first.token
         assert len(fake.structure_requests) == 1 and len(fake.stamp_requests) == 1
         fake.rebuilt += 3600  # a restart (it rebuilds on start) moves no stamp
-        assert provider.correct(make_structure_neuron(), "curvefit").cached
+        assert provider.correct(make_structure_neuron(), "neighbor").cached
         assert len(fake.structure_requests) == 1
 
         fake.fingerprint = "f2"  # a Location of c9 deleted in Viking
-        fake.fit["curvefit"] = (100.0, -60.0)
+        fake.fit["neighbor"] = (100.0, -60.0)
         neuron = make_structure_neuron()
         assert neuron.data_stamp == make_structure_neuron().data_stamp
-        fresh = provider.correct(neuron, "curvefit")
+        fresh = provider.correct(neuron, "neighbor")
         assert not fresh.cached and fresh.token != first.token
         assert len(fake.structure_requests) == 2
         moved = neuron.nodes.set_index("ID").loc[1, ["CorrDXnm", "CorrDYnm"]].tolist()
         assert moved == [100.0, -60.0]
-        again = provider.correct(make_structure_neuron(), "curvefit")
+        again = provider.correct(make_structure_neuron(), "neighbor")
         assert again.cached and again.token == fresh.token
         assert len(fake.structure_requests) == 2 and len(fake.stamp_requests) == 4
     finally:
@@ -853,27 +941,29 @@ def test_the_answer_stamp_keeps_a_cached_answer_until_it_moves(structures, tmp_p
     try:
         asked = len(fake.calls)
         neuron = make_structure_neuron()
-        kept = offline.correct(neuron, "curvefit")
+        kept = offline.correct(neuron, "neighbor")
         assert kept.cached and kept.token == fresh.token and len(fake.calls) == asked
         assert neuron.section_correction["service_note"] == "offline"
     finally:
         offline.close()
 
 
-def test_a_rebuilt_field_asks_again_for_all_and_not_for_the_curve_fit(structures, tmp_path):
-    """The stamp names the field's build time only in a mode that samples the
-    field: while the set's build time was in the key (to 2.39.1), a rebuilt
-    field asked the curve fit again too."""
+def test_a_rebuilt_field_asks_again(structures, tmp_path):
+    """The stamp names the field's build time: a rebuilt field moves it, and the
+    field's answer is asked for again (none's, which samples no field, is kept)."""
     fake, url = structures
     provider = corr.CorrectionsProvider(url, cache=DiskCache(tmp_path), sets_ttl_s=0)
+    cache = DiskCache(tmp_path / "none")
     try:
-        for mode in ("curvefit", "all"):
-            provider.correct(make_structure_neuron(), mode)
+        cset = corr.choose_set(provider.client.correction_sets("InferiorMonkey"))
+        provider.correct(make_structure_neuron(), "neighbor")
+        corr.fetch_structure_offsets(make_structure_neuron(), provider.client, cset, "none", cache=cache)
         fake.built += 86400
-        assert provider.correct(make_structure_neuron(), "curvefit").cached
-        assert not provider.correct(make_structure_neuron(), "all").cached
-        assert provider.correct(make_structure_neuron(), "all").cached
-        assert [r["correction"] for r in fake.structure_requests] == [3, 0, 0]
+        assert corr.fetch_structure_offsets(make_structure_neuron(), provider.client, cset, "none",
+                                            cache=cache).cached
+        assert not provider.correct(make_structure_neuron(), "neighbor").cached
+        assert provider.correct(make_structure_neuron(), "all").cached  # a retired name: the same answer
+        assert [r["correction"] for r in fake.structure_requests] == [0, 1, 0]
     finally:
         provider.close()
 
@@ -886,37 +976,37 @@ def test_a_stamp_the_service_cannot_give_leaves_the_answer_on_disk_applied(struc
     provider = corr.CorrectionsProvider(url, cache=DiskCache(tmp_path), timeout=3.0,
                                         retry_after_s=0.5, volume_retry_s=60)
     try:
-        first = provider.correct(structure_neuron(9), "all")
+        first = provider.correct(structure_neuron(9), "neighbor")
         # An exception in the service's handler: applied from disk, nothing held.
         fake.stamp_error = ("UNKNOWN", "Exception was thrown by handler.")
         neuron = structure_neuron(9)
-        kept = provider.correct(neuron, "all")
+        kept = provider.correct(neuron, "neighbor")
         assert kept.cached and kept.token == first.token
         assert neuron.section_correction["n_moved"] == 3
         assert "GetAnswerStamp" in neuron.section_correction["service_note"]
-        assert not provider.paused_for("InferiorMonkey", "all", 9)
-        # It could not reach the volume's server: that volume is held, in both modes.
+        assert not provider.paused_for("InferiorMonkey", "neighbor", 9)
+        # It could not reach the volume's server: that volume is held.
         fake.stamp_error = MAPPING_DOWN
         neuron = structure_neuron(9)
-        assert provider.correct(neuron, "all").cached
+        assert provider.correct(neuron, "neighbor").cached
         note = neuron.section_correction["service_note"]
         assert "volume mapping temporarily unavailable for 'InferiorMonkey'" in note
         assert "not asked again for InferiorMonkey until" in note
-        assert provider.paused_for("InferiorMonkey", "curvefit") and not provider.paused
+        assert provider.paused_for("InferiorMonkey", "neighbor") and not provider.paused
         stamps = len(fake.stamp_requests)
-        assert provider.correct(structure_neuron(9), "all").cached  # held: not asked
+        assert provider.correct(structure_neuron(9), "neighbor").cached  # held: not asked
         assert len(fake.stamp_requests) == stamps
         # The hold over and the stamp equal again: checked, and kept.
         fake.stamp_error = None
         time.sleep(0.55)
         neuron = structure_neuron(9)
-        assert provider.correct(neuron, "all").cached
+        assert provider.correct(neuron, "neighbor").cached
         assert "service_note" not in neuron.section_correction
         assert len(fake.stamp_requests) == stamps + 1
         # The service gone: paused for every volume, the answer on disk applied.
         fake.server.stop(None)
         neuron = structure_neuron(9)
-        assert provider.correct(neuron, "all").cached
+        assert provider.correct(neuron, "neighbor").cached
         assert provider.paused and neuron.section_correction["service_note"] == provider.last_error
         assert len(fake.structure_requests) == 1
     finally:
@@ -929,56 +1019,66 @@ def test_an_swc_names_the_mode(structures, tmp_path):
     _, url = structures
     neuron = make_structure_neuron()
     with corr.CorrectionsClient(url) as client:
-        corr.correct_neuron(neuron, client, mode="curvefit")
-    swc = write_swc(neuron, tmp_path / "fit.swc").read_text()
+        corr.correct_neuron(neuron, client, mode="curvefit")  # a retired name: the field
+    swc = write_swc(neuron, tmp_path / "field.swc").read_text()
     assert "3 of 5 annotations moved in x and y" in swc
-    assert "(Viking's curve fit along each traced process)" in swc
+    assert "(Viking's published residual registration field, as Viking's own exports apply it)" in swc
+    assert "curve fit" not in swc
 
 
 def test_a_web_load_takes_the_mode_and_reloads_for_another(web):
+    """A load that names a retired mode (a tab or session from before 2026-10-27)
+    is the field's load, into the field's copy; off is another copy."""
     fake, svc = web
     plain = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="off")
-    assert plain.summary.section_correction is None
-    loaded = svc.neuron(1178, "i")
-    nodes = loaded.nodes
-    sx, sy = map(float, loaded.volume_scale[:2])
-    # The service places each Location where the cell has it (its stored
-    # position: no live registration here) and moves it by the fit.
-    fake.locations = [{"location_id": int(r.ID), "structure_id": 1178, "z": int(r.Z),
-                       "x": r.VolumeX * sx, "y": r.VolumeY * sy} for r in nodes.itertuples()]
-    fake.fit = {"curvefit": (120.0, -80.0)}
+    assert plain.summary.section_correction is None and plain.summary.copy_tag == "off.0"
+    raw = svc.neuron(1178, "i")
+    nodes = raw.nodes
 
     detail = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="curvefit")
     sc = detail.summary.section_correction
-    assert sc.applied and sc.mode == "curvefit"
+    assert sc.applied and sc.mode == "neighbor" and detail.summary.copy_tag == "neighbor.0"
     assert sc.n_found == sc.n_trusted == sc.n_moved == len(nodes)
-    fitted = svc.neuron(1178, "i")
-    # Another mode is another load, into a copy of its own; switching back is
+    field = svc.neuron(1178, "i")
+    asked = len(fake.structure_requests)
+    # The same copy for every name of the field, and for the server's default.
+    for name in ("all", "neighbor", True, None):
+        svc.load_neuron(1178, "i", include_synapses=False, section_corrections=name)
+        assert svc.neuron(1178, "i") is field, name
+    assert len(fake.structure_requests) == asked
+    assert fake.modes_sent == [0]
+    # Another setting is another load, into a copy of its own; switching back is
     # answered from the copy already held (one copy per setting in use, so a
-    # tab that switches never changes another tab's cell), as is the same mode again.
+    # tab that switches never changes another tab's cell).
+    svc.load_neuron(1178, "i", include_synapses=False, section_corrections="off")
+    assert svc.neuron(1178, "i") is raw
     svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
-    assert svc.neuron(1178, "i").section_correction["mode"] == "neighbor"
-    svc.load_neuron(1178, "i", include_synapses=False, section_corrections="curvefit")
-    again = svc.neuron(1178, "i")
-    assert again is fitted and again.section_correction["mode"] == "curvefit"
-    svc.load_neuron(1178, "i", include_synapses=False, section_corrections="curvefit")
-    assert svc.neuron(1178, "i") is again
+    assert svc.neuron(1178, "i") is field
+    # A page from before names its copy by the old tag: the same copy answers.
+    from sbfsem.service.facade import requested_copy
+
+    with requested_copy("all.0"):
+        assert svc.neuron(1178, "i") is field
+    with requested_copy("curvefit.0"):
+        assert svc.neuron(1178, "i") is field
 
 
-def test_a_curve_fit_load_logs_a_thin_process_pulled_toward_a_wider_one(web, caplog):
-    """The correction log, from a load through the service.  c1178's 690259 (r 0.25 um)
-    is linked to 40440 (r 1.70 um, 6.7x) in the cassette; Field + fit moved it 0.43 of
-    the way there on 2026-10-20.  Here it moves halfway, and its other neighbor
-    690258 with it; a Field load is not checked."""
+def test_a_curve_fit_load_logs_a_thin_process_pulled_toward_a_wider_one(web, caplog, tmp_path):
+    """The correction log.  c1178's 690259 (r 0.25 um) is linked to 40440 (r 1.70 um,
+    6.7x) in the cassette; Field + fit moved it 0.43 of the way there on 2026-10-20.
+    A load now asks for the field, which is not checked, and says why; a cell read
+    from a file saved under the fit before 2026-10-27 is checked as at a load then:
+    here 690259 moved halfway, and its other neighbor 690258 with it."""
     import logging
+
+    from sbfsem.analysis.correction_checks import NO_CURVE_FIT
+    from sbfsem.export.json_v2 import read_neuron_json, write_neuron_json
 
     fake, svc = web
     svc.load_neuron(1178, "i", include_synapses=False, section_corrections="off")
     nodes = svc.neuron(1178, "i").nodes.drop_duplicates("ID").set_index("ID")
     sx, sy = map(float, svc.neuron(1178, "i").volume_scale[:2])
-    fake.locations = [{"location_id": int(i), "structure_id": 1178, "z": int(r.Z),
-                       "x": r.VolumeX * sx, "y": r.VolumeY * sy} for i, r in nodes.iterrows()]
-    fake.fit = {"curvefit": (0.0, 0.0), "all": (0.0, 0.0)}
+    fake.fit = {"neighbor": (0.0, 0.0)}
     half = 0.5 * np.array([(nodes.at[40440, a] - nodes.at[690259, a]) * s
                            for a, s in (("VolumeX", sx), ("VolumeY", sy))])
     assert np.hypot(*half) > 1000.0           # over 1 um, and over the annotation's diameter
@@ -986,13 +1086,23 @@ def test_a_curve_fit_load_logs_a_thin_process_pulled_toward_a_wider_one(web, cap
 
     with caplog.at_level(logging.INFO, logger="sbfsem.service.facade"):
         svc.load_neuron(1178, "i", include_synapses=False, section_corrections="all")
+    assert "pulled" not in caplog.text, "the field is not checked"
+    cells = {c.copy_tag: c for c in svc.correction_log()}
+    field = cells["neighbor.0"]
+    assert field.mode == "neighbor" and not field.checked and field.note == NO_CURVE_FIT
+    assert "no longer runs a curve fit" in field.note
+    assert "off.0" not in cells                # not corrected: nothing to log
+
+    # The same moves, saved under Field + fit: checked when the file is read.
+    saved = read_neuron_json(write_neuron_json(svc.neuron(1178, "i"), tmp_path / "c1178.json"))
+    saved.correction_status = {**svc.neuron(1178, "i").correction_status, "mode": "all"}
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="sbfsem.service.facade"):
+        svc.add_neuron(saved)
     assert "pulled 1 annotation(s) toward a linked one 4x wider or more" in caplog.text
     assert "690259" in caplog.text
-    svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
-
-    cells = {c.copy_tag: c for c in svc.correction_log()}
-    fitted = cells["all.0"]
-    assert fitted.checked and fitted.mode == "all"
+    (fitted,) = [c for c in svc.correction_log() if c.mode == "all"]
+    assert fitted.checked
     assert [p.location_id for p in fitted.pulls] == [690259]
     pull = fitted.pulls[0]
     assert pull.neighbor_id == 40440 and pull.moved_with == [690258]
@@ -1000,79 +1110,104 @@ def test_a_curve_fit_load_logs_a_thin_process_pulled_toward_a_wider_one(web, cap
     assert pull.frac == pytest.approx(0.5, abs=1e-3) and pull.cos == pytest.approx(1.0, abs=1e-6)
     assert fitted.service_version is None     # the fake service has no version
     assert [p.location_id for p in svc.correction_log(7.0)[0].pulls] == []
-    assert not cells["neighbor.0"].checked
-    assert "off.0" not in cells                # not corrected: nothing to log
 
 
-def test_the_service_version_is_kept_with_a_curve_fit_correction(structures, tmp_path):
+def test_the_service_version_is_kept_with_a_correction(structures, tmp_path):
     fake, url = structures
     fake.version = "1.2.0"
     provider = corr.CorrectionsProvider(url, cache=DiskCache(tmp_path))
     try:
         neuron = make_structure_neuron()
-        provider.correct(neuron, "curvefit")
+        provider.correct(neuron, "neighbor")
         assert neuron.section_correction["service_version"] == "1.2.0"
         again = make_structure_neuron()       # answered from disk, with the version that made it
-        provider.correct(again, "curvefit")
+        provider.correct(again, "neighbor")
         assert again.section_correction["cached"] and again.section_correction["service_version"] == "1.2.0"
     finally:
         provider.close()
 
 
 def test_a_lab_can_have_its_own_default_mode(web):
-    # The web app: Field + fit for the Neitz lab's volumes (the user's decision
-    # of 2026-10-20), Curve fit for the others.
+    # The web app: the residual field on every volume since 2026-10-27; before, Field +
+    # fit for the Neitz lab's volumes (the user's decision of 2026-10-20), Curve fit for
+    # the others.  Those names, from an old environment, are the field now.
     fake, svc = web
-    svc.correction_mode = "curvefit"
-    svc.lab_corrections = {"Neitz": "all"}
-    assert svc.default_correction("i") == "all"
-    assert svc.default_correction("RC2") == "curvefit"
-    assert svc.default_correction("demo") == "curvefit"  # no lab
-    assert svc.volume_info("NeitzCped").default_correction == "all"
+    old = type(svc)(section_corrections="curvefit", lab_corrections={"Neitz": "all"})
+    try:
+        assert old.default_correction("i") == old.default_correction("RC2") == "neighbor"
+        assert old.volume_info("NeitzCped").default_correction == "neighbor"
+    finally:
+        old.close()
+    svc.correction_mode = "neighbor"
+    svc.lab_corrections = {"Neitz": "off"}
+    assert svc.default_correction("i") == "off"
+    assert svc.default_correction("RC2") == "neighbor"
+    assert svc.default_correction("demo") == "neighbor"  # no lab
+    assert svc.volume_info("NeitzCped").default_correction == "off"
     assert svc.volume_info("RPC1").lab == "Marc"
-    assert svc.volume_info("RPC1").default_correction == "curvefit"
-
-    plain = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="off")
-    nodes = svc.neuron(1178, "i").nodes
-    sx, sy = map(float, svc.neuron(1178, "i").volume_scale[:2])
-    fake.locations = [{"location_id": int(r.ID), "structure_id": 1178, "z": int(r.Z),
-                       "x": r.VolumeX * sx, "y": r.VolumeY * sy} for r in nodes.itertuples()]
-    fake.fit = {"curvefit": (120.0, -80.0), "all": (60.0, 40.0)}
-    assert plain.summary.section_correction is None
+    assert svc.volume_info("RPC1").default_correction == "neighbor"
 
     # A load that names no mode gets the lab's; one that names a mode, that one.
     detail = svc.load_neuron(1178, "i", include_synapses=False)
-    assert detail.summary.section_correction.mode == "all"
-    assert detail.summary.copy_tag == "all.0"
-    named = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="curvefit")
-    assert named.summary.section_correction.mode == "curvefit"
+    assert detail.summary.section_correction is None and detail.summary.copy_tag == "off.0"
+    named = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="all")
+    assert named.summary.section_correction.mode == "neighbor"
+    assert named.summary.copy_tag == "neighbor.0"
 
 
 def test_a_failure_in_the_service_holds_that_cell_and_mode(web):
     fake, svc = web
     fake.fail_structures = True
     svc.corrections().volume_retry_s = 0.3
-    detail = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="curvefit")
+    detail = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
     sc = detail.summary.section_correction
-    assert sc.requested and not sc.applied and sc.mode == "curvefit"
+    assert sc.requested and not sc.applied and sc.mode == "neighbor"
     assert "Exception was thrown by handler" in sc.note
     first = svc.neuron(1178, "i")
     assert "CorrDXnm" not in first.nodes.columns
-    # Held: the same load again is answered at once, without asking the service.
+    # Held: the same load again is answered at once, without asking the service,
+    # whatever name the field is asked by.
     fake.fail_structures = False
-    svc.load_neuron(1178, "i", include_synapses=False, section_corrections="curvefit")
-    assert svc.neuron(1178, "i") is first and len(fake.structure_requests) == 1
+    for name in ("neighbor", "curvefit", None):
+        svc.load_neuron(1178, "i", include_synapses=False, section_corrections=name)
+        assert svc.neuron(1178, "i") is first and len(fake.structure_requests) == 1
     provider = svc.corrections()
-    assert provider.paused_for("InferiorMonkey", "curvefit", 1178)
-    assert not provider.paused_for("InferiorMonkey", "curvefit"), "only that cell is held"
-    # Another mode is not held.
-    other = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
-    assert other.summary.section_correction.applied
+    assert provider.paused_for("InferiorMonkey", "neighbor", 1178)
+    assert provider.paused_for("InferiorMonkey", "all", 1178), "a retired name is the same hold"
+    assert not provider.paused_for("InferiorMonkey", "neighbor"), "only that cell is held"
     # Once the hold is over, the next load asks again.
     time.sleep(0.35)
-    again = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="curvefit")
+    again = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
     assert again.summary.section_correction.applied
     assert len(fake.structure_requests) == 2
+
+
+def test_a_correction_the_service_refuses_says_so_in_the_cells_status(web):
+    """Service 1.5.0 answered the modes it no longer ran with INVALID_ARGUMENT
+    (2026-10-27): the cell is drawn uncorrected, and its status says the service
+    refused, never nothing."""
+    fake, svc = web
+    fake.fail_structures = True
+    fake.fail_code = "INVALID_ARGUMENT"
+    detail = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
+    sc = detail.summary.section_correction
+    assert sc.requested and not sc.applied
+    assert "INVALID_ARGUMENT" in sc.note and sc.note.startswith("Not applied")
+    assert "CorrDXnm" not in svc.neuron(1178, "i").nodes.columns
+
+    # A kept answer the service then refuses to check is applied, and says it was refused.
+    import copy
+
+    fake.fail_structures = False
+    svc.corrections()._held_structures.clear()
+    svc.load_neuron(1178, "i", include_synapses=False, section_corrections="off")
+    plain = svc.neuron(1178, "i")
+    assert svc._correct(copy.deepcopy(plain), "neighbor")["applied"]  # now on disk
+    fake.stamp_error = ("INVALID_ARGUMENT", "unknown correction mode 0")
+    status = svc._correct(copy.deepcopy(plain), "neighbor")
+    assert status["applied"] and status["cached"]
+    assert status["note"].startswith("The service refused the request; offsets kept from before")
+    assert "INVALID_ARGUMENT" in status["note"]
 
 
 def test_a_cell_the_service_throws_on_leaves_the_rest_of_its_volume_corrected(web):
@@ -1082,25 +1217,22 @@ def test_a_cell_the_service_throws_on_leaves_the_rest_of_its_volume_corrected(we
     fake, svc = web
     svc.load_neuron(1178, "i", include_synapses=False, section_corrections="off")
     loaded = svc.neuron(1178, "i")
-    sx, sy = map(float, loaded.volume_scale[:2])
-    fake.locations = [{"location_id": int(r.ID), "structure_id": 1178, "z": int(r.Z),
-                       "x": r.VolumeX * sx, "y": r.VolumeY * sy} for r in loaded.nodes.itertuples()]
-    fake.fit = {"all": (60.0, 40.0)}
+    fake.fit = {"neighbor": (60.0, 40.0)}
     fake.fail_structures = {9}
     provider = svc.corrections()
     with pytest.raises(corr.CorrectionsError, match="Exception was thrown by handler") as failed:
-        provider.correct(make_structure_neuron(), "all")  # c9 of the same volume
-    detail = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="all")
+        provider.correct(make_structure_neuron(), "neighbor")  # c9 of the same volume
+    detail = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
     sc = detail.summary.section_correction
-    assert sc.applied and sc.mode == "all" and sc.n_moved == len(loaded.nodes), sc.note
+    assert sc.applied and sc.mode == "neighbor" and sc.n_moved == len(loaded.nodes), sc.note
     assert [r["structure_ids"] for r in fake.structure_requests] == [[9], [1178]]
     assert failed.value.code == "UNKNOWN"
-    assert provider.paused_for("InferiorMonkey", "all", 9)
-    assert not provider.paused_for("InferiorMonkey", "all")
+    assert provider.paused_for("InferiorMonkey", "neighbor", 9)
+    assert not provider.paused_for("InferiorMonkey", "neighbor")
     # c9 itself stays held: asked again, it is not sent.
     with pytest.raises(corr.CorrectionsError,
                        match="not asked again for c9 of InferiorMonkey until .* UTC"):
-        provider.correct(make_structure_neuron(), "all")
+        provider.correct(make_structure_neuron(), "neighbor")
     assert len(fake.structure_requests) == 2
 
 
@@ -1128,8 +1260,8 @@ def test_a_correction_the_service_could_not_make_is_keyed_as_the_stored_position
 
     fake.fail_structures = True
     svc.corrections().volume_retry_s = 0.3
-    asked = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="curvefit")
-    assert asked.summary.copy_tag == "curvefit.0" and not asked.summary.section_correction.applied
+    asked = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
+    assert asked.summary.copy_tag == "neighbor.0" and not asked.summary.section_correction.applied
     assert asked.summary.positions is None
     svc.mesh_object(1178, "i", **quick)
     (uncorrected,) = puts
@@ -1142,15 +1274,11 @@ def test_a_correction_the_service_could_not_make_is_keyed_as_the_stored_position
     assert len(built) == 1 and len(puts) == 1
 
     # The service answers again: the same copy, corrected, is another surface.
-    loaded = svc.neuron(1178, "i")
-    sx, sy = map(float, loaded.volume_scale[:2])
-    fake.locations = [{"location_id": int(r.ID), "structure_id": 1178, "z": int(r.Z),
-                       "x": r.VolumeX * sx, "y": r.VolumeY * sy} for r in loaded.nodes.itertuples()]
-    fake.fit = {"curvefit": (120.0, -80.0)}
+    fake.fit = {"neighbor": (120.0, -80.0)}
     fake.fail_structures = False
     time.sleep(0.35)
-    done = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="curvefit")
-    assert done.summary.copy_tag == "curvefit.0" and done.summary.section_correction.applied
+    done = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
+    assert done.summary.copy_tag == "neighbor.0" and done.summary.section_correction.applied
     token = svc.neuron(1178, "i").section_correction["token"]
     assert done.summary.positions == f"section-correction:{token}"
     svc.mesh_object(1178, "i", **quick)
@@ -1171,27 +1299,25 @@ def test_provider_holds_a_structure_then_its_volume_after_failures_in_the_servic
     provider = corr.CorrectionsProvider(url, volume_retry_s=60)
     try:
         with pytest.raises(corr.CorrectionsError, match="Exception was thrown by handler"):
-            provider.correct(structure_neuron(9), "curvefit")
+            provider.correct(structure_neuron(9), "neighbor")
         with pytest.raises(corr.CorrectionsError,
                            match="not asked again for c9 of InferiorMonkey until .* UTC"):
-            provider.correct(structure_neuron(9), "curvefit")
+            provider.correct(structure_neuron(9), "neighbor")
         assert len(fake.structure_requests) == 1
-        assert provider.paused_for("InferiorMonkey", "curvefit", 9)
-        assert not provider.paused_for("InferiorMonkey", "curvefit")
+        assert provider.paused_for("InferiorMonkey", "neighbor", 9)
+        assert not provider.paused_for("InferiorMonkey", "neighbor")
         # A second structure throws, with no answer between: the volume is held
         # (RC1 on 2026-09-24, Cped while its volume server refused on 2026-10-20).
         with pytest.raises(corr.CorrectionsError, match="Exception was thrown by handler"):
-            provider.correct(structure_neuron(10), "curvefit")
+            provider.correct(structure_neuron(10), "neighbor")
         with pytest.raises(corr.CorrectionsError,
                            match="not asked again for InferiorMonkey until .* UTC"):
-            provider.correct(structure_neuron(11), "curvefit")
+            provider.correct(structure_neuron(11), "neighbor")
         assert len(fake.structure_requests) == 2
-        assert provider.paused_for("InferiorMonkey", "curvefit")
-        assert provider.paused_for("InferiorMonkey", "curvefit", 11)
-        assert not provider.paused_for("InferiorMonkey", "neighbor")
+        assert provider.paused_for("InferiorMonkey", "neighbor")
+        assert provider.paused_for("InferiorMonkey", "neighbor", 11)
         assert not provider.paused  # the host answered: nothing else waits
-        # The residual field for the same volume is still asked for.
-        assert provider.correct(make_structure_neuron(), "neighbor") is not None
+        assert not provider.paused_for("RC1", "neighbor")
     finally:
         provider.close()
 
@@ -1202,17 +1328,17 @@ def test_an_answer_between_two_failures_keeps_the_volume_asked(structures):
     provider = corr.CorrectionsProvider(url, volume_retry_s=0.3)
     try:
         with pytest.raises(corr.CorrectionsError):
-            provider.correct(structure_neuron(9), "all")
-        assert provider.correct(structure_neuron(11), "all") is not None
+            provider.correct(structure_neuron(9), "neighbor")
+        assert provider.correct(structure_neuron(11), "neighbor") is not None
         with pytest.raises(corr.CorrectionsError, match="Exception was thrown by handler"):
-            provider.correct(structure_neuron(10), "all")
-        assert not provider.paused_for("InferiorMonkey", "all")
+            provider.correct(structure_neuron(10), "neighbor")
+        assert not provider.paused_for("InferiorMonkey", "neighbor")
         # Nor does a failure count once its hold is over.
         time.sleep(0.35)
         with pytest.raises(corr.CorrectionsError, match="Exception was thrown by handler"):
-            provider.correct(structure_neuron(12), "all")
-        assert not provider.paused_for("InferiorMonkey", "all")
-        assert provider.correct(structure_neuron(13), "all") is not None
+            provider.correct(structure_neuron(12), "neighbor")
+        assert not provider.paused_for("InferiorMonkey", "neighbor")
+        assert provider.correct(structure_neuron(13), "neighbor") is not None
         assert [r["structure_ids"] for r in fake.structure_requests] == [
             [9], [11], [10], [12], [13]]
     finally:
@@ -1226,12 +1352,12 @@ def test_an_error_about_more_than_the_request_holds_the_volume_at_once(structure
     provider = corr.CorrectionsProvider(url, volume_retry_s=60)
     try:
         with pytest.raises(corr.CorrectionsError) as failed:
-            provider.correct(structure_neuron(9), "curvefit")
+            provider.correct(structure_neuron(9), "neighbor")
         assert failed.value.code == "PERMISSION_DENIED"
-        assert provider.paused_for("InferiorMonkey", "curvefit")
+        assert provider.paused_for("InferiorMonkey", "neighbor")
         with pytest.raises(corr.CorrectionsError,
                            match="not asked again for InferiorMonkey until .* UTC"):
-            provider.correct(structure_neuron(10), "curvefit")
+            provider.correct(structure_neuron(10), "neighbor")
         assert len(fake.structure_requests) == 1
     finally:
         provider.close()
@@ -1257,20 +1383,19 @@ def test_an_unavailable_volume_holds_that_volume_and_leaves_the_others_asked(str
     try:
         with pytest.raises(corr.CorrectionsUnavailable,
                            match="volume mapping temporarily unavailable") as failed:
-            provider.correct(structure_neuron(9), "all")
+            provider.correct(structure_neuron(9), "neighbor")
         assert failed.value.code == "UNAVAILABLE"
         # RC1, not asked for before, is asked and corrected.
         rc1 = structure_neuron(476, "RC1")
-        assert provider.correct(rc1, "all") is not None
+        assert provider.correct(rc1, "neighbor") is not None
         assert rc1.section_correction["n_moved"] == 3
-        assert not provider.paused and not provider.paused_for("RC1", "all")
-        # Inferior is held in both modes CorrectStructures answers, for retry_after_s.
-        assert provider.paused_for("InferiorMonkey", "all")
-        assert provider.paused_for("InferiorMonkey", "curvefit", 10)
-        assert not provider.paused_for("InferiorMonkey", "neighbor")
+        assert not provider.paused and not provider.paused_for("RC1", "neighbor")
+        # Inferior is held, for retry_after_s, by whatever name the field is asked.
+        assert provider.paused_for("InferiorMonkey", "neighbor")
+        assert provider.paused_for("InferiorMonkey", "all", 10)
         with pytest.raises(corr.CorrectionsError,
                            match="not asked again for InferiorMonkey until .* UTC"):
-            provider.correct(structure_neuron(10), "curvefit")
+            provider.correct(structure_neuron(10), "neighbor")
         assert [(r["set"]["volume_name"], r["structure_ids"]) for r in fake.structure_requests] == [
             ("InferiorMonkey", [9]), ("RC1", [476])]
     finally:
@@ -1288,10 +1413,10 @@ def test_an_unavailable_naming_no_volume_asked_pauses_the_whole_service(structur
     provider = corr.CorrectionsProvider(url, retry_after_s=60)
     try:
         with pytest.raises(corr.CorrectionsUnavailable):
-            provider.correct(structure_neuron(9), "all")
-        assert provider.paused and provider.paused_for("RC1", "all")
+            provider.correct(structure_neuron(9), "neighbor")
+        assert provider.paused and provider.paused_for("RC1", "neighbor")
         with pytest.raises(corr.CorrectionsUnavailable):
-            provider.correct(structure_neuron(476, "RC1"), "all")
+            provider.correct(structure_neuron(476, "RC1"), "neighbor")
         assert len(fake.structure_requests) == 1
     finally:
         provider.close()
@@ -1310,13 +1435,13 @@ def test_a_service_wide_pause_asks_no_volume_whose_sets_are_fresh(
                                         retry_after_s=60)
     try:
         # RC1's sets asked for just now, and c476's offsets on disk.
-        assert provider.correct(structure_neuron(476, "RC1"), "all") is not None
+        assert provider.correct(structure_neuron(476, "RC1"), "neighbor") is not None
         if outage == "unreachable":
             fake.server.stop(None)  # gRPC's own UNAVAILABLE: "failed to connect ..."
         else:
             fake.volume_errors["InferiorMonkey"] = ("UNAVAILABLE", outage)
         with pytest.raises(corr.CorrectionsUnavailable):
-            provider.correct(structure_neuron(9), "all")
+            provider.correct(structure_neuron(9), "neighbor")
         assert provider.paused
         down_until = provider._down_until
         sent = []
@@ -1325,14 +1450,12 @@ def test_a_service_wide_pause_asks_no_volume_whose_sets_are_fresh(
                             lambda method, *a, **k: sent.append(method) or call(method, *a, **k))
         # c476's offsets on disk are still applied, and its status says why they are old.
         neuron = structure_neuron(476, "RC1")
-        kept = provider.correct(neuron, "all")
+        kept = provider.correct(neuron, "neighbor")
         assert kept.cached and neuron.section_correction["n_moved"] == 3
         assert neuron.section_correction["service_note"] == provider.last_error != ""
-        # Nothing on disk: refused without asking, in either call.
-        with pytest.raises(corr.CorrectionsUnavailable, match="no all offsets on disk"):
-            provider.correct(structure_neuron(477, "RC1"), "all")
-        with pytest.raises(corr.CorrectionsUnavailable, match="no offsets on disk"):
-            provider.correct(structure_neuron(476, "RC1"), "neighbor")
+        # Nothing on disk: refused without asking.
+        with pytest.raises(corr.CorrectionsUnavailable, match="no neighbor offsets on disk"):
+            provider.correct(structure_neuron(477, "RC1"), "neighbor")
         assert sent == []
         assert provider._down_until == down_until  # a refusal does not lengthen the pause
         assert [r["set"]["volume_name"] for r in fake.structure_requests] == (
@@ -1347,39 +1470,47 @@ def test_a_volume_held_unavailable_keeps_its_offsets_on_disk_and_is_asked_again(
     provider = corr.CorrectionsProvider(url, cache=DiskCache(tmp_path), retry_after_s=0.3,
                                         volume_retry_s=60)
     try:
-        assert provider.correct(structure_neuron(9), "all") is not None  # now on disk
-        fake.fail_structures = {7, 8}
-        for sid in (7, 8):  # two structures throw in a row: curvefit held for volume_retry_s
-            with pytest.raises(corr.CorrectionsError, match="Exception was thrown by handler"):
-                provider.correct(structure_neuron(sid), "curvefit")
+        assert provider.correct(structure_neuron(9), "neighbor") is not None  # now on disk
         fake.volume_errors["InferiorMonkey"] = MAPPING_DOWN
         with pytest.raises(corr.CorrectionsUnavailable):
-            provider.correct(structure_neuron(10), "all")
+            provider.correct(structure_neuron(10), "neighbor")
         # c9's offsets are on disk: still applied, and the status says why they are old.
         neuron = structure_neuron(9)
-        kept = provider.correct(neuron, "all")
+        kept = provider.correct(neuron, "neighbor")
         assert kept.cached and neuron.section_correction["n_moved"] == 3
         note = neuron.section_correction["service_note"]
         assert "volume mapping temporarily unavailable for 'InferiorMonkey'" in note
         assert "not asked again for InferiorMonkey until" in note
-        # The longer hold of curvefit is not cut short by the shorter one.
-        assert "Exception was thrown by handler" in provider.held("InferiorMonkey", "curvefit")
         n = len(fake.structure_requests)
         fake.volume_errors.clear()
         time.sleep(0.35)
-        assert not provider.paused_for("InferiorMonkey", "all")
-        assert provider.correct(structure_neuron(10), "all") is not None
-        assert provider.paused_for("InferiorMonkey", "curvefit")
+        assert not provider.paused_for("InferiorMonkey", "neighbor")
+        assert provider.correct(structure_neuron(10), "neighbor") is not None
         assert len(fake.structure_requests) == n + 1
     finally:
         provider.close()
 
 
-def test_a_load_while_its_volume_is_unavailable_is_held_and_other_modes_are_asked(web):
+def test_a_longer_hold_is_not_cut_short_by_an_unavailable_volume(structures):
+    fake, url = structures
+    provider = corr.CorrectionsProvider(url, retry_after_s=0.3, volume_retry_s=60)
+    try:
+        fake.fail_structures = {7, 8}
+        for sid in (7, 8):  # two structures throw in a row: the volume held for volume_retry_s
+            with pytest.raises(corr.CorrectionsError, match="Exception was thrown by handler"):
+                provider.correct(structure_neuron(sid), "neighbor")
+        provider._unavailable("InferiorMonkey", "neighbor", corr.CorrectionsUnavailable("down"))
+        time.sleep(0.35)
+        assert "Exception was thrown by handler" in provider.held("InferiorMonkey", "neighbor")
+    finally:
+        provider.close()
+
+
+def test_a_load_while_its_volume_is_unavailable_is_held(web):
     fake, svc = web
     fake.volume_errors["InferiorMonkey"] = MAPPING_DOWN
     svc.corrections().retry_after_s = 0.3
-    detail = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="all")
+    detail = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
     sc = detail.summary.section_correction
     assert sc.requested and not sc.applied
     assert "volume mapping temporarily unavailable for 'InferiorMonkey'" in sc.note
@@ -1389,12 +1520,9 @@ def test_a_load_while_its_volume_is_unavailable_is_held_and_other_modes_are_aske
     svc.load_neuron(1178, "i", include_synapses=False, section_corrections="all")
     assert svc.neuron(1178, "i") is first and len(fake.structure_requests) == 1
     provider = svc.corrections()
-    assert not provider.paused and provider.paused_for("InferiorMonkey", "curvefit", 1178)
-    # CorrectPoints maps nothing there: the residual field is still asked for.
-    other = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
-    assert other.summary.section_correction.applied
+    assert not provider.paused and provider.paused_for("InferiorMonkey", "neighbor", 1178)
     time.sleep(0.35)
-    again = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="all")
+    again = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="neighbor")
     assert again.summary.section_correction.applied
     assert len(fake.structure_requests) == 2
 

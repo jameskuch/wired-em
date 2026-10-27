@@ -824,8 +824,8 @@ def s_moves(c: Chrome, r: Report, ctx):
       const n = nodes.find((x) => x.radius_um > 0.5 && x.type_code === 1 && !x.manual_shift_um);
       R.select({ kind: 'annotation', key: rec.key, locationId: n.id, point: n.xyz_um, section: n.z_section, zUm: n.xyz_um[2] });
       R.webgl.domElement.focus(); return { id: n.id, xyz: n.xyz_um, section: n.z_section, tag: rec.summary.copy_tag }; })()""" % q, wait=True)
-    # The plain copy is the volume's default setting's (Field + fit, `all.1`, for the Neitz volumes
-    # since 2.17.0): its moves are kept under it, and a moved copy is named after it.
+    # The plain copy is the volume's default setting's (the residual field, `neighbor.1`, since
+    # 2.42.0): its moves are kept under it, and a moved copy is named after it.
     r.check('a disc of c1178 is selected on the plain copy',
             bool(picked) and bool(picked['tag']) and '.m' not in picked['tag'], picked)
     if not picked:

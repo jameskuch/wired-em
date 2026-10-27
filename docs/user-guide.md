@@ -88,50 +88,46 @@ loads, at the stored positions).
 
 #### Viking's section correction
 
-Viking also measures, from every traced process, how far each annotation sits
-off the curve through its neighbors on the sections above and below, and
-corrects for it: small sideways moves, section by section, that take out the
-jitter the alignment leaves between sections (on Inferior c1178, with Curve fit,
-a median of 0.11 µm). That is what Viking's corrections service gives; the
-switch's hover help says it with a drawing, and ends with what the service did
-for this cell, read from the cell's own status. With **Viking's section correction** ticked (the default),
-each annotation moves by that correction, on top of the current transforms;
-untick it to see the cell where the transforms alone put it. **Correction**
-picks how it is computed:
+Viking also measures, from every traced process in the volume, how far each
+annotation sits off the curve through its neighbors on the sections above and
+below, and pools what it finds into one smooth field per section, the
+**residual field**, as Viking's own exports apply it: small sideways moves,
+section by section, that take out the jitter the alignment leaves between
+sections (about a tenth of a micrometer). That is what Viking's corrections
+service gives; the switch's hover help says it with a drawing, and ends with
+what the service did for this cell, read from the cell's own status. With
+**Viking's section correction** ticked (the default, on every volume), each
+annotation, outline and synapse moves by the field at its own place on its own
+section, on top of the current transforms, and nothing moves where the field
+has no support; untick it to see the cell where the transforms alone put it.
 
-- **Curve fit** (the default for the Marc lab's rabbit volumes, RC1, RC2,
-  RPC1 and RPC2, since 2026-09-24; for every volume until 2026-10-20). Viking fits
-  each traced process on its own, leaving each annotation out of its own fit.
-  On c21768 it took the median step between linked annotations on adjacent
-  sections from 0.194 to 0.125 µm, and the steps over 1.5 µm from 39 to 19.
-  Synapses are not part of a process and keep their place: on c21768 a
-  synapse's distance to its cell moved by a median 0.04 µm (at most 0.64).
-- **Residual field.** The same measurement pooled across the volume on a
-  2 µm grid, as Viking's own exports apply it. Each annotation, outline and
-  synapse moves by the field at its own place on its own section, and nothing
-  moves where the field has no support. On 2026-09-23 it made the steps near
-  c21768 larger, not smaller.
-- **Field + fit** (the default for the Neitz lab's volumes, Inferior, Nasal,
-  Temporal and Cped, since 2026-10-20). Both, the field first. This is what
-  Viking's service does when it is not told which. On Inferior c1178 it moved
-  2,431 of 2,819 annotations (median 0.12 µm) where Curve fit moved 2,176
-  (median 0.11 µm).
+Until 2.42.0 a **Correction** dropdown under the switch also offered **Curve
+fit** (a fit along each of the cell's own traced processes; the default for the
+Marc lab's rabbit volumes from 2026-09-24) and **Field + fit** (both, the field
+first; the default for the Neitz lab's volumes from 2026-10-20). Viking's
+service stopped running the curve fit on 2026-10-27 (service 1.5.0): on 11
+cells the field alone lined linked traced outlines up as well (mean overlap
+0.792, against 0.791 with the fit) and lost overlap on a quarter as many pairs.
+The dropdown is gone; a cell, Look, session, Render compare layer or link saved
+with Curve fit or Field + fit is drawn with the residual field, and manual moves
+made under either are kept under the residual field's setting.
 
 An annotation Viking's service places more than 20 µm from where the viewer
 draws it keeps its place: its correction was worked out somewhere else. (Until
 the evening of 2026-09-24 the service placed lines and curves with empty
 section X and Y at the section's origin.) When the service does not answer, or
-has no correction of the kind chosen for the volume, the cell is drawn
-uncorrected and the chip reads `unavailable`, with why in its hover. A service
+has no correction for the volume, the cell is drawn uncorrected and the chip
+reads `unavailable`, with why in its hover; so it does when the service refuses
+the request (as 1.5.0 refused the modes it no longer ran). A service
 that cannot be reached is not asked again for two minutes, for any volume; a
 cell corrected before is drawn meanwhile with the correction it had then, and
 its hover says so. When it answers with an error for a cell, it is not asked again
-for that cell and correction for ten minutes, and once two cells of a volume
+for that cell for ten minutes, and once two cells of a volume
 fail in a row, for the whole volume, so the cells load at once; the chip's
 hover says until when. The other cells of the volume are still corrected while
 only one is held. When the service says it cannot reach one volume's own
-server, that volume is not asked again for two minutes, in Curve fit and
-Field + fit, while the other volumes' cells are still corrected.
+server, that volume is not asked again for two minutes, while the other
+volumes' cells are still corrected.
 
 Both settings are per cell and survive reloads. The Viking coordinates in the
 pick readout name where Viking draws the annotation, so they paste into
@@ -1839,12 +1835,13 @@ the pair asked for cannot be shown, the next one that can is drawn and the chip
 beside **Show position shift** says so (`16 shown · Transforms`, the reason first
 in its hover), with thresholds that show something for as long as that is so.
 When nothing moved, the chip reads `nothing moved` and the section offers to
-turn the correction on in the volume's default mode: **Apply field + fit** on a
-Neitz lab volume, **Apply curve fit** on the others. Every control explains itself after a two-second hover,
+turn the correction on: **Apply residual field**. Every control explains itself after a two-second hover,
 most with a drawing.
 
-**Pulled toward a soma** (since 2.23.0). Under **Curve fit** or **Field + fit**,
-the section also says which of the cell's annotations Viking's curve fit pulled
+**Pulled toward a soma** (since 2.23.0; since 2.42.0 only for a cell read from a
+file saved under the curve fit, which Viking's service no longer runs). Under
+**Curve fit** or **Field + fit**, the section also says which of the cell's
+annotations Viking's curve fit pulled
 toward a much wider linked one, the cell's own rows of the Settings tab's
 [Correction log](#settings-debug-tools), whether the layer is on or not: *Curve fit
 pulled 3 annotations toward one 4× as wide or wider:* followed by their Location IDs
@@ -2097,8 +2094,9 @@ smoothing the whole surface).
 
 **Kept with the registration setting.** A move is made from where the cell's
 Registration settings drew the annotation, so each cell keeps its moves under the
-setting they were made under (Curve fit correction with the current transforms on,
-say). Switching the Registration settings draws the cell with that setting's
+setting they were made under (Residual field correction with the current transforms
+on, say; moves made under Curve fit or Field + fit before 2.42.0 are the residual
+field's now, the latest move of an annotation kept). Switching the Registration settings draws the cell with that setting's
 moves, if it has any, and keeps the others for when you switch back; the
 **Manual moves** section says how many are kept under other settings.
 
@@ -3139,28 +3137,28 @@ copy of the cell.
 
 Where Viking draws an annotation depends on its **registration**: at its stored
 position, or through the volume's current section transforms, and then moved,
-or not, by Viking's section correction (Residual field, Curve fit, or Field +
-fit; see *Registration* in the cell panel). Render compare can show the same
+or not, by Viking's section correction, its residual field (see *Registration* in
+the cell panel; Curve fit and Field + fit went with 2.42.0). Render compare can show the same
 rendering of the cell under several registrations side by side, to see what
 each does to the surface.
 
 - **A layer's Registration** is in its editor, under Color: **As loaded** (the
   cell as the 3D render has it, your own moves included; the default) or any of
-  the eight registrations (four where the volume's transforms are not read
+  the four registrations (two where the volume's transforms are not read
   here). Any other than As loaded is that registration's own copy of the cell,
   without moves, which the server loads the first time a layer asks for it and
   keeps beside the page's own. Changing it marks the layer out of date; Compare
-  builds it. The chip says it first: `current+field+fit · Voxel remesh`, so the
+  builds it. The chip says it first: `current+field · Voxel remesh`, so the
   panes stay told apart when the chips are cut short.
 - **Registrations…** in the toolbar sets several up at once. It copies the layer
   being edited in the focused pane (its technique and every option) once per
-  registration you tick, in a grid of the corrections (none, Residual field,
-  Curve fit, Field + fit) by the positions (stored, current transforms), and
+  registration you tick, in a grid of the corrections (none, Residual field)
+  by the positions (stored, current transforms), and
   puts them **one pane each** (up to six; the pane count follows) or as the
   **layers of that pane** (up to four, drawn over each other in the palette's
-  colors). It starts with six ticked: the stored positions, the current
-  transforms, the transforms with each correction, and the volume's default
-  correction on the stored positions. **Set up and compare** builds them at once.
+  colors). It starts with all four ticked: the stored positions, the current
+  transforms, the transforms with the residual field, and the residual field on
+  the stored positions. **Set up and compare** builds them at once.
   The choice is remembered in this browser.
 - **Each layer is measured against its own registration**: its error map holds
   it to its own copy's annotations, a pane's annotations overlay and Position
@@ -3814,7 +3812,10 @@ looks wrong rather than for the work itself.
   saved in the browser that keeps coming back wrong.
 - **Correction log** lists the annotations Viking's section correction (Curve fit, or
   Field + fit) moved toward a much wider annotation linked to them, in every cell loaded on
-  the server that you may see. Viking's curve fit (service 1.2.0) takes a soma's or a large
+  the server that you may see. Viking's service stopped running the curve fit on
+  2026-10-27, and since 2.42.0 every cell is corrected by the residual field alone, so the
+  log says that and lists no cell loaded now: only a cell read from a file saved under the
+  fit before then is checked. Viking's curve fit (service 1.2.0) takes a soma's or a large
   outline's center as a point of the process, so a thin process leaving a soma is pulled
   about halfway to the soma's center: Inferior Monkey c1178's 1328721 (radius 0.74 µm)
   moved 10.6 µm toward the soma disc 1557441, 0.5 of the way. Each row gives the

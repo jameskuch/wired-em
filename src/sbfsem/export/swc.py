@@ -479,7 +479,7 @@ def provenance_lines(neuron, table: pd.DataFrame, options: dict, relaxed=None,
     corrected = getattr(neuron, "section_correction", None)
     if corrected:
         built = corrected.get("built_utc") or "unknown"
-        what = {
+        what = {  # the fit's modes: a cell read from a file saved before 2026-10-27
             "curvefit": "Viking's curve fit along each traced process",
             "all": "Viking's published residual registration field, then its curve fit along "
                    "each traced process",

@@ -88,7 +88,7 @@ import { buildFigure } from './helpfigures.js';
 import { ENDED as PIVOT_ENDED, pivotAtPointer } from './pivot.js';
 import { buildMovie, loadMovies, movieFor, movieManifest } from './helpmovies.js';
 import {
-  REG_FIGURES, REG_HELP, correctionChip, correctionForCell, transformsChip,
+  MODE_LABELS, REG_FIGURES, REG_HELP, correctionChip, correctionForCell, correctionSetting, transformsChip,
 } from './regstatus.js';
 import { planBulkSwc, savedNotice, bulkSwcSummary, exportQuery } from './exports.js';
 import {
@@ -291,14 +291,23 @@ function volumeHasTransforms(source) {
   return volume ? volume.has_transforms !== false : true;
 }
 /**
- * The correction mode a volume's cells get when they name none (`default_correction`:
- * Field + fit for the Neitz lab's volumes, Curve fit for the others), and what the
- * Correction select and the Position shift's Apply offer while a cell's correction is
- * off; Curve fit while the list is not loaded, and for a server that predates the field.
+ * The correction a volume's cells get when switched on (`default_correction`), and what
+ * the Position shift's Apply offers while a cell's correction is off: the residual
+ * field, whatever the server names (one from before 2026-10-27 says Curve fit or Field
+ * + fit, which Viking's service no longer runs), and while the list is not loaded.
  */
 function volumeDefaultCorrection(source) {
-  const mode = state.volumes.find((v) => v.name === source)?.default_correction;
-  return mode in CORRECTION_SHORT ? mode : 'curvefit';
+  const mode = correctionSetting(state.volumes.find((v) => v.name === source)?.default_correction);
+  return mode === 'off' ? 'neighbor' : mode;
+}
+
+/**
+ * A cell's correction choice as a saved session, Look, history step or link holds it,
+ * as this page keeps it: undefined for the server's default, else `correctionSetting`'s
+ * name, a retired mode (Curve fit, Field + fit) read as the residual field.
+ */
+function savedCorrection(value) {
+  return value === undefined || value === null ? undefined : correctionSetting(value);
 }
 function volumeLongName(source) {
   if (source === 'NeitzCped') return 'Cone pedicles (cped)';
@@ -435,13 +444,13 @@ async function applyHistory(snap) {
         try {
           const detail = await api.load({
             id: entry.id, source: entry.source, include_synapses: true,
-            section_corrections: entry.corrections, live_registration: entry.registration,
+            section_corrections: savedCorrection(entry.corrections), live_registration: entry.registration,
             manual_moves: movesBody(entry.manualMoves),
           });
           record = upsertNeuron(detail, {
             render: entry.render, display: entry.display,
           });
-          record.corrections = entry.corrections;
+          record.corrections = savedCorrection(entry.corrections);
           record.correctionMode = entry.correctionMode;
           record.registration = entry.registration;
           record.manualMoves = entry.manualMoves ?? null;
@@ -462,11 +471,11 @@ async function applyHistory(snap) {
         try {
           const detail = await loadInOrder(record.key, {
             id: record.id, source: record.source, include_synapses: true,
-            section_corrections: entry.corrections, live_registration: entry.registration,
+            section_corrections: savedCorrection(entry.corrections), live_registration: entry.registration,
             manual_moves: movesBody(entry.manualMoves),
           });
           record = upsertNeuron(detail, {});
-          record.corrections = entry.corrections;
+          record.corrections = savedCorrection(entry.corrections);
           record.correctionMode = entry.correctionMode;
           record.registration = entry.registration;
           record.manualMoves = entry.manualMoves ?? null;
@@ -1094,7 +1103,7 @@ async function restoreSession(saved) {
           id: entry.id,
           source: entry.source,
           include_synapses: true,
-          section_corrections: entry.corrections,
+          section_corrections: savedCorrection(entry.corrections),
           live_registration: entry.registration,
           check_fresh: false,
           manual_moves: movesBody(entry.manualMoves),
@@ -1128,7 +1137,7 @@ async function restoreSession(saved) {
         const record = upsertNeuron(detail, {
           render, display: entryDisplay,
         });
-        record.corrections = entry.corrections;
+        record.corrections = savedCorrection(entry.corrections);
         record.correctionMode = entry.correctionMode;
         record.registration = entry.registration;
         record.manualMoves = entry.manualMoves ?? null;
@@ -4457,11 +4466,11 @@ async function restoreUnloaded(snap) {
   try {
     const detail = await api.load({
       id: snap.id, source: snap.source, include_synapses: true,
-      section_corrections: snap.corrections, live_registration: snap.registration,
+      section_corrections: savedCorrection(snap.corrections), live_registration: snap.registration,
       manual_moves: movesBody(snap.manualMoves),
     });
     const record = upsertNeuron(detail, { render: snap.render, display: snap.display });
-    record.corrections = snap.corrections;
+    record.corrections = savedCorrection(snap.corrections);
     record.correctionMode = snap.correctionMode;
     record.registration = snap.registration;
     record.manualMoves = snap.manualMoves ?? null;
@@ -5154,7 +5163,7 @@ function forgetDrawn(record, { keepSurfaces = false, keepDrawn = false } = {}) {
 /**
  * Where one cell's annotations are drawn: Viking's current section transforms
  * (`registration`, on or off) and Viking's section correction (`corrections`:
- * 'off' or a mode, curvefit, neighbor or all).  The server moves the annotations when it loads the cell,
+ * 'off' or 'neighbor', the residual field).  The server moves the annotations when it loads the cell,
  * so this loads it again (from its cache, not Viking) with both settings and
  * redraws everything; the setting not being changed is passed as it is.
  */
@@ -5267,9 +5276,8 @@ async function setRegistration(record, changes) {
   live.registration = want.registration;
   live.corrections = want.corrections;
   // A mode, or 'off'; true and false are how a cell saved before the modes says it.
-  const correcting = !!changes.corrections && changes.corrections !== 'off';
-  const modeName = (CORRECTION_MODES.find(([v]) => v === changes.corrections)?.[1]
-    || 'Residual field').toLowerCase();
+  const correcting = 'corrections' in changes && correctionSetting(changes.corrections) !== 'off';
+  const modeName = MODE_LABELS.neighbor.toLowerCase();
   const turning = 'registration' in changes
     ? `${changes.registration ? 'Applying' : 'Removing'} Viking's current section transforms`
     : correcting ? `Applying Viking's section correction (${modeName})`
@@ -7481,7 +7489,7 @@ function cellPanel(record) {
 function registrationSummary(record) {
   const lr = record.summary?.live_registration;
   const sc = record.summary?.section_correction;
-  const what = CORRECTION_SHORT[sc?.mode] || 'field';
+  const what = { curvefit: 'fit', all: 'field + fit' }[sc?.mode] || 'field';
   // A volume whose transforms are not read here: the correction is all there is to say.
   if (!volumeHasTransforms(record.source)) {
     if (sc?.applied) return `${what}, ${(sc.n_moved ?? 0).toLocaleString('en-US')} moved`;
@@ -7498,26 +7506,16 @@ function registrationSummary(record) {
   return text;
 }
 
-/** Viking's section-correction modes, as the Registration panel names them. */
-const CORRECTION_MODES = [
-  ['curvefit', 'Curve fit'],
-  ['neighbor', 'Residual field'],
-  ['all', 'Field + fit'],
-];
-const CORRECTION_SHORT = { curvefit: 'fit', neighbor: 'field', all: 'field + fit' };
-
 /**
- * The correction a cell is drawn with: `off` or a mode.  The server's status
- * says what it applied; before any load the cell's own choice does, and a
- * choice from before the modes (true) was the residual field.
+ * The correction a cell is drawn with: 'off' or 'neighbor', the residual field.  The
+ * server's status says what it applied; before any load the cell's own choice does
+ * (`correctionSetting`: a choice from before the modes, true, and one of the retired
+ * Curve fit and Field + fit are the residual field).
  */
 function correctionOf(record) {
   const sc = record.summary?.section_correction;
-  if (sc) return sc.requested ? (sc.mode || 'neighbor') : 'off';
-  const c = record.corrections;
-  if (c === true) return 'neighbor';
-  if (c === false) return 'off';
-  return typeof c === 'string' ? c : 'off';
+  if (sc) return sc.requested ? 'neighbor' : 'off';
+  return correctionSetting(record.corrections);
 }
 
 /**
@@ -7564,24 +7562,15 @@ function buildRegistration(body, record) {
       (on) => setRegistration(record, { registration: on })).dataset.reg = 'transforms';
   }
 
+  // One correction is left, the residual field (Viking's service stopped running its curve
+  // fit on 2026-10-27), so the switch is all there is: no Correction dropdown.
   const sc = record.summary?.section_correction;
   const current = correctionOf(record);
-  const live = state.neurons.get(record.key) ?? record;
-  const pick = document.createElement('select');
-  pick.append(...CORRECTION_MODES.map(([value, label]) => new Option(label, value)));
-  if (current !== 'off') live.correctionMode = current;
-  pick.value = current !== 'off' ? current : (live.correctionMode || volumeDefaultCorrection(record.source));
   row("Viking's section correction", current !== 'off',
     `${REG_HELP.correction}\n\n${correctionForCell(sc)}`, REG_FIGURES.correction,
     correctionChip(sc, { stamp: humanStamp }),
-    (on) => setRegistration(record, { corrections: on ? pick.value : 'off' })).dataset.reg = 'correction';
-  pick.addEventListener('change', () => {
-    live.correctionMode = pick.value;
-    setRegistration(record, { corrections: pick.value });
-  });
-  field(body, 'Correction', pick);
-  setHelp(pick, REG_HELP.mode, REG_FIGURES.mode);
-  if (pick.previousElementSibling) setHelp(pick.previousElementSibling, REG_HELP.mode, REG_FIGURES.mode);
+    (on) => setRegistration(record, { corrections: on ? volumeDefaultCorrection(record.source) : 'off' }))
+    .dataset.reg = 'correction';
 }
 
 /**

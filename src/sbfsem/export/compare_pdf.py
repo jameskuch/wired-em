@@ -1611,8 +1611,9 @@ class _Writer:
         y = page.para(page.left, y, (
             f"The renderings were built from {len(spec.copies)} registrations of the cell. A registration "
             "places Viking's annotations at their stored positions or through the volume's current section "
-            "transforms, then moves them by Viking's section correction (none, Residual field, Curve fit or "
-            "Field + fit). Each rendering is held to its own registration's annotations. Below: what each "
+            "transforms, then moves them by Viking's section correction, its residual field, or not (its Curve "
+            "fit and Field + fit went on 2026-10-27). Each rendering is held to its own registration's "
+            "annotations. Below: what each "
             "registration moved of this cell's own annotations, and how far each link between two of them on "
             "different sections steps sideways at its positions."), size=7.8) + 0.08
         facts_of = getattr(self.source, "registration_facts", None)

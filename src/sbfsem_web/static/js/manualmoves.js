@@ -8,11 +8,13 @@
 // sections: an annotation is a disc (or an outline) in its section's plane, never
 // between two, so a Z move puts it on another section.  Nothing is written to
 // Viking.  A cell keeps its moves BY THE REGISTRATION SETTING they were made under
-// -- the copy tag the server names it with ("curvefit.1": the correction mode, and
+// -- the copy tag the server names it with ("neighbor.1": the correction mode, and
 // the current section transforms on), because a move is made from where that
 // setting drew the annotation.  The page sends every set with each load of the
 // cell, and the server applies the one of the setting it loads
-// (sbfsem.core.moves; `SbfsemService.load_neuron`).
+// (sbfsem.core.moves; `SbfsemService.load_neuron`).  Moves made under Curve fit
+// ("curvefit.1") or Field + fit ("all.1"), which Viking's service stopped running
+// on 2026-10-27, are the residual field's now (`normalizeStore`).
 //
 //   record.manualMoves = { [tag]: { [locationId]: { dx, dy, dz, t } } }
 //
@@ -59,20 +61,20 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 // -- the store ----------------------------------------------------------------------------
 
-/** The registration setting a copy tag names: "curvefit.1.m<token>" -> "curvefit.1". */
+/** The registration setting a copy tag names: "neighbor.1.m<token>" -> "neighbor.1". */
 export function baseTag(copyTag) {
   if (typeof copyTag !== 'string' || !copyTag) return null;
   const at = copyTag.indexOf('.m');
   return at >= 0 ? copyTag.slice(0, at) : copyTag;
 }
 
-/** A tag in words: "curvefit.1" -> "Curve fit correction, current transforms on". */
+/** A tag in words: "neighbor.1" -> "Residual field correction, current transforms on". */
 export function tagWords(tag, modeNames = {}) {
   if (!tag) return 'an unknown setting';
   const [mode, live] = String(tag).split('.');
   const names = {
-    off: 'no section correction', neighbor: 'Residual field correction', curvefit: 'Curve fit correction',
-    all: 'Field + fit correction', ...modeNames,
+    off: 'no section correction', neighbor: 'Residual field correction',
+    curvefit: 'Curve fit correction (retired)', all: 'Field + fit correction (retired)', ...modeNames,
   };
   return `${names[mode] ?? `${mode} correction`}, current transforms ${live === '1' ? 'on' : 'off'}`;
 }
@@ -87,23 +89,36 @@ function cleanMove(move) {
   return { dx: dx + 0, dy: dy + 0, dz: dz + 0, t: isNumber(move.t) ? move.t : 0 };
 }
 
+/** The correction modes Viking's service ran until 2026-10-27, and the one each is read as now. */
+const RETIRED_MODES = Object.freeze({ curvefit: 'neighbor', all: 'neighbor' });
+
+/** A setting's tag as the server names it now: "curvefit.1" and "all.1" are "neighbor.1". */
+export function currentTag(tag) {
+  const [mode, live] = String(tag).split('.');
+  return RETIRED_MODES[mode] ? `${RETIRED_MODES[mode]}.${live}` : tag;
+}
+
 /**
  * A saved store made safe: a session or localStorage can hold anything (the
  * 2026-08-31 incident).  Unknown shapes are dropped, numbers clamped, and moves of
- * nothing left out; `{}` when there is nothing.
+ * nothing left out; `{}` when there is nothing.  The sets of a retired correction
+ * (`currentTag`) join the residual field's, an annotation moved under more than one
+ * keeping its latest move (on a tie, the one the residual field's own set holds).
  */
 export function normalizeStore(saved) {
   const out = {};
   if (saved === null || typeof saved !== 'object' || Array.isArray(saved)) return out;
   for (const [tag, set] of Object.entries(saved)) {
     if (!/^[a-z]+\.[01]$/.test(tag) || set === null || typeof set !== 'object') continue;
-    const clean = {};
+    const into = currentTag(tag);
+    const clean = out[into] ?? {};
     for (const [id, move] of Object.entries(set)) {
       if (!/^\d+$/.test(id)) continue;
       const m = cleanMove(move);
-      if (m) clean[id] = m;
+      const had = clean[id];
+      if (m && (!had || m.t > had.t || (m.t === had.t && into === tag))) clean[id] = m;
     }
-    if (Object.keys(clean).length) out[tag] = clean;
+    if (Object.keys(clean).length) out[into] = clean;
   }
   return out;
 }

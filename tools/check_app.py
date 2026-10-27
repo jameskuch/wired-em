@@ -103,19 +103,13 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   (systemd did not start it); clearing surfaces in memory says what it cleared; "Clear cached files and
   reload" sends Clear-Site-Data and comes back to the tab with its note; a reset removes the ticked items,
   the session the page saved after the list was made included, and leaves the rest.
-* ``correctionlog`` -- the Settings tab's Correction log (2026-10-20): with Inferior Monkey c1178 loaded under
-  Field + fit, it lists the annotations Viking's curve fit pulled toward a much wider linked one (1328721 toward
-  1557441, 13x, about halfway) with the volume, mode and service version; the ratio box narrows the list, is
-  kept in the browser and refuses what is not a number; a Location ID selects its annotation in the 3D view,
-  drawn yellow; Show in Viking answers on a Mac that Viking runs on Windows; the card scrolls its table rather
-  than the page at 480 px.  A second table lists the traced outlines the correction moved off the outlines linked
-  to them (2.36.0): c1178's rows each with their overlap falling and at least 0.2 of the way off, a cause, the
-  rule in words, the ratio box leaving them be, and a long list folded to 10 rows behind "Show all".
-* ``shiftpulls`` -- the same pulls in the cell's own panel (2026-10-20): the shut Position shift section's
-  summary counts them at 4x with the layer off; open, a line says how many and lists their Location IDs, and
-  one selects its annotation, drawn yellow; the Settings tab's ratio box changes what the panel lists (20x:
-  none, no count); the row wraps inside the panel at 480 px.  A second line (2.36.0) lists the traced outlines
-  the correction moved off the outlines linked to them, counted as "N off", which the ratio leaves be.
+* ``correctionlog`` -- the Settings tab's Correction log (2026-10-20): since Viking's service stopped running
+  its curve fit (2026-10-27, 2.42.0), the card says so first; with Inferior Monkey c1178 loaded (the residual
+  field), its status says no cell loaded has a curve-fit correction and why, and c1178 is listed as not
+  checked, with the reason; the ratio box is kept in the browser and refuses what is not a number; the card
+  fits a 480 px window.
+* ``shiftpulls`` -- the cell panel's Position shift section (2.23.0): a cell corrected by the residual field
+  (every load since 2.42.0) lists no curve-fit pulls and no outlines moved off, and its summary counts none.
 * ``viewcube`` -- the view cube in the corner (viewcube.js), with a real mouse: a double-click on a
   face turns the view to that face's toolbar viewpoint exactly, on an edge to the 45 degree view and on a
   corner to the view between three faces; a single click turns nothing; looking at a face, the triangles
@@ -3041,7 +3035,7 @@ OUTLINE_ROWS = """[...document.querySelectorAll('#correction-log .settings-outli
 
 
 def correctionlog(c: Chrome, r: Report, ctx):
-    r.start('correctionlog: annotations the curve fit pulled toward a much wider one, in Settings')
+    r.start('correctionlog: the Settings tab says Viking no longer runs the curve fit, and why the log is empty')
     boot(c, ctx.url)
     _dismiss_offer(c)
     # The cheapest surface: the log reads the annotations, not the render.
@@ -3049,20 +3043,23 @@ def correctionlog(c: Chrome, r: Report, ctx):
     js(c, "localStorage.removeItem('sbfsem:correction-log-ratio')")
     key = load(c, 1178, source='NeitzInferiorMonkey', mesh=False)
     copy = js(c, f'{STATE}.neurons.get({json.dumps(key)}).summary.copy_tag || ""')
+    mode = js(c, f'{STATE}.neurons.get({json.dumps(key)}).summary.section_correction?.mode || ""')
+    r.check('c1178 loads on the residual field, its copy named for it', copy == 'neighbor.1' and mode == 'neighbor',
+            [copy, mode])
     js(c, "document.querySelector('[data-view=settings]').click()")
-    listed = c.wait_for("[...document.querySelectorAll('#correction-log tbody tr[data-location]')]"
-                        ".some((tr) => tr.dataset.location === '1328721')", 60)
-    rows = js(c, LOG_ROWS)
-    first = next((row for row in rows if row['id'] == 1328721), None)
-    r.check('c1178 under Field + fit lists 1328721, pulled toward 1557441 (13x) about halfway, with its volume, '
-            'mode and the service version',
-            bool(listed and first and first['cells'][0] == 'Inferior Monkey' and first['cells'][1] == 'c1178'
-                 and first['cells'][2] == 'Field + fit' and first['cells'][3] not in ('', '—')
-                 and first['cells'][8] == '1557441' and first['cells'][10] == '13×'
-                 and 0.4 < float(first['cells'][11]) < 0.6 and '1328723' in first['cells'][12]),
-            {'copy': copy, 'rows': rows})
-    r.check('and the other pulls at 4x (2028495 toward 2028493)', any(row['id'] == 2028495 for row in rows),
-            [row['id'] for row in rows])
+    said = c.wait_for("/no cell loaded on this server has a curve-fit correction/i.test("
+                      "document.querySelector('#correction-log p[role=status]')?.textContent || '')", 60)
+    card = js(c, """(() => { const card = document.getElementById('correction-log');
+        return { intro: card.querySelector('p.settings-text').textContent,
+                 status: card.querySelector('p[role=status]').textContent,
+                 rows: card.querySelectorAll('tbody tr[data-location]').length,
+                 body: card.querySelector('.settings-log').textContent }; })()""")
+    r.check('the card says first that Viking no longer runs a curve fit, and the status says why nothing is listed',
+            bool(said) and 'no longer runs a curve fit' in card['intro'] and 'no longer runs a curve fit' in card['status']
+            and card['rows'] == 0, card)
+    r.check('c1178 is listed as not checked, with the reason',
+            'c1178 (Inferior Monkey, Residual field)' in card['body']
+            and 'no longer runs a curve fit' in card['body'], card['body'])
 
     def ratio(text: str) -> None:
         js(c, """(() => { const i = document.getElementById('correction-log-ratio'); i.value = %s;
@@ -3070,72 +3067,21 @@ def correctionlog(c: Chrome, r: Report, ctx):
         c.settle(1)
 
     ratio('20')
-    everything = js(c, OUTLINE_ROWS)
-    # c1178's own block: a block names its cell on its first row only, and other cells may be
-    # loaded on the server too.
-    owner, outlines = None, []
-    for row in everything:
-        owner = (row['cells'][1], row['cells'][2]) if row['cells'][1] else owner
-        if owner == ('c1178', 'Field + fit'):
-            outlines.append(row)
-
-    def falls(row) -> bool:
-        before, after = (float(v) for v in row['cells'][8].split(' → '))
-        return after <= before and float(row['cells'][9]) >= 0.2 and row['cells'][12] in ('shape', 'slide', 'other')
-
-    rule = js(c, "document.querySelector('#correction-log .settings-outline-table')?.closest('.settings-scroll')"
-                 "?.previousElementSibling?.textContent || ''")
-    r.check('a second table lists c1178\'s traced outlines moved off their linked outlines: overlap falling, '
-            'at least 0.2 of the way off, a cause, the rule said above it',
-            bool(outlines) and all(falls(row) for row in outlines) and outlines[0]['cells'][1] == 'c1178'
-            and '0.25 µm or more' in rule, {'rows': outlines[:12], 'rule': rule})
-    folded = [row for row in outlines if row['hidden']]
-    if len(outlines) > 10:
-        js(c, "document.querySelector('#correction-log button.settings-more').click()")
-        opened = [row for row in js(c, OUTLINE_ROWS) if row['id'] in {o['id'] for o in outlines}]
-        r.check(f'{len(outlines)} rows are folded to 10 behind "Show all", which opens them',
-                len(folded) == len(outlines) - 10 and not any(row['hidden'] for row in opened),
-                {'folded': len(folded), 'rows': len(outlines)})
-    narrowed = c.wait_for("!document.querySelector('#correction-log tbody tr[data-location]:not([data-outline])') && "
-                          "/None pulled/.test(document.querySelector('#correction-log tbody')?.textContent || '')", 15)
     kept = js(c, "localStorage.getItem('sbfsem:correction-log-ratio')")
-    r.check('a ratio of 20 lists none of c1178\'s pulls (13x at most), and is kept in the browser',
-            narrowed and kept == '20', {'kept': kept, 'rows': js(c, LOG_ROWS)})
-    r.check('and leaves the outlines as they were', len(js(c, OUTLINE_ROWS)) == len(everything),
-            len(js(c, OUTLINE_ROWS)))
+    r.check('a ratio is kept in the browser', kept == '20', kept)
     ratio('wide')
     said = js(c, """({ value: document.getElementById('correction-log-ratio').value,
         status: document.querySelector('#correction-log p[role=status]').textContent })""")
     r.check('a ratio that is not a number is refused and the last one holds',
             said['value'] == '20' and said['status'].startswith('Not a number'), said)
     ratio('4')
-    c.wait_for("[...document.querySelectorAll('#correction-log tbody tr[data-location]:not([data-outline])')]"
-               ".length >= 2", 15)
-
-    js(c, """[...document.querySelectorAll('#correction-log tr[data-location="1328721"] button.settings-id')]
-        .find((b) => b.textContent === '1328721').click()""")
-    got = c.wait_for("document.querySelector('.tab.active').dataset.view === 'render' && "
-                     "window.sbfsem.renderer.selection?.locationId === 1328721", 30)
-    sel = js(c, SELECTED)
-    r.check('its Location ID selects the annotation in the 3D view, drawn yellow',
-            got and sel and sel['kind'] == 'annotation' and sel['drawn'] and sel['color'] == sel['yellow'], sel)
-
-    js(c, "document.querySelector('[data-view=settings]').click()")
-    c.wait_for("!!document.querySelector('#correction-log button.settings-viking')", 15)
-    js(c, "document.querySelector('#correction-log tr[data-location=\"1328721\"] button.settings-viking').click()")
-    status = c.wait_for("/only be run on Windows/.test(document.getElementById('status').textContent)", 5)
-    r.check('Show in Viking is offered, and on a Mac says Viking runs on Windows', status,
-            js(c, "document.getElementById('status').textContent"))
 
     c.emulate('mac', 480, 900)
     c.settle(2)
     fit = js(c, """(() => { const card = document.getElementById('correction-log');
-        const scroll = card.querySelector('.settings-scroll');
         return { page: document.scrollingElement.scrollWidth - window.innerWidth,
-                 card: Math.round(card.getBoundingClientRect().right - window.innerWidth),
-                 table: scroll ? scroll.scrollWidth > scroll.clientWidth : null }; })()""")
-    r.check('at 480 px the table scrolls inside its card, not the page',
-            fit['page'] <= 0 and fit['card'] <= 0 and fit['table'] is True, fit)
+                 card: Math.round(card.getBoundingClientRect().right - window.innerWidth) }; })()""")
+    r.check('at 480 px the card fits the window', fit['page'] <= 0 and fit['card'] <= 0, fit)
     c.emulate('mac', 1440, 900)
     js(c, "localStorage.removeItem('sbfsem:correction-log-ratio')")
 
@@ -3156,7 +3102,7 @@ PULLS = """(() => { const s = %s; const row = s?.querySelector('.shift-pulls:not
 
 
 def shiftpulls(c: Chrome, r: Report, ctx):
-    r.start('shiftpulls: the cell panel lists the annotations the curve fit pulled toward a much wider one')
+    r.start('shiftpulls: a cell on the residual field lists no curve-fit pulls in its Position shift section')
     boot(c, ctx.url)
     _dismiss_offer(c)
     set_control(c, 'pathway', 'original')
@@ -3164,71 +3110,14 @@ def shiftpulls(c: Chrome, r: Report, ctx):
     key = load(c, 1178, source='NeitzInferiorMonkey', mesh=False)
     js(c, "document.querySelector(%s).click(); true" % json.dumps(f'.neuron-item[data-key="{key}"] .chev'))
     c.wait_for("!!document.querySelector('.cell-panel')", 10)
-    counted = c.wait_for(f"/ · \\d+ pulled(, \\d+ off)?$/.test(({POSITION_SHIFT})?.querySelector('.sec-summary')"
-                         "?.textContent || '')", 30)
-    shut = js(c, PULLS)
-    r.check('the shut Position shift section counts the pulls (at 4x), with the layer off',
-            bool(counted and shut['summary'].startswith('off · ') and not shut['layerOn']), shut)
-
+    c.wait_for(f"!!({POSITION_SHIFT})?.querySelector('.sec-summary')", 30)
     js(c, f"({POSITION_SHIFT}).querySelector('.section-head').click()")
-    c.wait_for(f"!!({POSITION_SHIFT})?.querySelector('.shift-pulls button.shift-pull-id')", 10)
+    c.settle(3)
     got = js(c, PULLS)
-    n = len(got['ids'])
-    m = re.search(r', (\d+) off$', got['summary'] or '')
-    r.check('open, a line says how many and lists 1328721 and 2028495 as buttons, with help on the line',
-            {1328721, 2028495} <= set(got['ids'])
-            and got['line'] == f'Curve fit pulled {n} annotations toward one 4× as wide or wider:'
-            and re.search(f'· {n} pulled(, \\d+ off)?$', got['summary'] or '') is not None
-            and got['help'] > 100, got)
-    off = int(m.group(1)) if m else 0
-    more = f'and {off - 12} more (Settings → Correction log)' if off > 12 else None
-    r.check('a second line lists the traced outlines moved off their linked outlines, its count in the summary, '
-            'the first 12 as buttons and how many more, with help',
-            off > 0 and got['offLine'] == f'Curve fit moved {off} traced outlines off the outlines linked to them:'
-            and len(got['offIds']) == min(off, 12) and got['offMore'] == more and got['offHelp'] > 200, got)
-
-    js(c, f"({POSITION_SHIFT}).querySelector('button.shift-pull-id[data-location=\"1328721\"]').click()")
-    chosen = c.wait_for("window.sbfsem.renderer.selection?.locationId === 1328721", 30)
-    sel = js(c, SELECTED)
-    r.check('a Location ID selects its annotation in the 3D view, drawn yellow',
-            chosen and sel and sel['kind'] == 'annotation' and sel['drawn'] and sel['color'] == sel['yellow'], sel)
-
-    def ratio(text: str) -> None:
-        js(c, "document.querySelector('[data-view=settings]').click()")
-        c.wait_for("!!document.getElementById('correction-log-ratio')", 15)
-        js(c, """(() => { const i = document.getElementById('correction-log-ratio'); i.value = %s;
-            i.dispatchEvent(new Event('change', { bubbles: true })); })()""" % json.dumps(text))
-        js(c, "document.querySelector('[data-view=render]').click()")
-        c.settle(1)
-
-    ratio('20')
-    gone = c.wait_for(f"!({POSITION_SHIFT})?.querySelector('.shift-pulls:not(.shift-outlines)') && "
-                      f"!/pulled/.test(({POSITION_SHIFT})?.querySelector('.sec-summary')?.textContent || '')", 15)
-    r.check('the Settings ratio at 20x lists none here either (13x at most), and the count goes',
-            gone, js(c, PULLS))
-    left = js(c, PULLS)
-    r.check('the outlines stay, counted on their own', len(left['offIds']) == min(off, 12)
-            and (left['summary'] or '').endswith(f'· {off} off'), left)
-    ratio('4')
-    back = c.wait_for(f"({POSITION_SHIFT})?.querySelectorAll('.shift-pulls:not(.shift-outlines) "
-                      f"button.shift-pull-id').length === {n}", 15)
-    r.check('back at 4x they are listed again', back, js(c, PULLS))
-
-    c.emulate('mac', 480, 900)
-    c.settle(2)
-    fit = js(c, """(() => { const s = %s; const row = s?.querySelector('.shift-pulls');
-        const box = (e) => e?.getBoundingClientRect();
-        const page = () => document.scrollingElement.scrollWidth - window.innerWidth;
-        const out = { page: page(), row: row ? Math.round(box(row).right - box(s).right) : null,
-                      over: row ? row.scrollWidth - row.clientWidth : null };
-        if (row) { row.style.display = 'none'; out.withoutRow = page(); row.style.display = ''; }
-        out.wide = [...document.querySelectorAll('body *')].filter((e) => box(e).right > window.innerWidth + 1)
-          .slice(0, 8).map((e) => `${e.tagName.toLowerCase()}#${e.id}.${e.className}`.slice(0, 80));
-        return out; })()""" % POSITION_SHIFT)
-    r.check('at 480 px the row wraps inside the panel', fit['row'] is not None and fit['row'] <= 0
-            and fit['over'] <= 0 and fit['page'] <= fit.get('withoutRow', 0), fit)
-    c.emulate('mac', 1440, 900)
-    js(c, "localStorage.removeItem('sbfsem:correction-log-ratio')")
+    r.check('open, the section has no pulls line and no outlines line, and its summary counts none',
+            got['line'] is None and got['offLine'] is None and not got['ids'] and not got['offIds']
+            and 'pulled' not in (got['summary'] or '') and ' off' not in (got['summary'] or '').replace('off ·', ''),
+            got)
 
 
 def visualizations(c: Chrome, r: Report, ctx):
@@ -3628,16 +3517,16 @@ def registrations(c: Chrome, r: Report, ctx):
                   loaded: d.querySelector('.reg-loaded')?.closest('td')?.querySelector('input')?.dataset.tag ?? null,
                   status: d.querySelector('.reg-status').textContent,
                   intro: d.querySelector('.reg-intro').textContent }}; }})()""")
-    r.check('Registrations… opens a grid of the 8 registrations, 6 ticked to start with, the tab\'s own marked',
-            grid['open'] and grid['n'] == 8 and len(grid['ticked']) == 6 and grid['loaded'] == tab
-            and grid['status'] == '6 panes, one layer each.' and 'Original (MATLAB)' in grid['intro'], grid)
-    # Too many for the layers of one pane: said, and the buttons wait.
+    r.check('Registrations… opens a grid of the 4 registrations (no correction or the residual field, stored or '
+            'current), all ticked to start with, the tab\'s own marked',
+            grid['open'] and grid['n'] == 4 and len(grid['ticked']) == 4 and grid['loaded'] == tab == 'neighbor.1'
+            and grid['status'] == '4 panes, one layer each.' and 'Original (MATLAB)' in grid['intro'], grid)
+    # All four fit the layers of one pane.
     js(c, f"""[...{REG_DIALOG}.querySelectorAll('input[name=reg-target]')].find((i) => i.value === 'layers').click()""")
     c.settle(1)
     full = js(c, f"""({{ status: {REG_DIALOG}.querySelector('.reg-status').textContent,
         disabled: {REG_DIALOG}.querySelector('.dlg-actions .primary').disabled }})""")
-    r.check('six do not fit in one pane: it says so and will not set them up',
-            'holds 4 layers: untick 2' in full['status'] and full['disabled'], full)
+    r.check('the four fit in one pane as its layers', not full['disabled'], full)
     js(c, f"""[...{REG_DIALOG}.querySelectorAll('input[name=reg-target]')].find((i) => i.value === 'panes').click()""")
     want = ['off.0', 'off.1', tab]
     js(c, """(() => { const want = new Set(%s);
@@ -3684,7 +3573,7 @@ def registrations(c: Chrome, r: Report, ctx):
     c.settle(3)
     rows = js(c, f"[...{REPORT}.querySelectorAll('.rep-table tbody tr .rep-reg')].map((t) => t.textContent)")
     r.check('the report dialog says each rendering\'s registration', rows == [
-        'Stored positions, no correction', 'Current transforms, no correction', 'Current transforms + Field + fit'],
+        'Stored positions, no correction', 'Current transforms, no correction', 'Current transforms + Residual field'],
         rows)
     _report_button(c, 'None', section=1)
     _report_button(c, 'Across registrations', section=1)

@@ -965,8 +965,7 @@ export const SHIFT_HELP = Object.freeze({
     + 'the slice), so this is not used there.',
   width: 'How wide the arrows are on the screen, in pixels, whatever the zoom. The head grows with it; '
     + 'the original rings are drawn a little thinner.',
-  apply: 'Turn on Viking\'s section correction for this cell so there is a shift to show: Field + fit for a '
-    + 'Neitz lab volume, Curve fit for the others, the mode each volume\'s cells get when they name none.',
+  apply: 'Turn on Viking\'s section correction for this cell, its residual field, so there is a shift to show.',
 });
 
 /** The drawing above each help text (helpfigures.js), where one helps. */

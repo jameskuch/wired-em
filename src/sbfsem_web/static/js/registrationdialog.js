@@ -2,8 +2,9 @@
 // under several registrations, side by side (asked for 2026-10-20: "the exact same
 // cell with the exact same render parameters while changing multiple combinations
 // of Registration").  A grid of boxes -- Viking's correction down the side (none,
-// Residual field, Curve fit, Field + fit), the stored positions and the current
-// section transforms across the top -- and where they go: one pane each, or the
+// Residual field; Curve fit and Field + fit until Viking's service stopped running
+// them on 2026-10-27), the stored positions and the current section transforms
+// across the top -- and where they go: one pane each, or the
 // layers of the focused pane.  CompareView.sweepRegistrations sets them up;
 // Compare builds them.  The choice is remembered in this browser (localStorage, a
 // convenience: a private window starts from the defaults).
@@ -69,7 +70,9 @@ export class RegistrationDialog {
     const saved = loadPrefs();
     const { hasTransforms, defaultCorrection } = this.context;
     const offered = new Set(this._offered().map(registrationTag));
-    const start = saved?.tags?.length ? saved.tags.filter((t) => offered.has(t))
+    // A choice saved with a retired correction ("all.1") ticks the residual field's box.
+    const start = saved?.tags?.length
+      ? [...new Set(saved.tags.map((t) => registrationTag(registrationOfTag(t))))].filter((t) => offered.has(t))
       : defaultSweep({ hasTransforms, defaultCorrection }).map(registrationTag);
     this.ticked = new Set(start);
     this.target = saved?.target ?? 'panes';
@@ -120,7 +123,8 @@ export class RegistrationDialog {
       const row = el('tr');
       const name = el('th', '', corrections === 'off' ? 'No correction' : correctionName(corrections));
       help(name, corrections === 'off' ? 'Viking’s section correction off.'
-        : `Viking’s section correction in its ${correctionName(corrections)} mode, on top of the positions above.`);
+        : `Viking’s section correction, its ${correctionName(corrections).toLowerCase()}, on top of the positions `
+          + 'above. (Curve fit and Field + fit are gone: Viking’s service stopped running them on 2026-10-27.)');
       row.append(name);
       for (const live of lives) {
         const tag = registrationTag({ live, corrections });

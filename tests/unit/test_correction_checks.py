@@ -497,7 +497,10 @@ def client():
 
 
 def test_the_log_lists_each_loaded_copy_and_its_pulls_at_the_ratio_asked(client):
+    # A cell read from a file saved under Curve fit (before 2026-10-27), and one
+    # corrected by the field, as every load is now.
     fitted, field = make_cell(), make_cell()
+    field.id = 10
     fitted.correction_status = {"requested": True, "applied": True, "mode": "curvefit"}
     fitted.section_correction = {"n_moved": 6, "stos_group": "Grid16", "service_version": "1.2.0"}
     field.correction_status = {"requested": True, "applied": True, "mode": "neighbor"}
@@ -511,9 +514,11 @@ def test_the_log_lists_each_loaded_copy_and_its_pulls_at_the_ratio_asked(client)
     assert log["outline_rule"] == {"min_move_um": cc.OUTLINE_MIN_MOVE_UM, "min_overlap": cc.OUTLINE_MIN_OVERLAP,
                                    "min_off_share": cc.OUTLINE_MIN_OFF}
     assert log["ratio_sent_to_viking"] is False
-    cells = {c["copy_tag"]: c for c in log["cells"]}
-    assert set(cells) == {"curvefit.0", "neighbor.0"}
-    checked = cells["curvefit.0"]
+    cells = {c["neuron_id"]: c for c in log["cells"]}
+    assert set(cells) == {9, 10}
+    # The retired mode's copy is the field's setting's now; it keeps its own mode.
+    assert {c["copy_tag"] for c in log["cells"]} == {"neighbor.0"}
+    checked = cells[9]
     assert (checked["source"], checked["neuron_id"], checked["mode"]) == ("NeitzInferiorMonkey", 9, "curvefit")
     assert checked["checked"] and checked["service_version"] == "1.2.0" and checked["stos_group"] == "Grid16"
     assert (checked["n_annotations"], checked["n_moved"], checked["n_next_to_wider"]) == (9, 6, 4)
@@ -522,13 +527,14 @@ def test_the_log_lists_each_loaded_copy_and_its_pulls_at_the_ratio_asked(client)
     assert first["neighbor_id"] == 1 and first["moved_with"] == [4]
     assert first["frac"] == pytest.approx(0.5) and first["ratio"] == pytest.approx(20.0)
     assert (checked["n_outlines"], checked["n_outlines_moved"], checked["outline_moves"]) == (0, 0, [])
-    unchecked = cells["neighbor.0"]
+    unchecked = cells[10]
     assert not unchecked["checked"] and unchecked["pulls"] == []
-    assert unchecked["note"] == "Not checked: this mode has no curve fit"
+    assert unchecked["note"] == cc.NO_CURVE_FIT
+    assert "Viking's service no longer runs a curve fit" in unchecked["note"]
 
     tighter = client.get("/api/correction-log?ratio=4.2").json()
     assert [p["location_id"] for c in tighter["cells"] for p in c["pulls"]] == [3]
-    assert tighter["cells"][0]["n_next_to_wider"] == 3
+    assert next(c for c in tighter["cells"] if c["neuron_id"] == 9)["n_next_to_wider"] == 3
     for bad in ("0.5", "51", "four"):
         assert client.get(f"/api/correction-log?ratio={bad}").status_code == 422, bad
 
@@ -544,14 +550,15 @@ def test_a_moved_copy_is_left_to_its_base(client):
     moves = normalize_moves([{"id": 6, "dx_um": 1.0, "dy_um": 0.0}])
     derived = moved_copy(cell, moves)
     with service._lock:
-        service._store(next(iter(service._copies)), derived, "all.0.mabc")
+        service._store(next(iter(service._copies)), derived, "neighbor.0.mabc")
     log = client.get("/api/correction-log").json()
-    assert [c["copy_tag"] for c in log["cells"]] == ["all.0"]
+    assert [c["copy_tag"] for c in log["cells"]] == ["neighbor.0"]
 
 
 def test_a_cell_answers_its_own_pulls_for_the_copy_and_ratio_asked(client):
     """``GET /neurons/{source}/{id}/correction-pulls``: the cell panel's line, as the log's rows."""
     fitted, field = make_cell(), make_cell()
+    field.id = 10
     fitted.correction_status = {"requested": True, "applied": True, "mode": "curvefit"}
     fitted.section_correction = {"n_moved": 6, "stos_group": "Grid16", "service_version": "1.2.0"}
     field.correction_status = {"requested": True, "applied": True, "mode": "neighbor"}
@@ -559,9 +566,11 @@ def test_a_cell_answers_its_own_pulls_for_the_copy_and_ratio_asked(client):
     service.add_neuron(fitted)
     service.add_neuron(field)
 
+    # A page from before 2026-10-27 names the copy by its old tag: the same copy answers.
     own = client.get("/api/neurons/i/9/correction-pulls?copy=curvefit.0").json()
     assert (own["source"], own["neuron_id"], own["copy_tag"], own["mode"]) == (
-        "NeitzInferiorMonkey", 9, "curvefit.0", "curvefit")
+        "NeitzInferiorMonkey", 9, "neighbor.0", "curvefit")
+    assert client.get("/api/neurons/i/9/correction-pulls?copy=neighbor.0").json() == own
     assert own["checked"] and own["note"] == "" and own["service_version"] == "1.2.0"
     assert (own["ratio"], own["ratio_sent_to_viking"]) == (4.0, False)
     assert (own["n_annotations"], own["n_moved"], own["n_next_to_wider"]) == (9, 6, 4)
@@ -569,13 +578,13 @@ def test_a_cell_answers_its_own_pulls_for_the_copy_and_ratio_asked(client):
     assert own["pulls"][0]["moved_with"] == [4]
     # The same rows as the log's, field for field.
     logged = client.get("/api/correction-log").json()["cells"]
-    assert own["pulls"] == next(c for c in logged if c["copy_tag"] == "curvefit.0")["pulls"]
+    assert own["pulls"] == next(c for c in logged if c["neuron_id"] == 9)["pulls"]
 
-    tighter = client.get("/api/neurons/i/9/correction-pulls?copy=curvefit.0&ratio=4.2").json()
+    tighter = client.get("/api/neurons/i/9/correction-pulls?copy=neighbor.0&ratio=4.2").json()
     assert (tighter["ratio"], [p["location_id"] for p in tighter["pulls"]]) == (4.2, [3])
-    other = client.get("/api/neurons/i/9/correction-pulls?copy=neighbor.0").json()
+    other = client.get("/api/neurons/i/10/correction-pulls?copy=neighbor.0").json()
     assert (other["mode"], other["checked"], other["pulls"]) == ("neighbor", False, [])
-    assert other["note"] == "Not checked: this mode has no curve fit"
+    assert other["note"] == cc.NO_CURVE_FIT
     for bad in ("0.5", "51", "four"):
         assert client.get(f"/api/neurons/i/9/correction-pulls?ratio={bad}").status_code == 422, bad
     assert client.get("/api/neurons/i/987654/correction-pulls").status_code == 404
@@ -595,9 +604,9 @@ def test_a_cell_without_a_correction_is_off_and_a_moved_copy_answers_its_base(cl
     service.add_neuron(cell)
     derived = moved_copy(cell, normalize_moves([{"id": 6, "dx_um": 1.0, "dy_um": 0.0}]))
     with service._lock:
-        service._store(next(iter(service._copies)), derived, "all.0.mabc")
+        service._store(next(iter(service._copies)), derived, "neighbor.0.mabc")
     moved = client.get("/api/neurons/i/9/correction-pulls?copy=all.0.mabc").json()
-    assert (moved["copy_tag"], moved["mode"], moved["checked"]) == ("all.0.mabc", "all", True)
+    assert (moved["copy_tag"], moved["mode"], moved["checked"]) == ("neighbor.0.mabc", "all", True)
     assert [p["location_id"] for p in moved["pulls"]] == [3, 9]
 
 

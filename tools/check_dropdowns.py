@@ -1689,7 +1689,8 @@ def matrix(c: Chrome, ctx, folder: str):
             close_list(c)
             show_view(c, 'render')
             if ctx.get('cell') and load_cell(c, ctx['cell']) and open_cell_panel(c):
-                index = next((s['i'] for s in cell_selects(c) if s['first'] == 'Curve fit'), None)
+                # The Correction dropdown went with 2.42.0 (one correction is left): any of the panel's.
+                index = next((s['i'] for s in cell_selects(c)), None)
                 if index is not None:
                     c.center(tag_cell_select(c, index))
                     open_by_click(c, '.cell-panel select[data-ddi="x"]')

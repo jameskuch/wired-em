@@ -4281,8 +4281,8 @@ test('pivot: a pane framed after the pivot was set takes Sync\'s pivot; P with t
 
 // -- registrations: a layer built from another copy of the cell ----------------------------
 
-// The compared cell as the tab loaded it: the current transforms with Field + fit.
-const regRecord = { ...record, summary: { id: 1, source: 'NeitzInferiorMonkey', copy_tag: 'all.1' } };
+// The compared cell as the tab loaded it: the current transforms with the residual field.
+const regRecord = { ...record, summary: { id: 1, source: 'NeitzInferiorMonkey', copy_tag: 'neighbor.1' } };
 const meshQueries = () => meshJobs().map(([, , q]) => q);
 /** Put a layer on a registration through the select its editor shows. */
 function pickRegistration(view, i, k, tag) {
@@ -4297,17 +4297,17 @@ test('registration: a layer on another registration loads that copy once and bui
   resetServer();
   const { view } = makeView(2);
   setTech(view, 1, 'voxel2');
-  pickRegistration(view, 1, 0, 'curvefit.0');
-  assert.deepEqual(L(view, 1).config.registration, { live: false, corrections: 'curvefit' });
-  assert.equal(L(view, 1).chip.name.textContent, 'stored+fit · Voxel remesh', 'the chip names the registration first');
+  pickRegistration(view, 1, 0, 'neighbor.0');
+  assert.deepEqual(L(view, 1).config.registration, { live: false, corrections: 'neighbor' });
+  assert.equal(L(view, 1).chip.name.textContent, 'stored+field · Voxel remesh', 'the chip names the registration first');
   await view.build(regRecord);
   await idle(view);
   assert.deepEqual(server.copyLoads.map((b) => [b.live_registration, b.section_corrections, b.manual_moves]),
-    [[false, 'curvefit', undefined]], 'one load of the copy, without the person\'s moves');
+    [[false, 'neighbor', undefined]], 'one load of the copy, without the person\'s moves');
   const queries = meshQueries();
   assert.equal(queries.length, 2, 'the same options on two copies are two builds');
-  assert.deepEqual(queries.map((q) => q.copy ?? null), [null, 'curvefit.0']);
-  assert.equal(L(view, 1).builtCopy, 'curvefit.0');
+  assert.deepEqual(queries.map((q) => q.copy ?? null), [null, 'neighbor.0']);
+  assert.equal(L(view, 1).builtCopy, 'neighbor.0');
   assert.equal(L(view, 0).builtCopy, null, 'the cell as loaded is the tab\'s own copy');
   assert.equal(view.panes[1].state, 'ready');
   // Built again with nothing changed: nothing is loaded or built.
@@ -4329,8 +4329,9 @@ test('registration: changing it makes the layer out of date; As loaded goes back
   assert.equal(L(view, 0).config.registration, null);
   assert.equal(view.panes[0].state, 'ready', 'back to what it was built from');
   const options = view.panes[0].registrationSelect.options.map((o) => [o.value, o.textContent]);
-  assert.deepEqual(options[0], ['', 'As loaded (current + field + fit)']);
-  assert.equal(options.length, 9, 'as loaded, and every registration of a volume whose transforms are read');
+  assert.deepEqual(options[0], ['', 'As loaded (current + field)']);
+  assert.equal(options.length, 5, 'as loaded, and every registration of a volume whose transforms are read');
+  assert.ok(!options.some(([v]) => /curvefit|all/.test(v)), 'no mode Viking no longer runs');
   assert.ok(options.some(([v, t]) => v === 'neighbor.1' && t === 'Current transforms + Residual field'));
 });
 
@@ -4361,7 +4362,7 @@ test('registration: a Difference across two copies holds each surface to its own
   await idle(view);
   const diffs = posts('mesh-diff-job');
   assert.equal(diffs.length, 1);
-  assert.equal(diffs[0][3].copy, 'all.1', 'A on the tab\'s copy, named');
+  assert.equal(diffs[0][3].copy, 'neighbor.1', 'A on the tab\'s copy, named');
   assert.equal(diffs[0][2].copy_b, 'off.0', 'B on its own');
   assert.equal(view.panes[2].state, 'ready');
 });
@@ -4385,26 +4386,34 @@ test('registration: Registrations… copies the layer being edited once per regi
   setTech(view, 0, 'tube');
   view.focus = 0;
   const regs = [{ live: false, corrections: 'off' }, { live: true, corrections: 'off' },
-    { live: true, corrections: 'curvefit' }, { live: true, corrections: 'all' }, { live: false, corrections: 'all' }];
+    { live: true, corrections: 'neighbor' }, { live: false, corrections: 'neighbor' }];
   const done = view.sweepRegistrations(regs, { target: 'panes' });
-  assert.deepEqual(done, { panes: 5, layers: 1 });
-  assert.equal(view.panes.length, 5);
-  assert.deepEqual(view.panes.map((p) => p.layers.length), [1, 1, 1, 1, 1]);
-  assert.deepEqual(view.panes.map((p) => p.layers[0].config.tech), ['tube', 'tube', 'tube', 'tube', 'tube']);
+  assert.deepEqual(done, { panes: 4, layers: 1 });
+  assert.equal(view.panes.length, 4);
+  assert.deepEqual(view.panes.map((p) => p.layers.length), [1, 1, 1, 1]);
+  assert.deepEqual(view.panes.map((p) => p.layers[0].config.tech), ['tube', 'tube', 'tube', 'tube']);
   assert.deepEqual(view.panes.map((p) => registrationTagOf(p.layers[0].config.registration)),
-    ['off.0', 'off.1', 'curvefit.1', 'all.1', 'all.0']);
+    ['off.0', 'off.1', 'neighbor.1', 'neighbor.0']);
   assert.ok(view.panes.every((p) => p.layers[0].config.color === view.panes[0].layers[0].config.color),
     'one layer each, in the first color');
+  // A sweep saved with the retired corrections: each is the residual field, once.
+  const retired = view.sweepRegistrations([{ live: true, corrections: 'curvefit' }, { live: true, corrections: 'all' },
+    { live: true, corrections: 'neighbor' }], { target: 'panes' });
+  assert.deepEqual(retired, { panes: 1, layers: 1 });
+  assert.deepEqual(registrationTagOf(view.panes[0].layers[0].config.registration), 'neighbor.1');
   // As layers of one pane: four at most, in the palette's colors.
+  view.sweepRegistrations(regs, { target: 'panes' });
   const layered = view.sweepRegistrations(regs.slice(0, 3), { target: 'layers' });
   assert.deepEqual(layered, { panes: 1, layers: 3 });
-  assert.deepEqual(view.panes[0].layers.map((l) => registrationTagOf(l.config.registration)), ['off.0', 'off.1', 'curvefit.1']);
+  assert.deepEqual(view.panes[0].layers.map((l) => registrationTagOf(l.config.registration)), ['off.0', 'off.1', 'neighbor.1']);
   assert.equal(new Set(view.panes[0].layers.map((l) => l.config.color)).size, 3);
   assert.deepEqual(view.panes[0].layers.map((l) => l.config.opacity), [1, 0.45, 0.45]);
-  assert.ok(view.sweepRegistrations(regs, { target: 'layers' }).problem, 'five do not fit in a pane');
+  assert.ok(view.sweepRegistrations([...regs, { live: false, corrections: 'off' }, ...regs], { target: 'layers' }).problem === undefined,
+    'a duplicate is one registration, so four fit a pane');
+  view.sweepRegistrations(regs, { target: 'panes' });
   await view.build(regRecord);
   await idle(view);
-  assert.equal(server.copyLoads.length, 5, 'one load per registration, shared by the panes and layers that ask');
+  assert.equal(server.copyLoads.length, 4, 'one load per registration, shared by the panes and layers that ask');
 });
 
 test('registration: the report names each rendering\'s copy and its registration in words', async () => {
@@ -4417,7 +4426,7 @@ test('registration: the report names each rendering\'s copy and its registration
   view.reportCamera = () => null;   // the stub renderer has no camera to read
   const { renderings } = view.reportSources();
   assert.deepEqual(renderings.map((r) => [r.copy, r.registration]),
-    [['all.1', 'Current transforms + Field + fit'], ['off.0', 'Stored positions, no correction']]);
+    [['neighbor.1', 'Current transforms + Residual field'], ['off.0', 'Stored positions, no correction']]);
 });
 
 // -- run -------------------------------------------------------------------

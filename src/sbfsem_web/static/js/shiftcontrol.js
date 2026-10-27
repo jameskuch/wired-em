@@ -17,7 +17,8 @@ import {
 import { ShiftLegend, legendBlocks } from './shiftlegend.js';
 import { dataKey } from './state.js';
 
-/** The correction modes that run Viking's curve fit, the only ones the Correction log checks. */
+/** The correction modes that ran Viking's curve fit, the only ones the Correction log checks: since
+ * 2026-10-27 only a cell read from a file saved before then carries one. */
 const FIT_MODES = Object.freeze(['curvefit', 'all']);
 
 export class ShiftController {
@@ -34,7 +35,7 @@ export class ShiftController {
    */
   constructor({
     renderer, state, api, nodesFor, outlinesFor, cachedNodes, cachedOutlines, fail, hooks, dom,
-    volumeTag = (source) => source, hasTransforms = () => true, defaultCorrection = () => 'curvefit',
+    volumeTag = (source) => source, hasTransforms = () => true, defaultCorrection = () => 'neighbor',
     pullRatio = () => 4,
   }) {
     Object.assign(this, {

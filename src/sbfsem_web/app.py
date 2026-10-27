@@ -521,19 +521,18 @@ async def lifespan(app: FastAPI):
         # kind of the structure it is linked to, flagged "inferred", or stays
         # "UntaggedPost".  assume = MATLAB, separate = never infer.
         untagged_psd=os.environ.get("SBFSEM_UNTAGGED_PSD", "infer"),
-        # Viking's section correction, on top of the live registration: the
-        # user's decision of 2026-09-24 is its curve fit along each traced
-        # process by default.  On c21768 it took the median step between
-        # linked annotations on adjacent sections from 0.194 to 0.125 um and
-        # the steps over 1.5 um from 39 to 19; the residual field alone
-        # (neighbor, measured worse on 2026-09-23) and both (all) stay a
-        # switch away in each cell's panel.  off | neighbor | curvefit | all
-        # (1 = neighbor).  SBFSEM_CORRECTIONS_URL names the service.
-        section_corrections=os.environ.get("SBFSEM_SECTION_CORRECTIONS", "curvefit"),
-        # The Neitz lab's volumes are corrected by the field, then the fit
-        # (the user's decision of 2026-10-20); on 2026-10-20 the service
-        # answered it for Inferior, Nasal, Temporal and Cped cells.
-        lab_corrections={"Neitz": os.environ.get("SBFSEM_SECTION_CORRECTIONS_NEITZ", "all")},
+        # Viking's section correction, on top of the live registration: its
+        # residual field, on every volume.  Viking's service ran a curve fit
+        # along each traced process too, the default here from 2026-09-24
+        # (Field + fit on the Neitz lab's volumes from 2026-10-20), until it
+        # removed the fit as a default in service 1.5.0 on 2026-10-27: on 11
+        # cells the field alone gave a mean linked-outline overlap of 0.792
+        # against 0.791 with the fit, and a quarter of its losses.  off |
+        # neighbor (1 = neighbor; the retired curvefit and all are read as
+        # neighbor).  SBFSEM_CORRECTIONS_URL names the service.
+        section_corrections=os.environ.get("SBFSEM_SECTION_CORRECTIONS", "neighbor"),
+        # A lab's volumes may be set apart; the Neitz lab's are the same now.
+        lab_corrections={"Neitz": os.environ.get("SBFSEM_SECTION_CORRECTIONS_NEITZ", "neighbor")},
         # Draw each cell where the volume's current section transforms put it,
         # as Viking does, rather than at the positions stored when each
         # annotation was saved (sbfsem.io.registration); 0 = stored positions.

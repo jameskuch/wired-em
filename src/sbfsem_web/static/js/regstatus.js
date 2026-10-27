@@ -1,5 +1,5 @@
 // What a cell's Registration section says: the help of its two switches and of
-// the Correction select, and the small status chip beside each switch (a count,
+// the correction's names, and the small status chip beside each switch (a count,
 // or "unavailable") whose hover has the facts and, for a failure, the reason in
 // plain words with the server's own message at the end.  Asked for 2026-10-16:
 // the facts were standing lines under the switches ("helper text ... remove from
@@ -11,17 +11,40 @@
 const n = (v) => (Number.isFinite(v) ? Math.round(v).toLocaleString('en-US') : '?');
 const um = (v) => (Number.isFinite(v) ? v.toFixed(2) : '?');
 
-/** The correction modes, as the Correction select names them. */
+/**
+ * The correction modes by name, as a cell's status, the Correction log and the
+ * Registration labels say them.  Viking's corrections service runs one, the
+ * residual field (`neighbor`); it ran a curve fit too, alone (`curvefit`) or after
+ * the field (`all`), until it stopped on 2026-10-27.  Those two are named here only
+ * for a cell read from a file saved before then, which says so.
+ */
 export const MODE_LABELS = Object.freeze({
-  curvefit: 'Curve fit', neighbor: 'Residual field', all: 'Field + fit',
+  neighbor: 'Residual field', curvefit: 'Curve fit (retired)', all: 'Field + fit (retired)',
 });
+
+/** The names a correction setting was saved with that are the residual field now. */
+const FIELD_NAMES = new Set(['neighbor', 'residual', 'residualfield', 'field', 'on', 'true', 'yes', '1',
+  'curvefit', 'all', 'fieldfit', '2', '3']);
+
+/**
+ * A saved correction setting as the server reads it now (`corrections.correction_mode`):
+ * 'off', or 'neighbor' -- the residual field, which `true`, and the retired Curve fit
+ * (`curvefit`) and Field + fit (`all`), are too.  What it does not know is 'off', so a
+ * session, Look or store that holds anything never asks the server for a mode it refuses.
+ */
+export function correctionSetting(value) {
+  if (value === true) return 'neighbor';
+  if (typeof value !== 'string' && typeof value !== 'number') return 'off';
+  const text = String(value).trim().toLowerCase().replace(/[-_ +]/g, '');
+  return FIELD_NAMES.has(text) ? 'neighbor' : 'off';
+}
 
 /** Which drawing goes above each help. */
 export const REG_FIGURES = Object.freeze({
-  transforms: 'transforms', correction: 'correction', mode: 'correctionModes',
+  transforms: 'transforms', correction: 'correction',
 });
 
-/** The switches' and the select's help: what each does, before what it did to this cell. */
+/** The switches' help: what each does, before what it did to this cell. */
 export const REG_HELP = Object.freeze({
   transforms: 'Viking places every annotation by mapping its position on its section through the volume\'s '
     + 'section-to-volume transforms, the stos files its VikingXML lists, and its database stores the result '
@@ -33,23 +56,20 @@ export const REG_HELP = Object.freeze({
     + 'was re-aligned, the two agree to a few nanometers.',
   correction: 'What Viking\'s corrections service gives: small sideways moves, section by section, that take '
     + 'out the jitter the alignment leaves between sections. Viking\'s server measures, from every traced '
-    + 'process, how far each annotation sits off the smooth path through its neighbors on the sections above '
-    + 'and below; a dendrite that zig-zags from section to section is pulled back onto its path. The moves are '
-    + 'about a tenth of a micrometer (Inferior c1178 with Curve fit: median 0.11 µm, 95 % under 0.56 µm), far '
-    + 'below what a surface shows: Position shift draws them.\n\n'
-    + 'On: each annotation moves by the correction chosen below, on top of the current section transforms. '
-    + 'Off: where the transforms put it. The service publishes its own measurement for each volume; whether it '
-    + 'has one for this cell, in the mode chosen, is the chip beside this switch, and the last line here.',
-  mode: 'How the correction is worked out.\n\n'
-    + 'Curve fit (the default for the Marc lab\'s rabbit volumes): each traced process of the cell is fitted '
-    + 'on its own, leaving each annotation out of its own fit, and the annotation moves onto the fit. Synapses '
-    + 'keep their place.\n\n'
-    + 'Residual field: the same measurement from every process in the volume, pooled into one smooth field '
-    + 'per section on a 2 µm grid, as Viking\'s own exports apply it. Each annotation, outline and synapse '
-    + 'moves by the field where it is; nothing moves where the field has no support. It measured worse than '
-    + 'the fit near Inferior c21768 (2026-09-23).\n\n'
-    + 'Field + fit (the default for the Neitz lab\'s volumes): the field, then the fit; what Viking\'s service '
-    + 'does when it is not told which.',
+    + 'process in the volume, how far each annotation sits off the smooth path through its neighbors on the '
+    + 'sections above and below, and pools what it finds into one smooth field per section, the residual '
+    + 'field, as Viking\'s own exports apply it: a dendrite that zig-zags from section to section is pulled '
+    + 'back toward its path. The moves are about a tenth of a micrometer, far below what a surface shows: '
+    + 'Position shift draws them.\n\n'
+    + 'On: each annotation, outline and synapse moves by the field where it is, on top of the current section '
+    + 'transforms; nothing moves where the field has no support. Off: where the transforms put it.\n\n'
+    + 'Until 2026-10-27 the service also ran a curve fit along each of the cell\'s own processes (Curve fit, '
+    + 'and Field + fit), and this viewer used it by default. Viking stopped running it then: on 11 cells the '
+    + 'field alone lined linked outlines up as well (mean overlap 0.792, against 0.791 with the fit) and lost '
+    + 'overlap on a quarter as many. A cell, Look, session or link saved with Curve fit or Field + fit is drawn '
+    + 'with the residual field.\n\n'
+    + 'The service publishes its own measurement for each volume; whether it has one for this cell is the '
+    + 'chip beside this switch, and the last line here.',
 });
 
 /**
@@ -70,9 +90,14 @@ export function explainNote(note, { what = 'correction', mode = null } = {}) {
     plain = 'This volume is not a Viking volume: there is no correction for it.';
   } else if (/No section correction is published/i.test(text)) {
     plain = 'Viking\'s corrections service publishes no correction for this volume, so the cell is drawn uncorrected.';
+  } else if (/INVALID_ARGUMENT/.test(text)) {
+    // A request the service refused: since 2026-10-27 the modes it takes have changed twice.
+    plain = 'Viking\'s corrections service refused the correction this viewer asked for, so the cell is drawn '
+      + 'uncorrected. The service may have changed which corrections it runs; reload the page (a newer viewer '
+      + 'may be out) or the cell (↻) later.';
   } else if (/NOT_FOUND/.test(text)) {
     plain = `Viking's corrections service answered that it has no ${modeName} for this volume, so the cell is `
-      + 'drawn uncorrected. Another Correction may be available.';
+      + 'drawn uncorrected.';
   } else if (/DEADLINE_EXCEEDED|timed? ?out/i.test(text)) {
     plain = 'Viking\'s corrections service did not answer in time, so the cell is drawn uncorrected.';
   } else if (/UNAVAILABLE .*'[^']+'/.test(text)) {
@@ -136,12 +161,9 @@ export function correctionChip(sc, { stamp = (t) => String(t) } = {}) {
       + `${sc.built_utc ? ` · built ${stamp(sc.built_utc)}` : ''}`,
     `${n(sc.n_moved)} of ${n(sc.n_annotations)} annotations moved: median ${um(sc.median_um)} · `
       + `95% ${um(sc.p95_um)} · max ${um(sc.max_um)} µm, in X and Y.`,
-    mode === 'neighbor'
-      ? `${n(sc.n_annotations)} annotations on ${n(sc.n_sections)} sections: ${n(sc.n_found)} on a section with a `
-        + `published map, ${n(sc.n_trusted)} where the field has support. Only those move.`
-      : `${n(sc.n_annotations)} annotations on ${n(sc.n_sections)} sections: ${n(sc.n_found)} corrected by Viking, `
-        + `${n(sc.n_trusted)} of them applied. One that Viking places more than 20 µm from where it is drawn here `
-        + 'keeps its place: its correction was worked out somewhere else.',
+    `${n(sc.n_annotations)} annotations on ${n(sc.n_sections)} sections: ${n(sc.n_found)} corrected by Viking, `
+      + `${n(sc.n_trusted)} of them applied. One that Viking places more than 20 µm from where it is drawn here `
+      + 'keeps its place: its correction was worked out somewhere else.',
     `Published by ${sc.service || 'the corrections service'}`
       + (sc.annotation_watermark ? `, from the annotations as of ${stamp(sc.annotation_watermark)}` : '') + '.',
   ];

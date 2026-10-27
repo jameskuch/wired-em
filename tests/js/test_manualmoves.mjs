@@ -23,33 +23,34 @@ const close = (a, b, tol = 1e-9, what = '') => assert.ok(Math.abs(a - b) <= tol,
 // -- the store -----------------------------------------------------------------------------
 
 test('a copy tag names its setting; the words for it', () => {
-  assert.equal(M.baseTag('curvefit.1'), 'curvefit.1');
-  assert.equal(M.baseTag('curvefit.1.m0123456789ab'), 'curvefit.1');
+  assert.equal(M.baseTag('neighbor.1'), 'neighbor.1');
+  assert.equal(M.baseTag('neighbor.1.m0123456789ab'), 'neighbor.1');
   assert.equal(M.baseTag(''), null);
   assert.equal(M.baseTag(undefined), null);
-  assert.equal(M.tagWords('curvefit.1'), 'Curve fit correction, current transforms on');
+  assert.equal(M.tagWords('neighbor.1'), 'Residual field correction, current transforms on');
+  assert.equal(M.tagWords('curvefit.1'), 'Curve fit correction (retired), current transforms on');
   assert.equal(M.tagWords('off.0'), 'no section correction, current transforms off');
 });
 
 test('moves are set, replaced, deleted and reset per setting; each change is a new object', () => {
   let store = {};
-  store = M.setMove(store, 'curvefit.1', 7, { dx: 0.1, dy: -0.2, dz: 0 }, 100);
-  store = M.setMove(store, 'curvefit.1', 9, { dx: 0, dy: 0, dz: 2 }, 200);
+  store = M.setMove(store, 'neighbor.1', 7, { dx: 0.1, dy: -0.2, dz: 0 }, 100);
+  store = M.setMove(store, 'neighbor.1', 9, { dx: 0, dy: 0, dz: 2 }, 200);
   store = M.setMove(store, 'off.0', 7, { dx: 1 }, 300);
   const before = store;
-  store = M.setMove(store, 'curvefit.1', 7, { dx: 0.3, dy: -0.2, dz: 0 }, 400);
+  store = M.setMove(store, 'neighbor.1', 7, { dx: 0.3, dy: -0.2, dz: 0 }, 400);
   assert.notEqual(store, before);
-  assert.deepEqual(before['curvefit.1']['7'], { dx: 0.1, dy: -0.2, dz: 0, t: 100 }, 'the old store is untouched');
-  assert.deepEqual(store['curvefit.1']['7'], { dx: 0.3, dy: -0.2, dz: 0, t: 400 });
-  assert.deepEqual(M.moveCounts(store, 'curvefit.1'), { here: 2, elsewhere: 1, other: [['off.0', 1]] });
+  assert.deepEqual(before['neighbor.1']['7'], { dx: 0.1, dy: -0.2, dz: 0, t: 100 }, 'the old store is untouched');
+  assert.deepEqual(store['neighbor.1']['7'], { dx: 0.3, dy: -0.2, dz: 0, t: 400 });
+  assert.deepEqual(M.moveCounts(store, 'neighbor.1'), { here: 2, elsewhere: 1, other: [['off.0', 1]] });
   // A move back to nothing is no move.
-  store = M.setMove(store, 'curvefit.1', 9, { dx: 0, dy: 0, dz: 0 });
-  assert.equal(store['curvefit.1']['9'], undefined);
-  store = M.deleteMoves(store, 'curvefit.1', [7]);
-  assert.equal(store['curvefit.1'], undefined, 'an empty setting goes');
+  store = M.setMove(store, 'neighbor.1', 9, { dx: 0, dy: 0, dz: 0 });
+  assert.equal(store['neighbor.1']['9'], undefined);
+  store = M.deleteMoves(store, 'neighbor.1', [7]);
+  assert.equal(store['neighbor.1'], undefined, 'an empty setting goes');
   assert.deepEqual(Object.keys(store), ['off.0']);
-  store = M.setMove(store, 'curvefit.1', 1, { dx: 1 });
-  store = M.resetMoves(store, 'curvefit.1');
+  store = M.setMove(store, 'neighbor.1', 1, { dx: 1 });
+  store = M.resetMoves(store, 'neighbor.1');
   assert.deepEqual(Object.keys(store), ['off.0'], 'Reset all leaves the other settings\' moves');
 });
 
@@ -58,7 +59,7 @@ test('a saved store is made safe: shapes dropped, numbers clamped and rounded', 
   assert.deepEqual(M.normalizeStore('moves'), {});
   assert.deepEqual(M.normalizeStore([1, 2]), {});
   const out = M.normalizeStore({
-    'curvefit.1': {
+    'neighbor.1': {
       5: { dx: 0.123456789, dy: 'x', dz: 2.6 },
       six: { dx: 1 },
       7: { dx: 500, dy: -500, dz: -99 },
@@ -69,27 +70,50 @@ test('a saved store is made safe: shapes dropped, numbers clamped and rounded', 
     'off.0': {},
   });
   assert.deepEqual(out, {
-    'curvefit.1': {
+    'neighbor.1': {
       5: { dx: 0.1235, dy: 0, dz: 3, t: 0 },
       7: { dx: M.MAX_MOVE_UM, dy: -M.MAX_MOVE_UM, dz: -M.MAX_MOVE_SECTIONS, t: 0 },
     },
   });
 });
 
+test('moves saved under Curve fit or Field + fit join the residual field\'s, the latest of each kept', () => {
+  assert.equal(M.currentTag('curvefit.1'), 'neighbor.1');
+  assert.equal(M.currentTag('all.0'), 'neighbor.0');
+  assert.equal(M.currentTag('off.1'), 'off.1');
+  assert.equal(M.currentTag('neighbor.1'), 'neighbor.1');
+  const out = M.normalizeStore({
+    'curvefit.1': { 1: { dx: 0.1, t: 10 }, 2: { dx: 0.2, t: 50 }, 3: { dx: 0.3, t: 5 } },
+    'neighbor.1': { 2: { dx: 0.9, t: 40 }, 3: { dx: 0.8, t: 5 } },
+    'all.1': { 1: { dx: 0.5, t: 20 } },
+    'all.0': { 4: { dz: 1, t: 1 } },
+  });
+  assert.deepEqual(out, {
+    'neighbor.1': {
+      1: { dx: 0.5, dy: 0, dz: 0, t: 20 },
+      2: { dx: 0.2, dy: 0, dz: 0, t: 50 },
+      3: { dx: 0.8, dy: 0, dz: 0, t: 5 },
+    },
+    'neighbor.0': { 4: { dx: 0, dy: 0, dz: 1, t: 1 } },
+  });
+  assert.deepEqual(Object.keys(M.movesBody({ 'all.1': { 7: { dx: 0.1 } } })), ['neighbor.1'],
+    'a load names the setting as the server does');
+});
+
 test('a load sends every setting\'s moves, sorted, in the server\'s words; none is null', () => {
-  let store = M.setMove({}, 'curvefit.1', 30, { dx: 0.25 });
-  store = M.setMove(store, 'curvefit.1', 4, { dz: -1 });
+  let store = M.setMove({}, 'neighbor.1', 30, { dx: 0.25 });
+  store = M.setMove(store, 'neighbor.1', 4, { dz: -1 });
   store = M.setMove(store, 'off.0', 2, { dy: 0.5 });
   assert.deepEqual(M.movesBody(store), {
-    'curvefit.1': [{ id: 4, dx_um: 0, dy_um: 0, dz: -1 }, { id: 30, dx_um: 0.25, dy_um: 0, dz: 0 }],
+    'neighbor.1': [{ id: 4, dx_um: 0, dy_um: 0, dz: -1 }, { id: 30, dx_um: 0.25, dy_um: 0, dz: 0 }],
     'off.0': [{ id: 2, dx_um: 0, dy_um: 0.5, dz: 0 }],
   });
   assert.equal(M.movesBody({}), null);
   assert.equal(M.movesBody(undefined), null);
   // The signature ignores when a move was made.
-  const later = M.setMove(store, 'curvefit.1', 30, { dx: 0.25 }, 99999);
-  assert.equal(M.setSignature(store, 'curvefit.1'), M.setSignature(later, 'curvefit.1'));
-  assert.notEqual(M.setSignature(store, 'curvefit.1'), M.setSignature(store, 'off.0'));
+  const later = M.setMove(store, 'neighbor.1', 30, { dx: 0.25 }, 99999);
+  assert.equal(M.setSignature(store, 'neighbor.1'), M.setSignature(later, 'neighbor.1'));
+  assert.notEqual(M.setSignature(store, 'neighbor.1'), M.setSignature(store, 'off.0'));
 });
 
 // -- a step along an axis ---------------------------------------------------------------------
@@ -207,14 +231,14 @@ test('the skeleton follows the moved annotations, point by point, and is not cha
 // -- the list ---------------------------------------------------------------------------------
 
 test('the list: newest first, with the section as moved and Viking\'s', () => {
-  let store = M.setMove({}, 'curvefit.1', 10, { dx: 0.3, dy: 0.4 }, 100);
-  store = M.setMove(store, 'curvefit.1', 11, { dz: 2 }, 200);
-  store = M.setMove(store, 'curvefit.1', 12, { dx: 1 }, 50);
+  let store = M.setMove({}, 'neighbor.1', 10, { dx: 0.3, dy: 0.4 }, 100);
+  store = M.setMove(store, 'neighbor.1', 11, { dz: 2 }, 200);
+  store = M.setMove(store, 'neighbor.1', 12, { dx: 1 }, 50);
   const nodes = [
     { id: 10, z_section: 500 },
     { id: 11, z_section: 503, manual_dz: 2 },
   ];
-  const rows = M.moveRows(store, 'curvefit.1', nodes);
+  const rows = M.moveRows(store, 'neighbor.1', nodes);
   assert.deepEqual(rows.map((r) => r.id), [11, 10, 12]);
   close(rows[1].um, 0.5);
   assert.equal(rows[0].section, 503);
@@ -268,21 +292,21 @@ test('what a step moves: the one, its section, a run of sections, plus the ones 
 });
 
 test('a set steps together: each member the same step from its own move, or none past the limit', () => {
-  let store = M.setMove({}, 'curvefit.1', 2, { dx: 0.5 }, 1);
-  const r = M.stepSet(store, 'curvefit.1', [1, 2], 'x', 1, 0.1);
+  let store = M.setMove({}, 'neighbor.1', 2, { dx: 0.5 }, 1);
+  const r = M.stepSet(store, 'neighbor.1', [1, 2], 'x', 1, 0.1);
   assert.equal(r.along, 'xy');
   assert.deepEqual(r.over, []);
-  assert.equal(r.store['curvefit.1']['1'].dx, 0.1);
-  assert.equal(r.store['curvefit.1']['2'].dx, 0.6, 'its earlier move kept, the same step added');
-  const z = M.stepSet(r.store, 'curvefit.1', [1, 2], 'z', -1, 0.1);
-  assert.deepEqual([z.store['curvefit.1']['1'].dz, z.store['curvefit.1']['2'].dz], [-1, -1]);
+  assert.equal(r.store['neighbor.1']['1'].dx, 0.1);
+  assert.equal(r.store['neighbor.1']['2'].dx, 0.6, 'its earlier move kept, the same step added');
+  const z = M.stepSet(r.store, 'neighbor.1', [1, 2], 'z', -1, 0.1);
+  assert.deepEqual([z.store['neighbor.1']['1'].dz, z.store['neighbor.1']['2'].dz], [-1, -1]);
   // One member past the limit: nothing moves.
-  store = M.setMove({}, 'curvefit.1', 2, { dx: M.MAX_MOVE_UM }, 1);
-  const stopped = M.stepSet(store, 'curvefit.1', [1, 2], 'x', 1, 1);
+  store = M.setMove({}, 'neighbor.1', 2, { dx: M.MAX_MOVE_UM }, 1);
+  const stopped = M.stepSet(store, 'neighbor.1', [1, 2], 'x', 1, 1);
   assert.deepEqual(stopped.over, [2]);
   assert.equal(stopped.store, store, 'unchanged');
   // No shift to follow: nothing.
-  assert.equal(M.stepSet({}, 'curvefit.1', [1], 'shift', 1, 0.1).along, null);
+  assert.equal(M.stepSet({}, 'neighbor.1', [1], 'shift', 1, 0.1).along, null);
   // setMoves: one copy for many, a move of nothing removed.
   const many = M.setMoves({}, 'off.0', [[1, { dx: 1 }], [2, { dy: 1 }], [3, { dx: 0 }]], 5);
   assert.deepEqual(Object.keys(many['off.0']), ['1', '2']);

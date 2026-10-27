@@ -236,9 +236,9 @@ let loadCounter = 0;
  * What a cell's positions were drawn from: the annotations' stamp, the copy
  * the server holds for this tab's Registration/correction choices, and the moves
  * that copy was given (`positions`).  The stamp alone is the same for every copy
- * of one cell (a cell's `off.0`, `off.1` and `curvefit.1` copies share it), and a
+ * of one cell (a cell's `off.0`, `off.1` and `neighbor.1` copies share it), and a
  * copy is what was asked for, not what was done (a correction the service could
- * not make leaves `curvefit.1` uncorrected), so anything computed from the cell's
+ * not make leaves `neighbor.1` uncorrected), so anything computed from the cell's
  * positions -- the Morphology numbers, the Skeleton check -- is cached on this
  * and goes stale when the choice or the moves change.
  */
@@ -285,14 +285,14 @@ export function upsertNeuron(detail, { render, display, select = true } = {}) {
     // Whether Viking has edited the cell since its data was fetched; filled
     // by the load response, cleared by a refresh.
     freshness: detail.freshness ?? existing?.freshness ?? null,
-    // Viking's section correction, as this tab asked for it: 'off' or a mode
-    // (curvefit, neighbor, all), true/false from before the modes, or
-    // undefined for the server's default (the volume's `default_correction`:
-    // all for the Neitz lab's volumes, curvefit for the others).  What was actually
-    // applied is summary.section_correction.
+    // Viking's section correction, as this tab asked for it: 'off' or 'neighbor'
+    // (the residual field; app.js `savedCorrection` reads a saved true, curvefit or
+    // all as that), or undefined for the server's default (the volume's
+    // `default_correction`, the residual field).  What was actually applied is
+    // summary.section_correction.
     corrections: existing?.corrections,
-    // The mode last chosen, so switching the correction off and on again
-    // brings that one back.
+    // The mode last chosen in the Correction dropdown, gone since 2026-10-27 (one
+    // mode is left); kept so a session saved with it says what it said.
     correctionMode: existing?.correctionMode,
     // Viking's current section transforms, likewise (undefined: the server's
     // default, on); what was applied is summary.live_registration.

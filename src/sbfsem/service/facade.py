@@ -43,6 +43,7 @@ from ..analysis.boundary import IPLBoundaries, load_ipl_boundaries, thickness_su
 from ..analysis.correction_checks import (
     DEFAULT_RATIO,
     FIT_MODES,
+    NO_CURVE_FIT,
     OUTLINE_MIN_MOVE_UM,
     OUTLINE_MIN_OFF,
     OUTLINE_MIN_OVERLAP,
@@ -336,8 +337,50 @@ _REQUEST_COPY: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 def copy_tag(mode: str, live: bool) -> str:
     """The name of a loaded copy's setting: Viking's correction mode, then 1
     when the volume's current section transforms were asked for
-    (``"curvefit.1"``, ``"off.0"``)."""
+    (``"neighbor.1"``, ``"off.0"``)."""
     return f"{mode}.{int(bool(live))}"
+
+
+def canonical_tag(tag: str | None) -> str | None:
+    """A copy tag as this server names it now: a retired correction mode read as
+    ``neighbor`` (``"curvefit.1"`` and ``"all.1"`` are ``"neighbor.1"``, and
+    ``"all.1.m<token>"`` is ``"neighbor.1.m<token>"``), as a page, a saved
+    session or another caller from before 2026-10-27 may name it.  Anything
+    else, ``None`` included, is returned as it is."""
+    if not tag:
+        return tag
+    head, dot, rest = str(tag).partition(".")
+    try:
+        mode = correction_mode(head)
+    except ValueError:
+        return tag
+    return f"{mode}{dot}{rest}" if dot else tag
+
+
+def _status_mode(status: Mapping[str, Any]) -> str:
+    """The correction mode a cell's status names, as :func:`correction_mode` reads
+    it (a retired one is ``neighbor``); one it does not know, from a file, as it is."""
+    raw = status.get("mode", "neighbor")
+    try:
+        return correction_mode(raw)
+    except ValueError:
+        return str(raw)
+
+
+def moves_under(manual_moves: Mapping[str, Any] | None, tag: str) -> list | None:
+    """The move set ``manual_moves`` keeps for the setting ``tag`` (a plain copy
+    tag), with the sets kept under a retired name for it (:func:`canonical_tag`)
+    first, so an ID moved under both keeps the move named by ``tag`` itself.
+    ``None`` when there is none."""
+    if not manual_moves:
+        return None
+    retired = [k for k in manual_moves if k != tag and canonical_tag(k) == tag]
+    if not retired:
+        return manual_moves.get(tag)
+    merged: list = []
+    for key in [*sorted(retired), tag]:
+        merged.extend(manual_moves.get(key) or [])
+    return merged
 
 
 def positions_token(neuron) -> str | None:
@@ -436,7 +479,7 @@ def requested_copy(tag: str | None):
     with different registration or correction settings at once; each is
     answered from its own copy.
     """
-    token = _REQUEST_COPY.set(tag or None)
+    token = _REQUEST_COPY.set(canonical_tag(tag) or None)
     try:
         yield
     finally:
@@ -672,10 +715,10 @@ class SbfsemService:
         self.live_registration = bool(live_registration)
         self._registrations: RegistrationProvider | None = None
         # Viking's section correction (sbfsem.io.corrections): the mode a load
-        # that does not say gets -- off, neighbor (the residual field; what
-        # True means), curvefit or all.  Off here, as the library is; the web
-        # app uses curvefit.  ``lab_corrections`` overrides it for a lab's
-        # volumes (the web app: Field + fit for the Neitz lab's).  The provider
+        # that does not say gets -- off, or neighbor (the residual field; what
+        # True means, and what the retired curvefit and all are read as).  Off
+        # here, as the library is; the web app uses neighbor.
+        # ``lab_corrections`` overrides it for a lab's volumes.  The provider
         # is made on first use.
         self.correction_mode = correction_mode(section_corrections)
         self.lab_corrections = {lab: correction_mode(mode)
@@ -1187,16 +1230,17 @@ class SbfsemService:
         section transforms put them (``sbfsem.io.registration``) rather than
         at their stored positions; ``section_corrections`` then adds Viking's
         section correction in a mode (:func:`~sbfsem.io.corrections.correction_mode`:
-        off, neighbor, curvefit or all; ``True`` is neighbor).  ``None`` takes
+        off or neighbor; ``True``, ``curvefit`` and ``all`` are neighbor).  ``None`` takes
         the service's default for either; a loaded cell asked for with another
         setting is loaded again with it.  A refresh also re-reads the cell's
         stos files.
 
-        ``manual_moves`` maps a setting's copy tag (``"curvefit.1"``) to the
+        ``manual_moves`` maps a setting's copy tag (``"neighbor.1"``; a retired
+        mode's, ``"curvefit.1"``, is that setting's too, :func:`moves_under`) to the
         move set a person made under it (:func:`~sbfsem.core.moves.normalize_moves`);
         the set of the setting loaded, if any, is applied to a copy of the
         cell made from the one loaded with it, named by the set's token
-        (``"curvefit.1.m<token>"``).  The sets of other settings are not
+        (``"neighbor.1.m<token>"``).  The sets of other settings are not
         applied: a move is made relative to where the setting drew the
         annotation.
         """
@@ -1206,7 +1250,7 @@ class SbfsemService:
                 else correction_mode(section_corrections))
         live = self.live_registration if live_registration is None else bool(live_registration)
         tag = copy_tag(want, live)
-        moves = normalize_moves((manual_moves or {}).get(tag))
+        moves = normalize_moves(moves_under(manual_moves, tag))
         want_transform = Transforms.from_str(transform)
         with self._lock:
             held = (self._copies[key][tag] if not refresh
@@ -1367,7 +1411,7 @@ class SbfsemService:
     def _tag_of(neuron: Neuron) -> str:
         """The setting a cell built elsewhere (a file) carries, as a copy tag."""
         status = getattr(neuron, "correction_status", None) or {}
-        mode = status.get("mode", "neighbor") if status.get("requested") else "off"
+        mode = _status_mode(status) if status.get("requested") else "off"
         reg = getattr(neuron, "registration_status", None) or {}
         return copy_tag(mode, bool(reg.get("requested")))
 
@@ -1394,7 +1438,8 @@ class SbfsemService:
         """Is the loaded cell (if any) already what a load with ``want``/``live`` asks for?
 
         ``want`` is a correction mode; a cell corrected in another mode is
-        not.  A correction or registration asked for and not applied (a
+        not (a retired mode a file was saved with is read as ``neighbor``).
+        A correction or registration asked for and not applied (a
         server down) is tried again, but not while its provider pauses after a
         failure, or holds the cell (or its volume) after a failure in the service.
         Only the copy loaded with this setting is asked: a copy another tab
@@ -1413,7 +1458,7 @@ class SbfsemService:
             if transform is not None and neuron.transform is not transform:
                 return False
         status = getattr(neuron, "correction_status", None) or {}
-        same_mode = status.get("mode", "neighbor") == want
+        same_mode = _status_mode(status) == want
         if want == "off":
             corrected = not status.get("applied")
         elif status.get("applied"):
@@ -1489,7 +1534,10 @@ class SbfsemService:
                  summary.get("n_moved", 0), summary.get("n_annotations", 0),
                  summary.get("max_um", 0.0), " (offsets from disk)" if summary.get("cached") else "")
         status = {"requested": True, "applied": True, "mode": mode, **summary}
-        if note:
+        if note and "INVALID_ARGUMENT" in note:
+            # The service refused to check them: say so, never apply them quietly.
+            status["note"] = f"The service refused the request; offsets kept from before ({note})"
+        elif note:
             status["note"] = f"The service is not answering; offsets kept from before ({note})"
         if mode in FIT_MODES:
             neuron.correction_pulls = self._scan_pulls(neuron, mode)
@@ -4212,7 +4260,7 @@ class SbfsemService:
         if not status.get("applied"):
             cell.note = str(status.get("note") or "Not applied")
         elif mode not in FIT_MODES:
-            cell.note = "Not checked: this mode has no curve fit"
+            cell.note = NO_CURVE_FIT
         elif found is None:
             cell.note = "Not checked: the check failed (the server log says why)"
         if found is not None:

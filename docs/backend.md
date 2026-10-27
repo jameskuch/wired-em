@@ -76,12 +76,19 @@ service's protocol V2; V1, retired on 2026-10-26, also had `manifest`, and
 named the annotation watermark and vote minimum of each set, which V2 does
 not.
 
-That is the `neighbor` mode, the default of `correct_neuron`. The service can
-also correct whole structures (`CorrectStructures`) with a leave-one-out
-Catmull-Rom fit along each traced process:
+`correct_neuron` (mode `neighbor`, its default) asks the service to correct
+the whole structure by that field (`CorrectStructures`, with no mode on the
+wire: V2's NEIGHBOR, 0); `sample_offsets`/`fetch_offsets` still sample the field
+with `CorrectPoints` at the cell's own positions. Until 2026-10-27 the service
+also ran a leave-one-out Catmull-Rom fit along each traced process (`curvefit`,
+or `all`: the field, then the fit). It removed the fit as a default in service
+1.5.0, after an 11-cell measurement found the field alone as good (mean linked
+outline overlap 0.792 against 0.791, with a quarter of the losses); those two
+names are read as `neighbor` (`RETIRED_MODES`), and no request carries any
+number but 0 (the field) or 1 (none):
 
 ```python
-correct_neuron(c, client, mode="curvefit")   # or "all": the field, then the fit
+correct_neuron(c, client)                     # the field; "curvefit" and "all" mean the same now
 ```
 
 The service maps each Location's section X/Y through the StosGroup itself and
@@ -98,7 +105,7 @@ build time in a mode that samples the field, a fingerprint of the structures'
 annotations and their watermark). A later load of the same cell asks
 `GetAnswerStamp` instead of the fit (about 0.1 s against 6 s) and keeps the
 answer while the stamps are equal, which the service guarantees means an
-identical answer: an algorithm deploy, a rebuilt field (`all` only) and an
+identical answer: an algorithm deploy, a rebuilt field and an
 annotation added, changed or deleted all move it, and a restart does not.
 While the service is paused, or when it cannot give the stamp, the kept answer
 is applied unchecked and the cell's status says why.
@@ -142,7 +149,7 @@ c1178's 1328721, r 0.74 um, 10.6 um toward 1557441, r 9.9 um, 0.495 of the way):
 ```python
 from sbfsem.analysis.correction_checks import scan_neuron
 
-scan = scan_neuron(c)              # a cell loaded with curvefit or all
+scan = scan_neuron(c)              # a cell corrected with curvefit or all (a file saved before 2026-10-27)
 scan.at(4.0)                       # Pulls toward a neighbor at least 4x as wide
 scan.n_next_to_wider(4.0)          # moved annotations next to one that wide
 ```

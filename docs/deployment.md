@@ -136,16 +136,18 @@ Not in the unit file, optional: `SBFSEM_MESHLAB_TIMEOUT_S` (default 1800) is how
 
 Viking's section correction (`sbfsem.io.corrections`) is applied to every
 loaded cell in the mode `SBFSEM_SECTION_CORRECTIONS` names, unless its panel
-asks otherwise: `curvefit` by default since 2026-09-24 (the user's decision;
-the service's curve fit along each process), except for the Neitz lab's
-volumes, which take `SBFSEM_SECTION_CORRECTIONS_NEITZ` (`all`, the field then
-the fit, since 2026-10-20, the user's decision); `neighbor` (the residual field;
-`1` means this, and it was the default on 2026-09-22 until it measured worse
-on 2026-09-23), `all`, or `off`. A `CorrectStructures` call takes 5-10 s for
+asks otherwise: `neighbor`, the residual field, by default since 2.42.0, and on
+the Neitz lab's volumes too (`SBFSEM_SECTION_CORRECTIONS_NEITZ`, also
+`neighbor`); `1` means the same, and `off` turns it off. Viking's service
+removed its curve fit as a default on 2026-10-27 (1.5.0), ending the defaults
+of 2026-09-24 (`curvefit`, the fit along each process) and 2026-10-20 (`all`,
+the field then the fit, on the Neitz volumes); an environment that still names
+either is read as `neighbor`, and no request carries any mode number but 0 or
+1. A `CorrectStructures` call takes 5-10 s for
 a cell of 1,700 annotations and is kept on disk with the service's
 `AnswerStamp`; each later load of the cell asks `GetAnswerStamp` (about 0.1 s)
-and asks the fit again only when the stamp moved: a new service version, a
-rebuilt field (`all`), or an annotation of the cell added, changed or deleted.
+and asks the service again only when the stamp moved: a new service version, a
+rebuilt field, or an annotation of the cell added, changed or deleted.
 A restart does not move it. An exception
 inside the service on one cell's request (gRPC `UNKNOWN`, `INTERNAL` or
 `INVALID_ARGUMENT`) holds that cell and mode for ten minutes, and the whole
@@ -160,8 +162,7 @@ out its 120 s deadline); a cell whose offsets are on disk is corrected from
 them meanwhile, and its status says so. When the service answers
 `UNAVAILABLE` naming the volume asked about (it could not reach that volume's
 own server: "volume mapping temporarily unavailable for 'cped'"), only that
-volume is left alone for two minutes, in Curve fit and Field + fit together
-(the one call that maps its sections); the other volumes are still asked.
+volume is left alone for two minutes; the other volumes are still asked.
 `SBFSEM_CORRECTIONS_URL` names the service (default
 `https://corrections.codepharm.net`; an `http://` URL means cleartext
 HTTP/2), and `SBFSEM_CORRECTIONS_STOS_GROUP` picks a set by name (default: the
@@ -765,8 +766,8 @@ these (CLAUDE.md ground rule 10).
 |---|---|---|
 | `SBFSEM_OFFLINE` | off | `1`: never ask Viking, serve what the cache holds (a development server) |
 | `SBFSEM_UNTAGGED_PSD` | `infer` | what a postsynapse with no kind in its Viking tags becomes: `infer`, `separate` or `assume` |
-| `SBFSEM_SECTION_CORRECTIONS` | `curvefit` | Viking's section correction a load gets when it names none: `off`, `neighbor`, `curvefit`, `all` |
-| `SBFSEM_SECTION_CORRECTIONS_NEITZ` | `all` | the same for the Neitz lab's volumes (Inferior, Nasal, Temporal, Cped) |
+| `SBFSEM_SECTION_CORRECTIONS` | `neighbor` | Viking's section correction a load gets when it names none: `off` or `neighbor` (the retired `curvefit` and `all` are read as `neighbor`) |
+| `SBFSEM_SECTION_CORRECTIONS_NEITZ` | `neighbor` | the same for the Neitz lab's volumes (Inferior, Nasal, Temporal, Cped) |
 | `SBFSEM_CORRECTIONS_URL`, `SBFSEM_CORRECTIONS_STOS_GROUP` | built in | the correction service and the stos group it reads |
 | `SBFSEM_LIVE_REGISTRATION` | on | `0`: draw cells at their stored positions, not through the volume's current section transforms |
 | `SBFSEM_LOG_LEVEL` | `INFO` | the level of this application's own log lines (uvicorn's are its own) |

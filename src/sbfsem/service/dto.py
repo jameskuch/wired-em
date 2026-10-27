@@ -43,8 +43,8 @@ class VolumeInfoDTO(BaseModel):
     #: The lab whose volume it is (``Neitz``, ``Marc``); ``None`` for the demo.
     lab: str | None = None
     #: The section correction a load of this volume gets when it names none
-    #: (``off``, ``neighbor``, ``curvefit`` or ``all``): the web app's is
-    #: ``all`` (Field + fit) for the Neitz lab's volumes, ``curvefit`` for the others.
+    #: (``off`` or ``neighbor``): the web app's is ``neighbor`` (the residual
+    #: field) on every volume.
     default_correction: str = "off"
     #: Whether a load that does not say is drawn through the volume's current
     #: section transforms (where it has them: ``has_transforms``).
@@ -75,16 +75,18 @@ class SectionCorrectionDTO(BaseModel):
     requested: bool = False
     applied: bool = False
     note: str = ""
-    #: What was asked of the service: ``neighbor`` (the residual field),
-    #: ``curvefit`` (a fit along each traced process) or ``all`` (both).
+    #: What was asked of the service: ``neighbor`` (the residual field).  A
+    #: cell read from a file saved before 2026-10-27 may say ``curvefit`` (a
+    #: fit along each traced process) or ``all`` (both), which the service no
+    #: longer runs.
     mode: str | None = None
     volume_name: str | None = None
     stos_group: str | None = None
     built_utc: datetime | None = None
     annotation_watermark: datetime | None = None
     service: str | None = None
-    #: The corrections service's version that made the answer (``curvefit``
-    #: and ``all``, from its ``AnswerStamp``; ``""`` when the service did not say).
+    #: The corrections service's version that made the answer (from its
+    #: ``AnswerStamp``; ``""`` when the service did not say).
     service_version: str | None = None
     cached: bool = False
     #: Annotations sampled (the cell's and its child structures'), sections
@@ -1078,7 +1080,8 @@ class CorrectionLogCellDTO(BaseModel):
     """One loaded copy of a cell in the correction log.
 
     ``checked`` is false for a copy the log does not test: loaded without the
-    curve fit (``off``, ``neighbor``) or whose correction was not applied
+    curve fit (``off``, ``neighbor``: every load since Viking's service stopped
+    running it on 2026-10-27) or whose correction was not applied
     (``note`` says why).  ``n_next_to_wider`` counts the moved annotations
     with a linked one at least ``ratio`` times as wide; ``pulls`` are those the
     correction moved toward it.  ``n_outlines`` counts the cell's traced outlines

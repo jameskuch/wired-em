@@ -393,5 +393,7 @@ def test_the_endpoint_says_when_a_cell_is_not_loaded(client):
     service = client.app.state.service
     cell = make_cell()
     service.add_neuron(cell)
-    assert client.get("/api/neurons/i/9/shift-summary?copy=curvefit.1").status_code == 404
+    assert client.get("/api/neurons/i/9/shift-summary?copy=off.0").status_code == 404
     assert client.get("/api/neurons/i/9/shift-summary").status_code == 200
+    # A retired mode's tag, from a page saved before 2026-10-27, names the field's copy.
+    assert client.get("/api/neurons/i/9/shift-summary?copy=curvefit.1").status_code == 200

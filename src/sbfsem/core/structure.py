@@ -142,7 +142,7 @@ class Structure:
         #: copy is never handed out for this one.  ``None`` outside the service.
         self.load_serial: int | None = None
         #: The setting this copy was loaded with (``SbfsemService``'s
-        #: ``copy_tag``, e.g. ``"curvefit.1"``): the table holds one copy of a
+        #: ``copy_tag``, e.g. ``"neighbor.1"``): the table holds one copy of a
         #: cell per setting in use.  ``None`` outside the service.
         self.copy_tag: str | None = None
         #: Whether the service fetched this cell with its synapses (its own

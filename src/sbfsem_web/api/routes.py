@@ -534,6 +534,8 @@ def correction_log(request: Request,
     linked one, and the traced outlines it moved off the outlines linked to
     them, in every cell loaded on this server under the curve fit
     (``curvefit``, ``all``); see :mod:`sbfsem.analysis.correction_checks`.
+    Viking's service no longer runs the fit (2026-10-27), so only a cell read
+    from a file saved before then is checked; every other cell's ``note`` says so.
     Names no volume, so the router's guard lets it through: as ``GET
     /neurons``, a Viking user is shown only the volumes they may open.
 
@@ -572,13 +574,15 @@ class LoadNeuronBody(BaseModel):
     include_synapses: _Flag = True
     transform: str | None = "Standard"
     refresh: _Flag = False
-    #: A mode (off, neighbor, curvefit, all) or, as before, true/false
-    #: (true = neighbor); absent = the server's default.
+    #: A mode (off, neighbor) or, as before, true/false (true = neighbor);
+    #: the retired curvefit and all are read as neighbor; absent = the
+    #: server's default.
     section_corrections: Any = None
     live_registration: bool | None = None
     check_fresh: _Flag = True
     #: A person's own moves of the cell's annotations, by the setting they were
-    #: made under (a copy tag, ``"curvefit.1"``): ``[{"id", "dx_um", "dy_um",
+    #: made under (a copy tag, ``"neighbor.1"``; a retired mode's, such as
+    #: ``"curvefit.1"``, counts as that setting's): ``[{"id", "dx_um", "dy_um",
     #: "dz"}]`` each (``sbfsem.core.moves``).  The set of the setting loaded is
     #: applied after the correction; none is written to Viking.
     manual_moves: dict[str, list[dict[str, Any]]] | None = None
@@ -2524,8 +2528,9 @@ def export_swc_bulk(request: Request, source: str,
                                     "absent: the server's default"),
                     section_corrections: str | None = Query(
                         None,
-                        description="Viking's section correction for every cell: off, "
-                                    "neighbor, curvefit or all; absent: the server's default")):
+                        description="Viking's section correction for every cell: off or "
+                                    "neighbor (the retired curvefit and all are read as "
+                                    "neighbor); absent: the server's default")):
     """A zip of one SWC per structure plus ``manifest.csv``: a population in
     one request, every file carrying its own provenance header, every cell
     drawn the same way."""

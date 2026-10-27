@@ -6,18 +6,19 @@
 For every cell named (``<volume>:<id>``; the volume as the server names it, or its
 short source key) it loads each registration's copy on the server (``POST
 /api/neurons``: the stored positions or the volume's current section transforms,
-each with no correction, Residual field, Curve fit or Field + fit; four where the
-volume's transforms are not read), asks ``GET .../registration-quality`` of it,
+each with no correction or the Residual field; two where the volume's transforms
+are not read.  Curve fit and Field + fit went with Viking's service 1.5.0 on
+2026-10-27), asks ``GET .../registration-quality`` of it,
 and prints, per cell and over all of them:
 
 * the sideways step of the cell's links between sections at the copy's positions
   (median, p90, and how many in a thousand pass 1.5 µm): how smoothly it runs;
-  the curve fit lowers it by construction;
 * what the copy does to what one section image shows: the change of the offset
   between two of the cell's annotations on one section within 5 µm (p95, and the
   share over 0.25 µm), and between each synapse and the cell (likewise);
 * the curve fit's pulls toward an annotation at least 4x as wide, and the traced
-  outlines it moved off the outlines linked to them.
+  outlines it moved off the outlines linked to them (none since the fit went: the
+  columns stay for a copy read from a file saved under it).
 
 A copy the server did not hold before is unloaded again once measured
 (``DELETE ...?copy=``): the server's other users keep theirs, and memory is given
@@ -38,8 +39,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-CORRECTIONS = ("off", "neighbor", "curvefit", "all")
-WORDS = {"off": "no correction", "neighbor": "Residual field", "curvefit": "Curve fit", "all": "Field + fit"}
+CORRECTIONS = ("off", "neighbor")
+WORDS = {"off": "no correction", "neighbor": "Residual field"}
 
 
 def _call(url: str, method: str = "GET", body: dict | None = None, timeout: float = 600.0):
@@ -170,8 +171,8 @@ def main() -> int:
     if len(cells) > 1:
         print(f"\nOver {len(cells)} cells: the median of each cell's number")
         print(_table(summary(cells)))
-    print("\nstep: the sideways step of the cell's links between sections at the copy's positions (µm); "
-          "the curve fit lowers it by construction.\npairs: change of the offset between two of the cell's "
+    print("\nstep: the sideways step of the cell's links between sections at the copy's positions (µm)."
+          "\npairs: change of the offset between two of the cell's "
           "annotations on one section within 5 µm; syn: change of a synapse's offset from the cell (µm). "
           "Zero is what the image shows.\npulls: annotations the curve fit pulled toward one at least 4x "
           "as wide; outlines off: traced outlines it moved off the outlines linked to them.")

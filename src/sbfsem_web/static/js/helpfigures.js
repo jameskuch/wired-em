@@ -125,7 +125,7 @@ function transforms() {
   );
 }
 
-/** Points of a traced process across seven sections, and the path a fit puts them on. */
+/** Points of a traced process across seven sections, and the smooth path through them. */
 const TRACED = [[124, 112], [138, 97], [119, 82], [141, 67], [123, 52], [136, 37], [127, 22]];
 const fitX = (y) => 129.5 - (y - 67) * 0.02;
 
@@ -149,47 +149,7 @@ function correction() {
     small(62, 128, 'one process, side on: a line per section'),
     legendRow(206, 40, (x, y) => circle(x + 6, y, 3.6, 'hf-ring'), 'as traced'),
     legendRow(206, 60, (x, y) => circle(x + 6, y, 3.2, 'hf-dot'), 'corrected'),
-    legendRow(206, 80, (x, y) => line(x, y, x + 13, y, 'hf-accent-dash'), 'fitted path'),
-  );
-}
-
-/** The three correction modes side by side: a fit per process, one field per section, both. */
-function correctionModes() {
-  const fitPanel = (ox) => {
-    const pts = [[18, 74], [27, 64], [15, 54], [28, 44], [17, 34], [25, 24]];
-    return g({ transform: `translate(${ox} 0)` },
-      pts.map(([, y]) => line(4, y, 44, y, 'hf-line')),
-      el('polyline', { points: pts.map(([x, y]) => `${x},${y}`).join(' '), class: 'hf-muted' }),
-      line(21.5, 80, 21.5, 18, 'hf-accent-dash'),
-      pts.map(([x, y]) => circle(x, y, 2.6, 'hf-ring')),
-      pts.map(([, y]) => circle(21.5, y, 2.2, 'hf-dot')));
-  };
-  const fieldPanel = (ox, faint = false) => {
-    const arrows = [];
-    for (let i = 0; i < 4; i += 1) {
-      for (let j = 0; j < 4; j += 1) {
-        const x = 8 + i * 13;
-        const y = 26 + j * 15;
-        // One smooth field: the moves turn slowly across the section.
-        const ang = 0.5 + 0.12 * i - 0.08 * j;
-        const len = 7 + 1.5 * Math.sin(i + j);
-        arrows.push(arrow(x, y, r1(x + len * Math.cos(ang)), r1(y - len * Math.sin(ang)),
-          { head: 4, width: 1.2, fade: false }));
-      }
-    }
-    return g({ transform: `translate(${ox} 0)`, opacity: faint ? 0.45 : 1 },
-      rect(1, 16, 58, 64, 'hf-line', { rx: 3 }), arrows);
-  };
-  return el('svg', { viewBox: '0 0 300 112' },
-    g({ transform: 'translate(14 0)' }, fitPanel(14),
-      label(36, 100, 'Curve fit', { anchor: 'middle', cls: 'hf-label hf-strong' }),
-      small(36, 110, 'each process', 'middle')),
-    g({ transform: 'translate(104 0)' }, fieldPanel(8),
-      label(38, 100, 'Residual field', { anchor: 'middle', cls: 'hf-label hf-strong' }),
-      small(38, 110, 'one per section', 'middle')),
-    g({ transform: 'translate(196 0)' }, fieldPanel(10, true), fitPanel(18),
-      label(42, 100, 'Field + fit', { anchor: 'middle', cls: 'hf-label hf-strong' }),
-      small(42, 110, 'the field, then the fit', 'middle')),
+    legendRow(206, 80, (x, y) => line(x, y, x + 13, y, 'hf-accent-dash'), 'smooth path'),
   );
 }
 
@@ -400,7 +360,7 @@ function through() {
 }
 
 const FIGURES = Object.freeze({
-  transforms, correction, correctionModes, pair, arrow: arrowFigure, scale, rings, threshold, slice,
+  transforms, correction, pair, arrow: arrowFigure, scale, rings, threshold, slice,
   color, ramp, through,
 });
 

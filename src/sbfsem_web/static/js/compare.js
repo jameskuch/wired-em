@@ -565,7 +565,7 @@ export class CompareView {
     return techniqueName(layer.config.options) + (reg ? `, ${this._regLabel(reg)}` : '');
   }
 
-  /** A registration in words ("Current transforms + Field + fit"), for the compared cell's volume. */
+  /** A registration in words ("Current transforms + Residual field"), for the compared cell's volume. */
   _regLabel(reg, { short = false, compact = false } = {}) {
     const hasTransforms = this._hasTransforms(this.record ?? this.cell());
     return short || compact ? registrationShort(reg, { hasTransforms, compact })
@@ -633,10 +633,17 @@ export class CompareView {
    * layer being edited in the focused pane (its technique and every option) is copied once
    * per registration, into one pane each (`target` 'panes': the grid gets as many panes,
    * each with that one layer) or as the layers of the focused pane ('layers').  Nothing is
-   * built: Compare builds them.  Returns what was set up, or `{ problem }`.
+   * built: Compare builds them.  Returns what was set up, or `{ problem }`.  Two that name
+   * one copy (a retired correction and the residual field) are one registration.
    */
   sweepRegistrations(registrations, { target = 'panes' } = {}) {
-    const regs = registrations.map(normalizeRegistration).filter(Boolean);
+    const seen = new Set();
+    const regs = registrations.map(normalizeRegistration).filter((reg) => {
+      const tag = registrationTag(reg);
+      if (!reg || seen.has(tag)) return false;
+      seen.add(tag);
+      return true;
+    });
     const source = this._sweepSource();
     if (!source) return { problem: 'There is no technique layer to copy: give a pane a technique first.' };
     const most = target === 'layers' ? MAX_LAYERS : MAX_PANES;
@@ -675,8 +682,8 @@ export class CompareView {
     return {
       cell: record ? `c${record.id}` : 'the cell',
       hasTransforms: this._hasTransforms(record),
-      defaultCorrection: info?.default_correction ?? 'all',
-      loadedTag: loaded ? loaded[1] : null,
+      defaultCorrection: info?.default_correction ?? 'neighbor',
+      loadedTag: loaded ? registrationTag(registrationOfTag(loaded[1])) : null,
       source: source ? techniqueName(source.config.options) : null,
       where: source ? this._where(source).toLowerCase() : '',
       pane: source ? source.pane.index + 1 : 1,
@@ -1045,8 +1052,9 @@ export class CompareView {
       registration.className = 'layer-registration';
       this._fillRegistrations(registration);
       help(registration, 'Which copy of the cell this layer is built from: Viking’s current section '
-        + 'transforms on or off, and Viking’s section correction off or in one of its modes (Curve fit, '
-        + 'Residual field, Field + fit). As loaded is the cell as the 3D render has it, your own moves '
+        + 'transforms on or off, and Viking’s section correction, its residual field, off or on (a layer saved '
+        + 'with Curve fit or Field + fit, which Viking stopped running on 2026-10-27, is on the residual '
+        + 'field). As loaded is the cell as the 3D render has it, your own moves '
         + 'included; any other is that registration’s own copy, without moves, loaded on the server the '
         + 'first time a layer asks for it. The layer’s error map is measured against its own copy’s '
         + 'annotations, and a pane’s annotations and shift arrows are its first layer’s copy. '

@@ -260,14 +260,14 @@ test('the log view names each cell with its volume and mode, and keeps the unche
   assert.equal(view.checked.length, 2);
   const [c1178, c476] = view.checked;
   assert.deepEqual([c1178.volume, c1178.cellId, c1178.mode, c1178.service, c1178.copy],
-    ['Inferior Monkey', 1178, 'Curve fit', '1.2.0', 'curvefit.1']);
+    ['Inferior Monkey', 1178, 'Curve fit (retired)', '1.2.0', 'curvefit.1']);
   assert.match(c1178.summary, /^1 of the 12 moved annotations next to one 4× as wide or wider was pulled toward it$/);
   const [row] = c1178.rows;
   assert.deepEqual([row.locationId, row.z, row.r, row.move, row.neighborId, row.neighborR, row.ratio, row.frac],
     [1328721, '1160', '0.74', '10.64', 1557441, '9.89', '13×', '0.49']);
   assert.deepEqual(row.movedWith, [1328723]);
   assert.match(row.title, /0\.49 of the way there/);
-  assert.equal(c476.mode, 'Field + fit');
+  assert.equal(c476.mode, 'Field + fit (retired)');
   assert.equal(c476.service, '');
   assert.equal(c476.rows.length, 0);
   assert.match(c476.summary, /^None pulled: 1 moved annotation next to one 4× as wide or wider/);
