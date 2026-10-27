@@ -1,16 +1,17 @@
 """Viking's section corrections: the wire codec, the client, and applying them.
 
-The golden bytes below were produced by the protobuf runtime (7.36) from
-``section_correction.proto`` (github.com/jamesra/viking_gRPC_protos,
-2026-09-22), so the hand-written codec is held to what the service's own
-serializer writes and reads.  The end-to-end tests run a local gRPC server
-that answers the way ``CorrectionsService`` does (``CorrectPoints`` adds the
-sampled offset; a section with no map comes back not found and untrusted).
+The golden bytes below were produced by protoc (libprotoc 29.3, ``--encode``)
+from ``section_correction_v2.proto`` and ``Common/geometry.proto``
+(github.com/jamesra/viking_gRPC_protos master, 2026-10-26), so the
+hand-written codec is held to what protobuf's own serializer writes and reads.
+The end-to-end tests run a local gRPC server that answers the way
+``CorrectionsService`` does over protocol V2 (``CorrectPoints`` adds the
+sampled offset and answers the sections in request order; a section with no
+map comes back not found and untrusted).
 """
 
 from __future__ import annotations
 
-import struct
 import time
 from concurrent import futures
 from datetime import UTC, datetime
@@ -24,14 +25,17 @@ from sbfsem.io import corrections as corr
 from sbfsem.io.cache import DiskCache
 
 GOLDEN = {
-    "correct_points_request": "0a0e496e666572696f724d6f6e6b657912064772696431361a2208a8071212090000000060e336411100000000882a41411209110000000000000cc01a1708a50a12120977be9f1a2fdd5e40110000000000a88840",
-    "correct_points_response": "0a0e496e666572696f724d6f6e6b657912064772696431361a3808a80710011a2609000000806ce336411100000000832a41411900000000000029402100000000000024c028011a09110000000000000cc01a16080c1a12090000000000001c40110000000000002040",
-    "list_sets_response": "0a4e0a0e496e666572696f724d6f6e6b657912064772696431361a340a0c08b882c9d5061080cab5ee0112060880f7c4d506190000000000409f4021000000000040bf40280332080802100318052007",
-    "section_correction": "0a0e496e666572696f724d6f6e6b6579120647726964313618a50a21000000000070b7c029000000000040af40310000000000409f403a2108fdffffffffffffffff011002190000000000c862c021000000000080404028043a18080710ffffffffffffffffff0121000000000000f03f280c",
-    "list_sections_response": "0a0e496e666572696f724d6f6e6b657912064772696431361a140102a50a808080808020fbffffffffffffffff01",
-    "rebuild_status": "0801120608c0a0ccd5062204626f6f6d2a0e496e666572696f724d6f6e6b65792a0452504331",
-    "section_request_negative_z": "0a0e496e666572696f724d6f6e6b6579120647726964313618ffffffffffffffffff01",
+    "correct_points_request": "0a180a0e496e666572696f724d6f6e6b65791206477269643136122208a8071212090000000060e336411100000000882a41411209110000000000000cc0121708a50a12120977be9f1a2fdd5e40110000000000a88840",
+    "correct_points_response": "0a1c080112160a120900000000000029401100000000000024c0100112000a0412020a000a00",
+    "list_sets_response": "0a500a180a0e496e666572696f724d6f6e6b65791206477269643136120c08b882c9d5061080cab5ee01190000000000409f4021000000000040bf402a140102a50a808080808020fbffffffffffffffff010a220a200a0e496e666572696f724d6f6e6b6579120e536c696365546f566f6c756d6531",
+    "section_correction": "090000000000409f4012251a12090000000000c862c011000000000080404020042a0d080210fdffffffffffffffff01121c1a0911000000000000f03f200c2a0d08ffffffffffffffffff011007",
+    "rebuild_status": "0801120608e09ed7d5062204626f6f6d2a05312e342e30320e496e666572696f724d6f6e6b65793a0766697474696e6740034808",
+    "section_request_negative_z": "0a180a0e496e666572696f724d6f6e6b6579120647726964313610ffffffffffffffffff01",
     "list_volumes_response": "0a500a0e496e666572696f724d6f6e6b6579122268747470733a2f2f6578616d706c652f696e666572696f722f56696b696e67584d4c1a1a68747470733a2f2f6578616d706c652f616e6e6f746174696f6e",
+    "correct_structures_request": "0a200a0e496e666572696f724d6f6e6b6579120e536c696365546f566f6c756d6531120488aa010518012003",
+    "correct_structures_request_all": "0a200a0e496e666572696f724d6f6e6b6579120e536c696365546f566f6c756d6531120488aa01051801",
+    "correct_structures_response": "0a33089bd50f1088aa0118940622120900000000e40a00411100000000488a04412a120900000000000029401100000000000024c00a02080512320a05312e342e30120608b882c9d5061a19313a353532353a36333932383233343237323432333030303022060880f7c4d506",
+    "answer_stamp": "0a05312e342e301a19313a353532353a363339323832333432373234323330303030220c0880f7c4d50610c0efd9c901",
 }
 
 
@@ -40,10 +44,16 @@ def golden(name: str) -> bytes:
 
 
 # -- the codec, against protobuf's own bytes ---------------------------------
+def test_the_client_speaks_protocol_v2():
+    # V1 answers every call UNIMPLEMENTED since 2026-10-26 15:13 UTC (service 1.4.0).
+    assert corr.SERVICE == "Viking.SectionCorrectionServiceTypes.gRPC.V2.AnnotateSectionCorrections"
+    # V2's CorrectionMode: ALL is 0, the default, then NONE, NEIGHBOR, CURVE_FIT.
+    assert corr.CORRECTION_MODES == {"none": 1, "neighbor": 2, "curvefit": 3, "all": 0}
+
+
 def test_encode_matches_protobuf_for_a_correct_points_request():
     request = {
-        "volume_name": "InferiorMonkey",
-        "stos_group": "Grid16",
+        "set": {"volume_name": "InferiorMonkey", "stos_group": "Grid16"},
         "sections": [
             {"z": 936, "points": [{"x": 1.5e6, "y": 2.25e6}, {"x": 0.0, "y": -3.5}]},
             {"z": 1317, "points": [{"x": 123.456, "y": 789.0}]},
@@ -54,7 +64,7 @@ def test_encode_matches_protobuf_for_a_correct_points_request():
 
 
 def test_encode_negative_int64_is_ten_bytes_like_protobuf():
-    request = {"volume_name": "InferiorMonkey", "stos_group": "Grid16", "z": -1}
+    request = {"set": {"volume_name": "InferiorMonkey", "stos_group": "Grid16"}, "z": -1}
     assert corr.encode(request, corr.SECTION_REQUEST_SCHEMA) == golden(
         "section_request_negative_z")
 
@@ -62,65 +72,75 @@ def test_encode_negative_int64_is_ten_bytes_like_protobuf():
 def test_encode_refuses_a_field_the_schema_does_not_have():
     with pytest.raises(KeyError):
         corr.encode({"volume": "InferiorMonkey"}, corr.LIST_SETS_REQUEST_SCHEMA)
+    with pytest.raises(KeyError):  # V1's flat names, inside the set
+        corr.encode({"set": {"volume_name": "RC1", "z": 3}}, corr.SECTION_REQUEST_SCHEMA)
 
 
 def test_decode_correct_points_response():
     answer = corr.decode(golden("correct_points_response"), corr.CORRECT_POINTS_RESPONSE_SCHEMA)
-    assert answer["volume_name"] == "InferiorMonkey"
-    first, second = answer["sections"]
-    assert (first["z"], first["found_section"]) == (936, True)
-    assert first["points"][0] == {"x": 1500012.5, "y": 2249990.0, "dx": 12.5, "dy": -10.0,
-                                  "trusted": True}
-    # A point at the defaults is sent with no fields at all.
-    assert first["points"][1] == {"x": 0.0, "y": -3.5, "dx": 0.0, "dy": 0.0, "trusted": False}
-    assert (second["z"], second["found_section"]) == (12, False)
-    assert second["points"] == [{"x": 7.0, "y": 8.0, "dx": 0.0, "dy": 0.0, "trusted": False}]
+    first, second, third = answer["sections"]
+    assert first["found"] is True
+    assert first["points"][0] == {"offset": {"x": 12.5, "y": -10.0}, "trusted": True}
+    # A point at the defaults is sent with no fields at all, its offset unset.
+    assert first["points"][1] == {"offset": None, "trusted": False}
+    assert second == {"found": False, "points": [{"offset": {"x": 0.0, "y": 0.0}, "trusted": False}]}
+    assert third == {"found": False, "points": []}
 
 
-def test_decode_correction_sets_with_provenance():
+def test_decode_correction_sets_with_their_sections():
     answer = corr.decode(golden("list_sets_response"), corr.LIST_SETS_RESPONSE_SCHEMA)
-    (cset,) = [corr.CorrectionSet.from_message(m) for m in answer["sets"]]
+    cset, bare = [corr.CorrectionSet.from_message(m) for m in answer["sets"]]
     assert cset.volume_name == "InferiorMonkey"
     assert cset.stos_group == "Grid16"
     assert cset.built_utc == datetime.fromtimestamp(1790067000.5, tz=UTC)
-    assert cset.annotation_watermark == datetime.fromtimestamp(1790000000, tz=UTC)
-    assert (cset.pitch_nm, cset.kernel_radius_nm, cset.min_annotation_votes) == (2000.0, 8000.0, 3)
-    window = answer["sets"][0]["provenance"]["residual_window"]
-    assert window == {"min_both": 2, "max_both": 3, "min_one": 5, "max_one": 7}
+    assert (cset.pitch_nm, cset.kernel_radius_nm) == (2000.0, 8000.0)
+    # Packed int64, a negative one ten bytes long.
+    assert cset.sections == (1, 2, 1317, 2**40, -5)
+    assert (bare.stos_group, bare.built_utc, bare.sections) == ("SliceToVolume1", None, ())
+    # The sections stay out of the description (the disk cache, a cell's status).
+    assert "sections" not in cset.describe()
     assert corr.CorrectionSet.from_description(cset.describe()) == cset
 
 
 def test_decode_section_lattice_with_negative_indices():
     answer = corr.decode(golden("section_correction"), corr.SECTION_CORRECTION_SCHEMA)
-    assert (answer["z"], answer["origin_x_nm"], answer["origin_y_nm"], answer["pitch_nm"]) == (
-        1317, -6000.0, 4000.0, 2000.0)
+    assert answer["pitch_nm"] == 2000.0
     assert answer["nodes"] == [
-        {"gx": -3, "gy": 2, "dx": -150.25, "dy": 33.0, "vote_count": 4},
-        {"gx": 7, "gy": -1, "dx": 0.0, "dy": 1.0, "vote_count": 12},
+        {"node": {"row": 2, "col": -3}, "offset": {"x": -150.25, "y": 33.0}, "votes": 4},
+        {"node": {"row": -1, "col": 7}, "offset": {"x": 0.0, "y": 1.0}, "votes": 12},
     ]
 
 
-def test_decode_packed_int64_and_repeated_strings():
-    answer = corr.decode(golden("list_sections_response"), corr.LIST_SECTIONS_RESPONSE_SCHEMA)
-    assert answer["z"] == [1, 2, 1317, 2**40, -5]
+def test_decode_rebuild_status_and_volumes():
     status = corr.decode(golden("rebuild_status"), corr.REBUILD_STATUS_SCHEMA)
     assert status["in_progress"] is True
-    assert status["last_volumes"] == ["InferiorMonkey", "RPC1"]
-    assert status["last_error"] == "boom"
+    assert status["last_started_utc"] == {"seconds": 1790300000, "nanos": 0}
     assert status["last_completed_utc"] is None
+    assert status["last_error"] == "boom"
+    assert status["service_version"] == "1.4.0"
+    assert (status["current_volume"], status["current_step"]) == ("InferiorMonkey", "fitting")
+    assert (status["groups_done"], status["groups_total"]) == (3, 8)
     volumes = corr.decode(golden("list_volumes_response"), corr.LIST_VOLUMES_RESPONSE_SCHEMA)
     assert volumes["volumes"][0]["vikingxml_endpoint"] == "https://example/inferior/VikingXML"
 
 
+#: A schema with every kind the codec writes, for the round trip.
+ROUND_TRIP: corr.Schema = {
+    1: ("name", "string", False), 2: ("tags", "string", True), 3: ("z", "int64", True),
+    4: ("at", corr._VECTOR2, False), 5: ("on", "bool", False), 6: ("n", "int32", False),
+}
+
+
 def test_round_trip_and_unknown_fields_are_skipped():
-    message = {"volume_name": "RPC1", "stos_group": "Brute", "z": [3, -4, 5]}
-    data = corr.encode(message, corr.LIST_SECTIONS_RESPONSE_SCHEMA)
-    assert corr.decode(data, corr.LIST_SECTIONS_RESPONSE_SCHEMA) == message
+    message = {"name": "RPC1", "tags": ["a", "b"], "z": [3, -4, 5], "at": {"x": -0.5, "y": 2.0},
+               "on": True, "n": -7}
+    data = corr.encode(message, ROUND_TRIP)
+    assert corr.decode(data, ROUND_TRIP) == message
     # A field this reader does not know (number 9, a string) is passed over.
     extra = data + bytes([9 << 3 | 2, 3]) + b"new"
-    assert corr.decode(extra, corr.LIST_SECTIONS_RESPONSE_SCHEMA) == message
+    assert corr.decode(extra, ROUND_TRIP) == message
     with pytest.raises(ValueError):
-        corr.decode(data[:-1], corr.LIST_SECTIONS_RESPONSE_SCHEMA)
+        corr.decode(data[:-1], ROUND_TRIP)
 
 
 def test_targets():
@@ -142,7 +162,7 @@ def test_choose_set_follows_dataexport():
 
 # -- a local service ----------------------------------------------------------
 class FakeService:
-    """Answers like ``CorrectionsService``: one set, a field on some sections.
+    """Answers like ``CorrectionsService`` over V2: one set, a field on some sections.
 
     ``field`` maps Z to ``(dx, dy, radius_nm)``: points within ``radius_nm``
     of the origin get the offset and are trusted; farther ones get zero,
@@ -155,16 +175,17 @@ class FakeService:
         self.calls: list[str] = []
         self.points_seen = 0
         # CorrectStructures: the Locations it knows (location_id, structure_id,
-        # z, x, y), the (dx, dy) each mode number adds to every one of them, the
-        # requests it was sent, and whether it throws as the live one did:
+        # z, x, y), the (dx, dy) each mode (by name) adds to every one of them,
+        # the requests it was sent, and whether it throws as the live one did:
         # for every request (True), or for the structures in a set, with
         # ``fail_code``.
         self.locations: list[dict] = []
-        self.fit: dict[int, tuple[float, float]] = {}
+        self.fit: dict[str, tuple[float, float]] = {}
         # A Location's own (dx, dy) nm, in place of its mode's fit (the curve
         # fit's pull toward a soma, for the correction log).
         self.moves: dict[int, tuple[float, float]] = {}
         self.structure_requests: list[dict] = []
+        self.stamp_requests: list[dict] = []
         self.fail_structures: bool | set[int] = False
         self.fail_code = "UNKNOWN"
         # The volumes it publishes a set for, and the (status, details) it
@@ -194,19 +215,20 @@ class FakeService:
         def sets(request, context):
             asked = request["volume_name"]
             return {"sets": [{
-                "volume_name": name, "stos_group": "Grid16",
-                "provenance": {"built_utc": {"seconds": 1790067000}, "pitch_nm": 2000.0,
-                               "kernel_radius_nm": 8000.0, "min_annotation_votes": 3},
+                "id": {"volume_name": name, "stos_group": "Grid16"},
+                "built_utc": {"seconds": 1790067000}, "pitch_nm": 2000.0,
+                "kernel_radius_nm": 8000.0,
+                "z": sorted(z for z in self.field if z != "*"),
             } for name in self.volumes if asked in ("", name)]}
 
         def volume_down(request, context):
-            failing = self.volume_errors.get(request["volume_name"])
+            failing = self.volume_errors.get(request["set"]["volume_name"])
             if failing:
                 context.abort(getattr(grpc.StatusCode, failing[0]), failing[1])
 
         def correct(request, context):
             volume_down(request, context)
-            if request["stos_group"] != "Grid16":
+            if request["set"]["stos_group"] != "Grid16":
                 context.abort(grpc.StatusCode.NOT_FOUND, "no correction set")
             seen = set()
             out = []
@@ -219,16 +241,15 @@ class FakeService:
                 points = []
                 for p in section["points"]:
                     if entry is None:
-                        points.append({"x": p["x"], "y": p["y"]})
+                        points.append({})  # zero and untrusted, every field left out
                         continue
                     dx, dy, radius = entry
                     near = np.hypot(p["x"], p["y"]) <= radius
                     ox, oy = (dx, dy) if near else (0.0, 0.0)
-                    points.append({"x": p["x"] + ox, "y": p["y"] + oy, "dx": ox, "dy": oy,
-                                   "trusted": bool(near)})
-                out.append({"z": section["z"], "found_section": entry is not None,
-                            "points": points})
-            return {**{k: request[k] for k in ("volume_name", "stos_group")}, "sections": out}
+                    points.append({"offset": {"x": ox, "y": oy}, "trusted": bool(near)})
+                # In request order, without the section's Z.
+                out.append({"found": entry is not None, "points": points})
+            return {"sections": out}
 
         def structures(request, context):
             self.structure_requests.append(request)
@@ -237,21 +258,28 @@ class FakeService:
             if failing is True or (failing and set(request["structure_ids"]) & failing):
                 context.abort(getattr(grpc.StatusCode, self.fail_code),
                               "Exception was thrown by handler.")
-            if request["stos_group"] != "Grid16":
+            if request["set"]["stos_group"] != "Grid16":
                 context.abort(grpc.StatusCode.NOT_FOUND, "no correction set")
-            mode = 3 if request["correction"] is None else request["correction"]
+            # 0, left out of the request, is ALL.
+            mode = {n: name for name, n in corr.CORRECTION_MODES.items()}[request["correction"]]
             fit = self.fit.get(mode, (0.0, 0.0))
             wanted = set(request["structure_ids"])
             out = []
             for loc in self.locations:
                 if loc["structure_id"] in wanted or request["include_children"]:
                     dx, dy = self.moves.get(loc["location_id"], fit)
-                    out.append({**loc, "x": loc["x"] + dx, "y": loc["y"] + dy, "dx": dx, "dy": dy})
-            return {**{k: request[k] for k in ("volume_name", "stos_group")}, "locations": out}
+                    out.append({**{k: loc[k] for k in ("location_id", "structure_id", "z")},
+                                "position": {"x": loc["x"] + dx, "y": loc["y"] + dy},
+                                "offset": {"x": dx, "y": dy}})
+            return {"locations": out, "stamp": {"service_version": self.version}}
 
         def rebuild_status(request, context):
             return {"in_progress": False, "last_completed_utc": {"seconds": self.rebuilt},
                     "service_version": self.version}
+
+        def answer_stamp(request, context):
+            self.stamp_requests.append(request)
+            return {"service_version": self.version, "annotation_fingerprint": "f1"}
 
         return grpc.method_handlers_generic_handler(corr.SERVICE, {
             "GetRebuildStatus": unary("GetRebuildStatus", corr.EMPTY_SCHEMA,
@@ -262,6 +290,8 @@ class FakeService:
                                    corr.CORRECT_POINTS_RESPONSE_SCHEMA, correct),
             "CorrectStructures": unary("CorrectStructures", corr.CORRECT_STRUCTURES_REQUEST_SCHEMA,
                                        corr.CORRECT_STRUCTURES_RESPONSE_SCHEMA, structures),
+            "GetAnswerStamp": unary("GetAnswerStamp", corr.CORRECT_STRUCTURES_REQUEST_SCHEMA,
+                                    corr.ANSWER_STAMP_SCHEMA, answer_stamp),
         })
 
 
@@ -594,42 +624,40 @@ def test_exports_say_the_positions_were_corrected(service, tmp_path):
     np.testing.assert_allclose(back.nodes["CorrDXnm"], [120.0] * 5)
 
 
-# -- CorrectStructures and the modes (2026-09-24) ------------------------------
-# No protobuf runtime was at hand for these, so the bytes are assembled by hand
-# from the proto3 wire format; the live service took exactly these requests on
-# 2026-09-24 and answered c21768 with 1,680 Locations.
-def test_encode_correct_structures_sends_the_mode_even_when_it_is_none():
-    head = (bytes.fromhex("0a0e") + b"InferiorMonkey" + bytes.fromhex("120e") + b"SliceToVolume1"
-            + bytes.fromhex("1a0488aa0105")  # structure_ids 21768 and 5, packed varints
-            + bytes.fromhex("2001"))  # include_children
-    request = {"volume_name": "InferiorMonkey", "stos_group": "SliceToVolume1",
+# -- CorrectStructures and the modes (2026-09-24; protocol V2 2026-10-26) -------
+def test_encode_correct_structures_like_protobuf():
+    request = {"set": {"volume_name": "InferiorMonkey", "stos_group": "SliceToVolume1"},
                "structure_ids": [21768, 5], "include_children": True}
     schema = corr.CORRECT_STRUCTURES_REQUEST_SCHEMA
-    # NONE is 0, proto3's default, and is still sent: an unset mode means All.
-    assert corr.encode({**request, "correction": 0}, schema) == head + bytes.fromhex("2800")
-    assert corr.encode({**request, "correction": 2}, schema) == head + bytes.fromhex("2802")
-    assert corr.encode(request, schema) == head
-    assert corr.decode(head + bytes.fromhex("2800"), schema)["correction"] == 0
-    assert corr.decode(head, schema)["correction"] is None
+    curvefit = {**request, "correction": corr.CORRECTION_MODES["curvefit"]}
+    assert corr.encode(curvefit, schema) == golden("correct_structures_request")
+    # ALL is 0, proto3's default, so protobuf leaves it out, as the codec does;
+    # the service reads an absent mode as ALL.
+    everything = {**request, "correction": corr.CORRECTION_MODES["all"]}
+    assert corr.encode(everything, schema) == golden("correct_structures_request_all")
+    assert corr.decode(golden("correct_structures_request_all"), schema)["correction"] == 0
+    assert corr.decode(golden("correct_structures_request"), schema) == curvefit
 
 
-def test_decode_correct_structures_response():
-    def double(number: int, value: float) -> bytes:
-        return bytes([number << 3 | 1]) + struct.pack("<d", value)
-
-    body = (bytes.fromhex("089bd50f")  # location_id 256667
-            + bytes.fromhex("1088aa01")  # structure_id 21768
-            + bytes.fromhex("189406")  # z 788
-            + double(4, 131420.5) + double(5, 168265.0) + double(6, 12.5) + double(7, -10.0))
-    data = (bytes.fromhex("0a0e") + b"InferiorMonkey" + bytes.fromhex("120e") + b"SliceToVolume1"
-            + bytes([3 << 3 | 2, len(body)]) + body
-            + bytes([3 << 3 | 2, 2]) + bytes.fromhex("0805"))  # a Location with only its ID
-    answer = corr.decode(data, corr.CORRECT_STRUCTURES_RESPONSE_SCHEMA)
+def test_decode_correct_structures_response_and_its_stamp():
+    answer = corr.decode(golden("correct_structures_response"),
+                         corr.CORRECT_STRUCTURES_RESPONSE_SCHEMA)
     assert answer["locations"] == [
         {"location_id": 256667, "structure_id": 21768, "z": 788,
-         "x": 131420.5, "y": 168265.0, "dx": 12.5, "dy": -10.0},
-        {"location_id": 5, "structure_id": 0, "z": 0, "x": 0.0, "y": 0.0, "dx": 0.0, "dy": 0.0},
+         "position": {"x": 131420.5, "y": 168265.0}, "offset": {"x": 12.5, "y": -10.0}},
+        # A Location with only its ID: no position, no offset.
+        {"location_id": 5, "structure_id": 0, "z": 0, "position": None, "offset": None},
     ]
+    stamp = corr._answer_stamp(answer["stamp"])
+    assert stamp == {"service_version": "1.4.0",
+                     "field_built_utc": datetime.fromtimestamp(1790067000, tz=UTC),
+                     "annotation_fingerprint": "1:5525:639282342724230000",
+                     "annotation_watermark": datetime.fromtimestamp(1790000000, tz=UTC)}
+    # GetAnswerStamp answers the stamp alone; a mode that samples no field leaves
+    # field_built_utc unset.
+    alone = corr._answer_stamp(corr.decode(golden("answer_stamp"), corr.ANSWER_STAMP_SCHEMA))
+    assert alone["field_built_utc"] is None
+    assert alone["annotation_watermark"] == datetime.fromtimestamp(1790000000.423, tz=UTC)
 
 
 def test_correction_mode_names():
@@ -660,7 +688,7 @@ def structures(service):
     fake, url = service
     fake.locations = [{"location_id": i, "structure_id": 9, "z": z, "x": 7500.0, "y": 15000.0}
                       for i, z in ((1, 935), (2, 936), (3, 937), (5, 936))]
-    fake.fit = {2: (120.0, -80.0), 3: (60.0, 40.0)}
+    fake.fit = {"curvefit": (120.0, -80.0), "all": (60.0, 40.0)}
     return fake, url
 
 
@@ -673,7 +701,7 @@ def test_curvefit_moves_what_the_service_corrected(structures):
     assert result is not None
     (request,) = fake.structure_requests
     assert request["structure_ids"] == [9] and request["include_children"] is True
-    assert request["correction"] == corr.CORRECTION_MODES["curvefit"] == 2
+    assert request["correction"] == corr.CORRECTION_MODES["curvefit"] == 3
     shift = (neuron.nodes.set_index("ID")[["Xum", "Yum"]] - before).round(9)
     for i in (1, 2, 3):
         assert shift.loc[i].tolist() == [0.12, -0.08]
@@ -707,7 +735,7 @@ def test_structure_offsets_are_kept_per_mode(structures, tmp_path):
         first = corr.correct_neuron(make_structure_neuron(), client, cache=cache, mode="curvefit")
         again = corr.correct_neuron(make_structure_neuron(), client, cache=cache, mode="curvefit")
         both = corr.correct_neuron(make_structure_neuron(), client, cache=cache, mode="all")
-    assert [r["correction"] for r in fake.structure_requests] == [2, 3]
+    assert [r["correction"] for r in fake.structure_requests] == [3, 0]  # curvefit, all
     assert again.cached and again.token == first.token
     assert both.token != first.token and both.summary()["mode"] == "all"
 
@@ -730,14 +758,43 @@ def test_a_service_version_keys_the_cache_instead_of_restarts(structures, tmp_pa
         provider.close()
 
 
-def test_service_version_is_read_from_both_answers():
-    status = corr.decode(corr.encode({"service_version": "1.1.0"}, corr.REBUILD_STATUS_SCHEMA),
-                         corr.REBUILD_STATUS_SCHEMA)
-    answer = corr.decode(
-        corr.encode({"volume_name": "RC1", "service_version": "1.1.0"},
-                    corr.CORRECT_STRUCTURES_RESPONSE_SCHEMA),
-        corr.CORRECT_STRUCTURES_RESPONSE_SCHEMA)
-    assert status["service_version"] == answer["service_version"] == "1.1.0"
+def test_service_version_is_read_from_the_status_and_the_answers(structures):
+    fake, url = structures
+    fake.version = "1.4.0"
+    with corr.CorrectionsClient(url) as client:
+        assert client.rebuild_status()["service_version"] == "1.4.0"
+        frame = client.correct_structures("InferiorMonkey", "Grid16", [9], mode="curvefit")
+        stamp = client.answer_stamp("InferiorMonkey", "Grid16", [9], mode="curvefit")
+    assert list(frame.columns) == ["location_id", "structure_id", "z", "x", "y", "dx", "dy"]
+    assert frame["location_id"].tolist() == [1, 2, 3, 5]
+    assert frame[["dx", "dy"]].drop_duplicates().to_numpy().tolist() == [[120.0, -80.0]]
+    assert frame.attrs["stamp"]["service_version"] == stamp["service_version"] == "1.4.0"
+    assert stamp["annotation_fingerprint"] == "f1" and stamp["field_built_utc"] is None
+    # GetAnswerStamp takes the very request CorrectStructures does.
+    assert fake.stamp_requests == fake.structure_requests
+
+
+def test_the_sets_name_their_sections(service):
+    fake, url = service
+    with corr.CorrectionsClient(url) as client:
+        (cset,) = client.correction_sets("InferiorMonkey")
+        assert cset.sections == (936, 937)
+        assert client.corrected_sections("InferiorMonkey", "grid16") == [936, 937]
+        with pytest.raises(corr.CorrectionNotFound):
+            client.corrected_sections("InferiorMonkey", "Mosaic")
+    assert fake.calls == ["ListCorrectionSets"] * 3
+
+
+def test_an_answer_with_another_count_of_sections_is_refused(service, monkeypatch):
+    """CorrectPoints answers the sections in request order and does not name
+    their Z: one missing would shift every section after it."""
+    _, url = service
+    with corr.CorrectionsClient(url) as client:
+        call = client.call
+        monkeypatch.setattr(client, "call", lambda *a, **k: {"sections": call(*a, **k)["sections"][:1]})
+        with pytest.raises(corr.CorrectionsError, match="answered 1 sections; 2 were sent"):
+            client.correct_points("InferiorMonkey", "Grid16",
+                                  {936: np.array([[1.0, 2.0]]), 937: np.array([[3.0, 4.0]])})
 
 
 def test_a_restarted_service_is_asked_again_for_cached_structures(structures, tmp_path):
@@ -787,7 +844,7 @@ def test_a_web_load_takes_the_mode_and_reloads_for_another(web):
     # position: no live registration here) and moves it by the fit.
     fake.locations = [{"location_id": int(r.ID), "structure_id": 1178, "z": int(r.Z),
                        "x": r.VolumeX * sx, "y": r.VolumeY * sy} for r in nodes.itertuples()]
-    fake.fit = {2: (120.0, -80.0)}
+    fake.fit = {"curvefit": (120.0, -80.0)}
 
     detail = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="curvefit")
     sc = detail.summary.section_correction
@@ -819,7 +876,7 @@ def test_a_curve_fit_load_logs_a_thin_process_pulled_toward_a_wider_one(web, cap
     sx, sy = map(float, svc.neuron(1178, "i").volume_scale[:2])
     fake.locations = [{"location_id": int(i), "structure_id": 1178, "z": int(r.Z),
                        "x": r.VolumeX * sx, "y": r.VolumeY * sy} for i, r in nodes.iterrows()]
-    fake.fit = {2: (0.0, 0.0), 3: (0.0, 0.0)}
+    fake.fit = {"curvefit": (0.0, 0.0), "all": (0.0, 0.0)}
     half = 0.5 * np.array([(nodes.at[40440, a] - nodes.at[690259, a]) * s
                            for a, s in (("VolumeX", sx), ("VolumeY", sy))])
     assert np.hypot(*half) > 1000.0           # over 1 um, and over the annotation's diameter
@@ -881,7 +938,7 @@ def test_a_lab_can_have_its_own_default_mode(web):
     sx, sy = map(float, svc.neuron(1178, "i").volume_scale[:2])
     fake.locations = [{"location_id": int(r.ID), "structure_id": 1178, "z": int(r.Z),
                        "x": r.VolumeX * sx, "y": r.VolumeY * sy} for r in nodes.itertuples()]
-    fake.fit = {2: (120.0, -80.0), 3: (60.0, 40.0)}
+    fake.fit = {"curvefit": (120.0, -80.0), "all": (60.0, 40.0)}
     assert plain.summary.section_correction is None
 
     # A load that names no mode gets the lab's; one that names a mode, that one.
@@ -929,7 +986,7 @@ def test_a_cell_the_service_throws_on_leaves_the_rest_of_its_volume_corrected(we
     sx, sy = map(float, loaded.volume_scale[:2])
     fake.locations = [{"location_id": int(r.ID), "structure_id": 1178, "z": int(r.Z),
                        "x": r.VolumeX * sx, "y": r.VolumeY * sy} for r in loaded.nodes.itertuples()]
-    fake.fit = {3: (60.0, 40.0)}
+    fake.fit = {"all": (60.0, 40.0)}
     fake.fail_structures = {9}
     provider = svc.corrections()
     with pytest.raises(corr.CorrectionsError, match="Exception was thrown by handler") as failed:
@@ -990,7 +1047,7 @@ def test_a_correction_the_service_could_not_make_is_keyed_as_the_stored_position
     sx, sy = map(float, loaded.volume_scale[:2])
     fake.locations = [{"location_id": int(r.ID), "structure_id": 1178, "z": int(r.Z),
                        "x": r.VolumeX * sx, "y": r.VolumeY * sy} for r in loaded.nodes.itertuples()]
-    fake.fit = {2: (120.0, -80.0)}
+    fake.fit = {"curvefit": (120.0, -80.0)}
     fake.fail_structures = False
     time.sleep(0.35)
     done = svc.load_neuron(1178, "i", include_synapses=False, section_corrections="curvefit")
@@ -1115,7 +1172,7 @@ def test_an_unavailable_volume_holds_that_volume_and_leaves_the_others_asked(str
         with pytest.raises(corr.CorrectionsError,
                            match="not asked again for InferiorMonkey until .* UTC"):
             provider.correct(structure_neuron(10), "curvefit")
-        assert [(r["volume_name"], r["structure_ids"]) for r in fake.structure_requests] == [
+        assert [(r["set"]["volume_name"], r["structure_ids"]) for r in fake.structure_requests] == [
             ("InferiorMonkey", [9]), ("RC1", [476])]
     finally:
         provider.close()
@@ -1179,7 +1236,7 @@ def test_a_service_wide_pause_asks_no_volume_whose_sets_are_fresh(
             provider.correct(structure_neuron(476, "RC1"), "neighbor")
         assert sent == []
         assert provider._down_until == down_until  # a refusal does not lengthen the pause
-        assert [r["volume_name"] for r in fake.structure_requests] == (
+        assert [r["set"]["volume_name"] for r in fake.structure_requests] == (
             ["RC1"] if outage == "unreachable" else ["RC1", "InferiorMonkey"])
     finally:
         provider.close()

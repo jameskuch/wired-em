@@ -68,8 +68,13 @@ section, and only where the sample is trusted. `Xum`/`Yum` and the
 closed-curve outlines carry the move; `VolumeX`/`VolumeY` keep Viking's
 values, and `CorrDXnm`/`CorrDYnm` hold each annotation's move.
 `CorrectionsClient` also answers `list_volumes`, `rebuild_status`,
-`correction_sets`, `corrected_sections`, `manifest`, `section` (one section's
-lattice), `correct_points` and `correct_structures`.
+`correction_sets` (each set with the sections it has a map for),
+`corrected_sections`, `section` (one section's lattice), `correct_points`,
+`correct_structures` and `answer_stamp` (what a `correct_structures` answer
+to the same request would be stamped with now, without the fit). It speaks the
+service's protocol V2; V1, retired on 2026-10-26, also had `manifest`, and
+named the annotation watermark and vote minimum of each set, which V2 does
+not.
 
 That is the `neighbor` mode, the default of `correct_neuron`. The service can
 also correct whole structures (`CorrectStructures`) with a leave-one-out

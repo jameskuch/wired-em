@@ -167,7 +167,14 @@ HTTP/2), and `SBFSEM_CORRECTIONS_STOS_GROUP` picks a set by name (default: the
 first by name, as Viking's DataExport picks). None of them is set in the
 unit. The offsets are kept in `SBFSEM_CACHE_DIR` beside the OData responses.
 The journal logs every correction applied (`section correction … moved`) and
-every failure (`section corrections unavailable`).
+every failure (`section corrections unavailable`). The client speaks the
+service's protocol V2 (`Viking.SectionCorrectionServiceTypes.gRPC.V2`) since
+2.39.1. V1 was retired without notice: from 2026-10-26 15:13 UTC every V1 call
+answered `UNIMPLEMENTED Service is unimplemented`, logged as `section correction
+(…) not applied: ListCorrectionSets … UNIMPLEMENTED`, and every cell loaded
+until 2.39.1 was drawn uncorrected. A run of those lines means the protocol
+moved again: `tools/section_corrections.py` with no arguments shows what the
+service answers.
 
 Cells are drawn where each volume's current section transforms put them
 (`sbfsem.io.registration`). The transforms are read over plain HTTP from the

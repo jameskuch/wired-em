@@ -48,18 +48,21 @@ def describe(label: str, s: pd.Series) -> str:
 
 def overview(client: CorrectionsClient) -> None:
     status = client.rebuild_status()
-    print(f"service {client.url}")
+    print(f"service {client.url}, version {status['service_version'] or 'not given'}")
     print(f"rebuild: in progress {status['in_progress']}, last started {status['last_started_utc']}, "
-          f"completed {status['last_completed_utc']}, volumes {status['last_volumes']}"
+          f"completed {status['last_completed_utc']}, "
+          f"{status['groups_done']} of {status['groups_total']} sets"
+          + (f", now {status['current_volume']}: {status['current_step']}"
+             if status["in_progress"] else "")
           + (f", last error {status['last_error']!r}" if status["last_error"] else ""))
     for v in client.list_volumes():
         print(f"volume {v['volume_name']}: VikingXML {v['vikingxml_endpoint']}")
     for s in client.correction_sets(""):
-        sections = client.corrected_sections(s.volume_name, s.stos_group)
+        sections = s.sections
         span = f"Z {min(sections)}-{max(sections)}" if sections else "no sections"
-        print(f"  set {s.volume_name} / {s.stos_group}: built {s.built_utc}, watermark "
-              f"{s.annotation_watermark}, pitch {s.pitch_nm:g} nm, kernel {s.kernel_radius_nm:g} nm, "
-              f"votes >= {s.min_annotation_votes}; {len(sections)} sections, {span}")
+        print(f"  set {s.volume_name} / {s.stos_group}: built {s.built_utc}, "
+              f"pitch {s.pitch_nm:g} nm, kernel {s.kernel_radius_nm:g} nm; "
+              f"{len(sections)} sections, {span}")
 
 
 def cell(client: CorrectionsClient, source: str, cell_id: int, group: str | None, worst: int,
@@ -89,13 +92,17 @@ def cell(client: CorrectionsClient, source: str, cell_id: int, group: str | None
     before = steps(neuron)
     if mode == "neighbor":
         correction = fetch_offsets(neuron, client, cset)
+        stamp = ""
     else:
         correction = fetch_structure_offsets(neuron, client, cset, mode, timeout=600)
+        st = client.answer_stamp(volume, cset.stos_group, [cell_id], mode=mode)
+        stamp = (f"; service {st['service_version']}, annotations as of "
+                 f"{st['annotation_watermark']}")
     apply_offsets(neuron, correction)
     after = steps(neuron)
     s = neuron.section_correction
     print(f"c{cell_id} {volume}: set {cset.stos_group} built {cset.built_utc}; {mode}"
-          + (", on the live registration" if live else ", on the stored positions"))
+          + (", on the live registration" if live else ", on the stored positions") + stamp)
     print(f"  {s['n_annotations']} annotations on {s['n_sections']} sections; {s['n_found']} on a "
           f"published section, {s['n_trusted']} supported, {s['n_moved']} moved "
           f"(median {s['median_um']:.3f}, p95 {s['p95_um']:.3f}, max {s['max_um']:.3f} um)")

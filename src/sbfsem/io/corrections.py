@@ -1,17 +1,20 @@
 """Viking's section corrections: the residual registration field, per section.
 
 James Anderson's service ``AnnotateSectionCorrections`` (package
-``Viking.SectionCorrectionServiceTypes.gRPC.V1``; TLS gRPC at
+``Viking.SectionCorrectionServiceTypes.gRPC.V2``; TLS gRPC at
 ``corrections.codepharm.net:443``, no auth; the proto is
-``SectionCorrection/section_correction.proto`` in
-github.com/jamesra/viking_gRPC_protos) publishes, per volume and StosGroup, a
-sparse lattice of XY offsets for each section it could measure.  The field is
-built from every traced process in the volume (Viking's
+``SectionCorrection/section_correction_v2.proto`` in
+github.com/jamesra/viking_gRPC_protos, with its positions in
+``Common/geometry.proto``) publishes, per volume and StosGroup, a sparse
+lattice of XY offsets for each section it could measure.  The field is built
+from every traced process in the volume (Viking's
 ``SectionCorrectionBuilder``): where a process's annotation on one section sits
 off the curve its neighbors above and below predict, the section is
 misregistered there.  The offsets (predicted - actual, volume nanometers) are
-pooled on a 2 um grid over an 8 um kernel and published where at least three
-annotations vote.
+pooled on a lattice (4 um apart in the sets built since 2026-10-25, 2 um
+before) over an 8 um kernel and published where at least three annotations
+vote.  Protocol V1 was retired on 2026-10-26 (service 1.4.0; every V1 call has
+answered ``UNIMPLEMENTED`` since about 15:13 UTC).
 
 Viking's own morphology export adds the sampled offset to each annotation's
 stored volume position, and only where the sample is trusted
@@ -89,17 +92,19 @@ log = logging.getLogger(__name__)
 #: 2026-09-22).  ``SBFSEM_CORRECTIONS_URL`` overrides it; an ``http://`` URL
 #: means cleartext HTTP/2.
 DEFAULT_TARGET = "https://corrections.codepharm.net"
-SERVICE = "Viking.SectionCorrectionServiceTypes.gRPC.V1.AnnotateSectionCorrections"
+SERVICE = "Viking.SectionCorrectionServiceTypes.gRPC.V2.AnnotateSectionCorrections"
 
 #: Points per ``CorrectPoints`` request.  Whole sections are never split, so a
 #: request may run over by one section's points.
 POINTS_PER_REQUEST = 20_000
 
-#: Viking's ``CorrectionMode``: what a correction applies.  ``neighbor`` is the
-#: published residual field; ``curvefit`` a leave-one-out Catmull-Rom fit along
-#: each traced process; ``all`` both, the field first -- what the service does
-#: when a request leaves the mode unset.  ``none`` maps and corrects nothing.
-CORRECTION_MODES: dict[str, int] = {"none": 0, "neighbor": 1, "curvefit": 2, "all": 3}
+#: Viking's ``CorrectionMode``, numbered as protocol V2 numbers it: what a
+#: correction applies.  ``neighbor`` is the published residual field;
+#: ``curvefit`` a leave-one-out Catmull-Rom fit along each traced process;
+#: ``all`` both, the field first.  ``all`` is 0, proto3's default, so a request
+#: that leaves the mode out asks for ``all``.  ``none`` maps and corrects
+#: nothing.  (V1 numbered them none 0, neighbor 1, curvefit 2, all 3.)
+CORRECTION_MODES: dict[str, int] = {"none": 1, "neighbor": 2, "curvefit": 3, "all": 0}
 
 
 def correction_mode(value) -> str:
@@ -181,18 +186,8 @@ _VARINT, _I64, _LEN, _I32 = 0, 1, 2, 5
 
 #: A message schema: field number -> (name, kind, repeated).  ``kind`` is one
 #: of ``string``, ``bool``, ``int32``, ``int64``, ``double``, or another schema
-#: for a nested message.  A trailing ``?`` (``"int32?"``) marks a proto3
-#: ``optional`` field: sent whenever it is set, even at its default, and read
-#: as ``None`` when absent (``CorrectionMode.NONE`` is 0, and an unset mode
-#: means something else).
+#: for a nested message.  An enum is an ``int32``.
 Schema = dict[int, tuple[str, Any, bool]]
-
-
-def _optional(kind) -> tuple[Any, bool]:
-    """``(kind without its ?, whether it was optional)``."""
-    if isinstance(kind, str) and kind.endswith("?"):
-        return kind[:-1], True
-    return kind, False
 
 _PACKABLE = ("bool", "int32", "int64", "double")
 
@@ -267,7 +262,6 @@ def encode(message: dict, schema: Schema) -> bytes:
     out = bytearray()
     for number in sorted(schema):
         name, kind, repeated = schema[number]
-        kind, present = _optional(kind)
         value = message.get(name)
         if value is None:
             continue
@@ -280,7 +274,7 @@ def encode(message: dict, schema: Schema) -> bytes:
                 out += _varint(number << 3 | _LEN) + _varint(len(body)) + body
                 continue
         else:
-            if not present and _is_default(kind, value):
+            if _is_default(kind, value):
                 continue
             values = [value]
         for item in values:
@@ -300,8 +294,7 @@ def encode(message: dict, schema: Schema) -> bytes:
 def _default(kind, repeated: bool):
     if repeated:
         return []
-    kind, optional = _optional(kind)
-    if isinstance(kind, dict) or optional:
+    if isinstance(kind, dict):
         return None
     return {"string": "", "bool": False, "double": 0.0}.get(kind, 0)
 
@@ -363,7 +356,6 @@ def decode(data: bytes, schema: Schema) -> dict:
         if entry is None:
             continue
         name, kind, repeated = entry
-        kind, _ = _optional(kind)
         if repeated and wire == _LEN and kind in _PACKABLE:
             message[name].extend(_unpack(kind, bytes(raw)))
         elif repeated:
@@ -373,52 +365,40 @@ def decode(data: bytes, schema: Schema) -> dict:
     return message
 
 
-# -- the service's messages (section_correction.proto) -----------------------
+# -- the service's messages (section_correction_v2.proto) --------------------
 _TIMESTAMP: Schema = {1: ("seconds", "int64", False), 2: ("nanos", "int32", False)}
+# viking.geometry.v1 (Common/geometry.proto)
+_VECTOR2: Schema = {1: ("x", "double", False), 2: ("y", "double", False)}
+_GRID_CELL: Schema = {1: ("row", "int32", False), 2: ("col", "int32", False)}
+
+_SET_ID: Schema = {1: ("volume_name", "string", False), 2: ("stos_group", "string", False)}
 _VOLUME_INFO: Schema = {
     1: ("volume_name", "string", False),
     2: ("vikingxml_endpoint", "string", False),
     3: ("annotation_endpoint", "string", False),
 }
-_RESIDUAL_WINDOW: Schema = {
-    1: ("min_both", "int32", False), 2: ("max_both", "int32", False),
-    3: ("min_one", "int32", False), 4: ("max_one", "int32", False),
-}
-_PROVENANCE: Schema = {
-    1: ("built_utc", _TIMESTAMP, False),
-    2: ("annotation_watermark", _TIMESTAMP, False),
+_CORRECTION_SET: Schema = {
+    1: ("id", _SET_ID, False),
+    2: ("built_utc", _TIMESTAMP, False),
     3: ("pitch_nm", "double", False),
     4: ("kernel_radius_nm", "double", False),
-    5: ("min_annotation_votes", "int32", False),
-    6: ("residual_window", _RESIDUAL_WINDOW, False),
+    5: ("z", "int64", True),  # the sections with a map, ascending
 }
-_SET_INFO: Schema = {
-    1: ("volume_name", "string", False),
-    2: ("stos_group", "string", False),
-    3: ("provenance", _PROVENANCE, False),
+# Node (row, col) sits at (col * pitch_nm, row * pitch_nm); fields 1 and 2
+# (gx, gy) are reserved.
+_LATTICE_NODE: Schema = {
+    3: ("offset", _VECTOR2, False),
+    4: ("votes", "int32", False),
+    5: ("node", _GRID_CELL, False),
 }
-_LATTICE_VECTOR: Schema = {
-    1: ("gx", "int32", False), 2: ("gy", "int32", False),
-    3: ("dx", "double", False), 4: ("dy", "double", False),
-    5: ("vote_count", "int32", False),
-}
-_VOLUME_XY: Schema = {1: ("x", "double", False), 2: ("y", "double", False)}
-_SECTION_POINTS: Schema = {1: ("z", "int64", False), 2: ("points", _VOLUME_XY, True)}
-_CORRECTED_XY: Schema = {
-    1: ("x", "double", False), 2: ("y", "double", False),
-    3: ("dx", "double", False), 4: ("dy", "double", False),
-    5: ("trusted", "bool", False),
-}
-_CORRECTED_SECTION: Schema = {
-    1: ("z", "int64", False),
-    2: ("found_section", "bool", False),
-    3: ("points", _CORRECTED_XY, True),
-}
+_SECTION_POINTS: Schema = {1: ("z", "int64", False), 2: ("points", _VECTOR2, True)}
+_POINT_OFFSET: Schema = {1: ("offset", _VECTOR2, False), 2: ("trusted", "bool", False)}
+_SECTION_OFFSETS: Schema = {1: ("found", "bool", False), 2: ("points", _POINT_OFFSET, True)}
 _CORRECTED_LOCATION: Schema = {
     1: ("location_id", "int64", False), 2: ("structure_id", "int64", False),
     3: ("z", "int64", False),
-    4: ("x", "double", False), 5: ("y", "double", False),
-    6: ("dx", "double", False), 7: ("dy", "double", False),
+    4: ("position", _VECTOR2, False),  # corrected, volume nm
+    5: ("offset", _VECTOR2, False),  # the correction alone
 }
 
 EMPTY_SCHEMA: Schema = {}
@@ -428,58 +408,50 @@ REBUILD_STATUS_SCHEMA: Schema = {
     2: ("last_started_utc", _TIMESTAMP, False),
     3: ("last_completed_utc", _TIMESTAMP, False),
     4: ("last_error", "string", False),
-    5: ("last_volumes", "string", True),
-    # Service 1.1.0 on; changes with an algorithm deploy that republishes no
-    # field (tags from [Viking-Server], #ai 1791401830.735369, 2026-10-07).
-    6: ("service_version", "string", False),
+    # Part of every AnswerStamp; moves with an algorithm deploy that
+    # republishes no field (#ai 1791401830.735369, 2026-10-07).
+    5: ("service_version", "string", False),
+    6: ("current_volume", "string", False),
+    7: ("current_step", "string", False),
+    8: ("groups_done", "int32", False),
+    9: ("groups_total", "int32", False),
 }
 LIST_SETS_REQUEST_SCHEMA: Schema = {1: ("volume_name", "string", False)}
-LIST_SETS_RESPONSE_SCHEMA: Schema = {1: ("sets", _SET_INFO, True)}
-VOLUME_GROUP_SCHEMA: Schema = {
-    1: ("volume_name", "string", False),
-    2: ("stos_group", "string", False),
-}
-LIST_SECTIONS_RESPONSE_SCHEMA: Schema = {**VOLUME_GROUP_SCHEMA, 3: ("z", "int64", True)}
-MANIFEST_SCHEMA: Schema = {
-    **VOLUME_GROUP_SCHEMA,
-    3: ("provenance", _PROVENANCE, False),
-    4: ("volume_url", "string", False),
-    5: ("z", "int64", True),
-}
-SECTION_REQUEST_SCHEMA: Schema = {**VOLUME_GROUP_SCHEMA, 3: ("z", "int64", False)}
+LIST_SETS_RESPONSE_SCHEMA: Schema = {1: ("sets", _CORRECTION_SET, True)}
+SECTION_REQUEST_SCHEMA: Schema = {1: ("set", _SET_ID, False), 2: ("z", "int64", False)}
 SECTION_CORRECTION_SCHEMA: Schema = {
-    **VOLUME_GROUP_SCHEMA,
-    3: ("z", "int64", False),
-    4: ("origin_x_nm", "double", False),
-    5: ("origin_y_nm", "double", False),
-    6: ("pitch_nm", "double", False),
-    7: ("nodes", _LATTICE_VECTOR, True),
+    1: ("pitch_nm", "double", False),
+    2: ("nodes", _LATTICE_NODE, True),
 }
 CORRECT_POINTS_REQUEST_SCHEMA: Schema = {
-    **VOLUME_GROUP_SCHEMA, 3: ("sections", _SECTION_POINTS, True),
-    # Unset: the residual field, all a loose point can have (no process to fit).
-    4: ("correction", "int32?", False),
+    1: ("set", _SET_ID, False), 2: ("sections", _SECTION_POINTS, True),
 }
-CORRECT_POINTS_RESPONSE_SCHEMA: Schema = {
-    **VOLUME_GROUP_SCHEMA, 3: ("sections", _CORRECTED_SECTION, True),
-}
-# Given by [Viking-Server] in Slack #ai on 2026-09-24 (thread 1790282139.403739),
-# before it reached the public proto repository.
+# One entry per request section, in request order; points in request order.
+CORRECT_POINTS_RESPONSE_SCHEMA: Schema = {1: ("sections", _SECTION_OFFSETS, True)}
 CORRECT_STRUCTURES_REQUEST_SCHEMA: Schema = {
-    **VOLUME_GROUP_SCHEMA,
-    3: ("structure_ids", "int64", True),
-    4: ("include_children", "bool", False),
-    5: ("correction", "int32?", False),
-    # 6: the curve fit's extent ratio, once [Viking-Server] deploys it (a
-    # neighbor more than this many times the node's XY extent is left out of
-    # the fit; Slack #ai 1792522897.715849, not assigned on 2026-10-20).  Then
-    # the ratio the Settings tab's Correction log is set to goes here too, and
+    1: ("set", _SET_ID, False),
+    2: ("structure_ids", "int64", True),
+    3: ("include_children", "bool", False),
+    4: ("correction", "int32", False),  # CORRECTION_MODES; 0 (unset) is all
+    # The curve fit's extent ratio, once [Viking-Server] adds it to the request
+    # (a neighbor more than this many times the node's XY extent is left out of
+    # the fit; Slack #ai 1792522897.715849, not in V2 on 2026-10-26).  Then the
+    # ratio the Settings tab's Correction log is set to goes here too, and
     # joins _structures_key; until then it sets only the log's own test
     # (sbfsem.analysis.correction_checks).
 }
+#: Everything a ``CorrectStructures`` answer depends on: two answers to the
+#: same request with equal stamps are identical.  Also what ``GetAnswerStamp``
+#: answers, without loading the volume or fitting.
+ANSWER_STAMP_SCHEMA: Schema = {
+    1: ("service_version", "string", False),
+    2: ("field_built_utc", _TIMESTAMP, False),
+    3: ("annotation_fingerprint", "string", False),
+    4: ("annotation_watermark", _TIMESTAMP, False),
+}
 CORRECT_STRUCTURES_RESPONSE_SCHEMA: Schema = {
-    **VOLUME_GROUP_SCHEMA, 3: ("locations", _CORRECTED_LOCATION, True),
-    4: ("service_version", "string", False),
+    1: ("locations", _CORRECTED_LOCATION, True),
+    2: ("stamp", ANSWER_STAMP_SCHEMA, False),
 }
 
 
@@ -494,27 +466,34 @@ def _timestamp(message: dict | None) -> datetime | None:
 # -- what the service describes ----------------------------------------------
 @dataclass(frozen=True)
 class CorrectionSet:
-    """One published StosGroup field of one volume, and how it was built."""
+    """One published StosGroup field of one volume, and how it was built.
+
+    ``sections`` (the sections with a map, ascending) is what
+    ``ListCorrectionSets`` says; it is not part of :meth:`describe`, so a cell's
+    status and the disk cache do not carry a thousand section numbers, and it
+    is left out of comparisons.  Protocol V1 also named the annotation
+    watermark the field was built from and the votes a lattice node needed;
+    V2 does not.
+    """
 
     volume_name: str
     stos_group: str
     built_utc: datetime | None = None
-    annotation_watermark: datetime | None = None
     pitch_nm: float = 0.0
     kernel_radius_nm: float = 0.0
-    min_annotation_votes: int = 0
+    sections: tuple[int, ...] = field(default=(), compare=False, repr=False)
 
     @classmethod
     def from_message(cls, message: dict, volume_name: str = "") -> CorrectionSet:
-        prov = message.get("provenance") or {}
+        """From a V2 ``CorrectionSet`` message."""
+        set_id = message.get("id") or {}
         return cls(
-            volume_name=message.get("volume_name") or volume_name,
-            stos_group=message.get("stos_group", ""),
-            built_utc=_timestamp(prov.get("built_utc")),
-            annotation_watermark=_timestamp(prov.get("annotation_watermark")),
-            pitch_nm=float(prov.get("pitch_nm") or 0.0),
-            kernel_radius_nm=float(prov.get("kernel_radius_nm") or 0.0),
-            min_annotation_votes=int(prov.get("min_annotation_votes") or 0),
+            volume_name=set_id.get("volume_name") or volume_name,
+            stos_group=set_id.get("stos_group", ""),
+            built_utc=_timestamp(message.get("built_utc")),
+            pitch_nm=float(message.get("pitch_nm") or 0.0),
+            kernel_radius_nm=float(message.get("kernel_radius_nm") or 0.0),
+            sections=tuple(int(z) for z in message.get("z") or ()),
         )
 
     @classmethod
@@ -526,10 +505,8 @@ class CorrectionSet:
             volume_name=d.get("volume_name", ""),
             stos_group=d.get("stos_group", ""),
             built_utc=when(d.get("built_utc")),
-            annotation_watermark=when(d.get("annotation_watermark")),
             pitch_nm=float(d.get("pitch_nm") or 0.0),
             kernel_radius_nm=float(d.get("kernel_radius_nm") or 0.0),
-            min_annotation_votes=int(d.get("min_annotation_votes") or 0),
         )
 
     def describe(self) -> dict:
@@ -537,11 +514,8 @@ class CorrectionSet:
             "volume_name": self.volume_name,
             "stos_group": self.stos_group,
             "built_utc": self.built_utc.isoformat() if self.built_utc else None,
-            "annotation_watermark": (
-                self.annotation_watermark.isoformat() if self.annotation_watermark else None),
             "pitch_nm": self.pitch_nm,
             "kernel_radius_nm": self.kernel_radius_nm,
-            "min_annotation_votes": self.min_annotation_votes,
         }
 
 
@@ -665,28 +639,36 @@ class CorrectionsClient:
         return status
 
     def correction_sets(self, volume_name: str = "") -> list[CorrectionSet]:
-        """Published sets of one volume; every volume's when ``volume_name`` is empty."""
+        """Published sets of one volume, with their sections; every volume's when
+        ``volume_name`` is empty."""
         answer = self.call("ListCorrectionSets", {"volume_name": volume_name},
                            LIST_SETS_REQUEST_SCHEMA, LIST_SETS_RESPONSE_SCHEMA)
         return [CorrectionSet.from_message(m, volume_name) for m in answer["sets"]]
 
     def corrected_sections(self, volume_name: str, stos_group: str) -> list[int]:
-        answer = self.call("ListCorrectedSections",
-                           {"volume_name": volume_name, "stos_group": stos_group},
-                           VOLUME_GROUP_SCHEMA, LIST_SECTIONS_RESPONSE_SCHEMA)
-        return [int(z) for z in answer["z"]]
+        """The sections of one set that have a map, ascending.
 
-    def manifest(self, volume_name: str, stos_group: str) -> dict:
-        answer = self.call("GetCorrectionManifest",
-                           {"volume_name": volume_name, "stos_group": stos_group},
-                           VOLUME_GROUP_SCHEMA, MANIFEST_SCHEMA)
-        answer["set"] = CorrectionSet.from_message(answer, volume_name)
-        return answer
+        From ``ListCorrectionSets``: V2 has no call of its own for it.  A set
+        that is not published is :class:`CorrectionNotFound`, as V1 answered.
+        """
+        cset = choose_set(self.correction_sets(volume_name), stos_group)
+        if cset is None:
+            error = CorrectionNotFound(
+                f"ListCorrectionSets at {self.url}: no set {volume_name} / {stos_group}")
+            error.code = "NOT_FOUND"
+            raise error
+        return list(cset.sections)
 
     def section(self, volume_name: str, stos_group: str, z: int) -> dict:
-        """The sparse lattice of one section: node ``(gx, gy)`` sits at ``(gx, gy) * pitch_nm``."""
+        """The sparse lattice of one section: ``pitch_nm`` and its ``nodes``.
+
+        A node's ``node`` ``{row, col}`` sits at ``(col, row) * pitch_nm``
+        volume nm; its ``offset`` ``{x, y}`` (nm) is added to a volume point,
+        and ``votes`` counts the annotations that support it.
+        """
         return self.call("GetSectionCorrection",
-                         {"volume_name": volume_name, "stos_group": stos_group, "z": int(z)},
+                         {"set": {"volume_name": volume_name, "stos_group": stos_group},
+                          "z": int(z)},
                          SECTION_REQUEST_SCHEMA, SECTION_CORRECTION_SCHEMA)
 
     def correct_points(self, volume_name: str, stos_group: str,
@@ -695,30 +677,45 @@ class CorrectionsClient:
 
         Returns ``{z: {"found": bool, "dx", "dy": (N,) nm, "trusted": (N,) bool}}``
         in the order the points were given.  The service refuses an empty
-        request, an empty section and a repeated Z, so none is ever sent.
+        request, an empty section and a repeated Z, so none is ever sent.  It
+        answers the sections in the order they were asked for, without their
+        Z, so an answer with another count of sections is an error.
         """
-        request = {
-            "volume_name": volume_name,
-            "stos_group": stos_group,
-            "sections": [
-                {"z": int(z), "points": [{"x": float(x), "y": float(y)} for x, y in pts]}
-                for z, pts in sections.items() if len(pts)
-            ],
-        }
-        if not request["sections"]:
+        sent = [(int(z), pts) for z, pts in sections.items() if len(pts)]
+        if not sent:
             return {}
+        request = {
+            "set": {"volume_name": volume_name, "stos_group": stos_group},
+            "sections": [{"z": z, "points": [{"x": float(x), "y": float(y)} for x, y in pts]}
+                         for z, pts in sent],
+        }
         answer = self.call("CorrectPoints", request,
                            CORRECT_POINTS_REQUEST_SCHEMA, CORRECT_POINTS_RESPONSE_SCHEMA)
+        got = answer["sections"]
+        if len(got) != len(sent):
+            raise CorrectionsError(
+                f"CorrectPoints answered {len(got)} sections; {len(sent)} were sent")
         out: dict[int, dict] = {}
-        for sec in answer["sections"]:
+        for (z, _), sec in zip(sent, got, strict=True):
             pts = sec["points"]
-            out[int(sec["z"])] = {
-                "found": bool(sec["found_section"]),
-                "dx": np.array([p["dx"] for p in pts], dtype=float),
-                "dy": np.array([p["dy"] for p in pts], dtype=float),
+            offsets = [p["offset"] or _ZERO for p in pts]
+            out[z] = {
+                "found": bool(sec["found"]),
+                "dx": np.array([o["x"] for o in offsets], dtype=float),
+                "dy": np.array([o["y"] for o in offsets], dtype=float),
                 "trusted": np.array([p["trusted"] for p in pts], dtype=bool),
             }
         return out
+
+    def _structures_request(self, volume_name: str, stos_group: str,
+                            structure_ids: Iterable[int], include_children: bool,
+                            mode: str) -> dict:
+        return {
+            "set": {"volume_name": volume_name, "stos_group": stos_group},
+            "structure_ids": [int(s) for s in structure_ids],
+            "include_children": bool(include_children),
+            "correction": CORRECTION_MODES[mode],
+        }
 
     def correct_structures(self, volume_name: str, stos_group: str, structure_ids: Iterable[int],
                            *, include_children: bool = True, mode: str = "all",
@@ -728,20 +725,52 @@ class CorrectionsClient:
         ``location_id``, ``structure_id``, ``z``; ``x``, ``y``: the corrected
         position, volume nm -- the Location's section X/Y mapped through
         ``stos_group``, then corrected; ``dx``, ``dy``: the correction alone.
-        ``mode`` is a :data:`CORRECTION_MODES` name, always sent (unset would
-        mean ``all``).
+        ``mode`` is a :data:`CORRECTION_MODES` name.  The answer's stamp
+        (:meth:`answer_stamp`'s, as the answer was made) is in ``attrs["stamp"]``.
         """
-        request = {
-            "volume_name": volume_name,
-            "stos_group": stos_group,
-            "structure_ids": [int(s) for s in structure_ids],
-            "include_children": bool(include_children),
-            "correction": CORRECTION_MODES[mode],
-        }
+        request = self._structures_request(volume_name, stos_group, structure_ids,
+                                           include_children, mode)
         answer = self.call("CorrectStructures", request, CORRECT_STRUCTURES_REQUEST_SCHEMA,
                            CORRECT_STRUCTURES_RESPONSE_SCHEMA, timeout=timeout)
-        return pd.DataFrame(answer["locations"],
-                            columns=[name for name, _, _ in _CORRECTED_LOCATION.values()])
+        rows = answer["locations"]
+        position = [r["position"] or _ZERO for r in rows]
+        offset = [r["offset"] or _ZERO for r in rows]
+        frame = pd.DataFrame({
+            "location_id": np.array([r["location_id"] for r in rows], dtype=np.int64),
+            "structure_id": np.array([r["structure_id"] for r in rows], dtype=np.int64),
+            "z": np.array([r["z"] for r in rows], dtype=np.int64),
+            "x": np.array([v["x"] for v in position], dtype=float),
+            "y": np.array([v["y"] for v in position], dtype=float),
+            "dx": np.array([v["x"] for v in offset], dtype=float),
+            "dy": np.array([v["y"] for v in offset], dtype=float),
+        })
+        frame.attrs["stamp"] = _answer_stamp(answer["stamp"])
+        return frame
+
+    def answer_stamp(self, volume_name: str, stos_group: str, structure_ids: Iterable[int],
+                     *, include_children: bool = True, mode: str = "all") -> dict:
+        """What ``CorrectStructures`` would stamp its answer to this request with
+        now, from the service's SQL aggregates and set catalog alone (well under
+        a second): ``service_version``, ``field_built_utc`` (``None`` when the
+        mode samples no field), ``annotation_fingerprint`` (compare by
+        equality) and ``annotation_watermark``."""
+        request = self._structures_request(volume_name, stos_group, structure_ids,
+                                           include_children, mode)
+        return _answer_stamp(self.call("GetAnswerStamp", request,
+                                       CORRECT_STRUCTURES_REQUEST_SCHEMA, ANSWER_STAMP_SCHEMA))
+
+
+_ZERO = {"x": 0.0, "y": 0.0}
+
+
+def _answer_stamp(message: dict | None) -> dict:
+    message = message or {}
+    return {
+        "service_version": message.get("service_version", ""),
+        "field_built_utc": _timestamp(message.get("field_built_utc")),
+        "annotation_fingerprint": message.get("annotation_fingerprint", ""),
+        "annotation_watermark": _timestamp(message.get("annotation_watermark")),
+    }
 
 
 # -- sampling and applying ---------------------------------------------------
@@ -937,7 +966,10 @@ def _structures_key(client: CorrectionsClient, cset: CorrectionSet, neuron, mode
     # v2: trusted by PLACEMENT_LIMIT_NM, not by empty X/Y columns.  v3: and by
     # the service's own stamp (service_stamp), not the set's build time alone.
     # v4: that stamp is the service version, which a restart does not move.
-    # The curve fit's extent ratio joins it once it is sent (request field 6).
+    # The curve fit's extent ratio joins it once the request carries it.  The
+    # move to protocol V2 (2026-10-26) needs no new key: V1 answers are kept
+    # under the older service versions that made them (1.4.0 answers V2
+    # alone), and the key names the mode, not its number.
     return (f"corrections:{client.url}/{cset.volume_name}/{cset.stos_group}@{built}"
             f"/structures-v4:{mode}@{service}/c{int(neuron.id)}/{stamp}/{len(neuron.nodes)}")
 
