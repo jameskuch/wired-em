@@ -92,12 +92,16 @@ other 4 within 0.31 µm).
 Locations the service does not answer for, and any it places more than
 `PLACEMENT_LIMIT_NM` (20 µm) from the cell's own position, are not moved. Until
 2026-09-24 23:19 UTC the service mapped lines and curves with empty X/Y columns
-from section (0, 0), about 200 µm away. Answers kept on disk are keyed on the
-set and on `service_stamp()`: the service's own `service_version` (1.1.0 on),
-which moves with an algorithm deploy even when no set was rebuilt (on
-2026-09-25 its answers changed that way), and which a restart does not move.
-Only a service that reports no version falls back to when it last finished a
-rebuild, which it does on every start.
+from section (0, 0), about 200 µm away. With a `cache`, an answer is kept on
+disk with the `AnswerStamp` it came with (the service version, the field's
+build time in a mode that samples the field, a fingerprint of the structures'
+annotations and their watermark). A later load of the same cell asks
+`GetAnswerStamp` instead of the fit (about 0.1 s against 6 s) and keeps the
+answer while the stamps are equal, which the service guarantees means an
+identical answer: an algorithm deploy, a rebuilt field (`all` only) and an
+annotation added, changed or deleted all move it, and a restart does not.
+While the service is paused, or when it cannot give the stamp, the kept answer
+is applied unchecked and the cell's status says why.
 `correction_mode()` reads a setting (`True` is `neighbor`, `False` is `off`),
 and `SbfsemService(section_corrections=...)` and the API take the same
 values.

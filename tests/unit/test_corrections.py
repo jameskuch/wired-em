@@ -198,6 +198,13 @@ class FakeService:
         self.rebuilt = 1790300000
         # GetRebuildStatus.service_version, empty before service 1.1.0.
         self.version = ""
+        # The published set's build time, and what the AnswerStamp of
+        # CorrectStructures and GetAnswerStamp fingerprints the structures'
+        # annotations as (a delete moves it); the (status, details) a
+        # GetAnswerStamp answers with while it cannot give one.
+        self.built = 1790067000
+        self.fingerprint = "f1"
+        self.stamp_error: tuple[str, str] | None = None
 
     def handler(self):
         import grpc
@@ -216,7 +223,7 @@ class FakeService:
             asked = request["volume_name"]
             return {"sets": [{
                 "id": {"volume_name": name, "stos_group": "Grid16"},
-                "built_utc": {"seconds": 1790067000}, "pitch_nm": 2000.0,
+                "built_utc": {"seconds": self.built}, "pitch_nm": 2000.0,
                 "kernel_radius_nm": 8000.0,
                 "z": sorted(z for z in self.field if z != "*"),
             } for name in self.volumes if asked in ("", name)]}
@@ -251,6 +258,16 @@ class FakeService:
                 out.append({"found": entry is not None, "points": points})
             return {"sections": out}
 
+        def stamp(request):
+            # What an answer to this request depends on: the field only in the
+            # modes that sample it (V2's AnswerStamp).
+            mode = {n: name for name, n in corr.CORRECTION_MODES.items()}[request["correction"]]
+            return {"service_version": self.version,
+                    "field_built_utc": ({"seconds": self.built}
+                                        if mode in ("neighbor", "all") else None),
+                    "annotation_fingerprint": self.fingerprint,
+                    "annotation_watermark": {"seconds": 1790000000}}
+
         def structures(request, context):
             self.structure_requests.append(request)
             volume_down(request, context)
@@ -271,7 +288,7 @@ class FakeService:
                     out.append({**{k: loc[k] for k in ("location_id", "structure_id", "z")},
                                 "position": {"x": loc["x"] + dx, "y": loc["y"] + dy},
                                 "offset": {"x": dx, "y": dy}})
-            return {"locations": out, "stamp": {"service_version": self.version}}
+            return {"locations": out, "stamp": stamp(request)}
 
         def rebuild_status(request, context):
             return {"in_progress": False, "last_completed_utc": {"seconds": self.rebuilt},
@@ -279,7 +296,9 @@ class FakeService:
 
         def answer_stamp(request, context):
             self.stamp_requests.append(request)
-            return {"service_version": self.version, "annotation_fingerprint": "f1"}
+            if self.stamp_error:
+                context.abort(getattr(grpc.StatusCode, self.stamp_error[0]), self.stamp_error[1])
+            return stamp(request)
 
         return grpc.method_handlers_generic_handler(corr.SERVICE, {
             "GetRebuildStatus": unary("GetRebuildStatus", corr.EMPTY_SCHEMA,
@@ -741,8 +760,8 @@ def test_structure_offsets_are_kept_per_mode(structures, tmp_path):
 
 
 def test_a_service_version_keys_the_cache_instead_of_restarts(structures, tmp_path):
-    """Service 1.1.0 names its version: a restart that changes nothing keeps
-    the cached answers, an algorithm deploy (a new version) drops them."""
+    """The answer stamp names the service version: a restart that changes
+    nothing keeps the cached answers, an algorithm deploy (a new version) drops them."""
     fake, url = structures
     fake.version = "1.1.0"
     provider = corr.CorrectionsProvider(url, cache=DiskCache(tmp_path), sets_ttl_s=0)
@@ -797,28 +816,111 @@ def test_an_answer_with_another_count_of_sections_is_refused(service, monkeypatc
                                   {936: np.array([[1.0, 2.0]]), 937: np.array([[3.0, 4.0]])})
 
 
-def test_a_restarted_service_is_asked_again_for_cached_structures(structures, tmp_path):
-    """On 2026-09-25 the service changed its answers with no set rebuilt: the
-    cache must follow the service's own stamp, not only the set's build time."""
+def test_the_answer_stamp_keeps_a_cached_answer_until_it_moves(structures, tmp_path):
+    """[Viking-Server]: equal AnswerStamps mean an identical answer.  A cell on
+    disk asks GetAnswerStamp, not the fit: an equal stamp keeps the answer, a
+    changed fingerprint (an annotation deleted, which the cell's own OData stamp
+    does not see) asks CorrectStructures again, and the new answer is kept."""
     fake, url = structures
     cache = DiskCache(tmp_path)
     provider = corr.CorrectionsProvider(url, cache=cache, sets_ttl_s=0)
     try:
-        provider.correct(make_structure_neuron(), "curvefit")
+        first = provider.correct(make_structure_neuron(), "curvefit")
+        assert not first.cached and fake.stamp_requests == []  # the answer came with its stamp
+        kept = provider.correct(make_structure_neuron(), "curvefit")
+        assert kept.cached and kept.token == first.token
+        assert len(fake.structure_requests) == 1 and len(fake.stamp_requests) == 1
+        fake.rebuilt += 3600  # a restart (it rebuilds on start) moves no stamp
+        assert provider.correct(make_structure_neuron(), "curvefit").cached
+        assert len(fake.structure_requests) == 1
+
+        fake.fingerprint = "f2"  # a Location of c9 deleted in Viking
+        fake.fit["curvefit"] = (100.0, -60.0)
+        neuron = make_structure_neuron()
+        assert neuron.data_stamp == make_structure_neuron().data_stamp
+        fresh = provider.correct(neuron, "curvefit")
+        assert not fresh.cached and fresh.token != first.token
+        assert len(fake.structure_requests) == 2
+        moved = neuron.nodes.set_index("ID").loc[1, ["CorrDXnm", "CorrDYnm"]].tolist()
+        assert moved == [100.0, -60.0]
         again = provider.correct(make_structure_neuron(), "curvefit")
-        assert again.cached and len(fake.structure_requests) == 1
-        fake.rebuilt += 3600  # redeployed: it rebuilt on start
-        fresh = provider.correct(make_structure_neuron(), "curvefit")
-        assert not fresh.cached and len(fake.structure_requests) == 2
+        assert again.cached and again.token == fresh.token
+        assert len(fake.structure_requests) == 2 and len(fake.stamp_requests) == 4
     finally:
         provider.close()
-    # Offline, the stamp remembered on disk still finds the offsets.
+    # Offline, the answer on disk is used without asking.
     offline = corr.CorrectionsProvider(url, cache=cache, offline=True)
     try:
-        kept = offline.correct(make_structure_neuron(), "curvefit")
-        assert kept.cached and len(fake.structure_requests) == 2
+        asked = len(fake.calls)
+        neuron = make_structure_neuron()
+        kept = offline.correct(neuron, "curvefit")
+        assert kept.cached and kept.token == fresh.token and len(fake.calls) == asked
+        assert neuron.section_correction["service_note"] == "offline"
     finally:
         offline.close()
+
+
+def test_a_rebuilt_field_asks_again_for_all_and_not_for_the_curve_fit(structures, tmp_path):
+    """The stamp names the field's build time only in a mode that samples the
+    field: while the set's build time was in the key (to 2.39.1), a rebuilt
+    field asked the curve fit again too."""
+    fake, url = structures
+    provider = corr.CorrectionsProvider(url, cache=DiskCache(tmp_path), sets_ttl_s=0)
+    try:
+        for mode in ("curvefit", "all"):
+            provider.correct(make_structure_neuron(), mode)
+        fake.built += 86400
+        assert provider.correct(make_structure_neuron(), "curvefit").cached
+        assert not provider.correct(make_structure_neuron(), "all").cached
+        assert provider.correct(make_structure_neuron(), "all").cached
+        assert [r["correction"] for r in fake.structure_requests] == [3, 0, 0]
+    finally:
+        provider.close()
+
+
+def test_a_stamp_the_service_cannot_give_leaves_the_answer_on_disk_applied(structures, tmp_path):
+    """While the service answers, a cell on disk is checked with GetAnswerStamp;
+    when that fails, the answer on disk is applied as during a pause, its status
+    says why, and the service or volume is paused or held as for the fit."""
+    fake, url = structures
+    provider = corr.CorrectionsProvider(url, cache=DiskCache(tmp_path), timeout=3.0,
+                                        retry_after_s=0.5, volume_retry_s=60)
+    try:
+        first = provider.correct(structure_neuron(9), "all")
+        # An exception in the service's handler: applied from disk, nothing held.
+        fake.stamp_error = ("UNKNOWN", "Exception was thrown by handler.")
+        neuron = structure_neuron(9)
+        kept = provider.correct(neuron, "all")
+        assert kept.cached and kept.token == first.token
+        assert neuron.section_correction["n_moved"] == 3
+        assert "GetAnswerStamp" in neuron.section_correction["service_note"]
+        assert not provider.paused_for("InferiorMonkey", "all", 9)
+        # It could not reach the volume's server: that volume is held, in both modes.
+        fake.stamp_error = MAPPING_DOWN
+        neuron = structure_neuron(9)
+        assert provider.correct(neuron, "all").cached
+        note = neuron.section_correction["service_note"]
+        assert "volume mapping temporarily unavailable for 'InferiorMonkey'" in note
+        assert "not asked again for InferiorMonkey until" in note
+        assert provider.paused_for("InferiorMonkey", "curvefit") and not provider.paused
+        stamps = len(fake.stamp_requests)
+        assert provider.correct(structure_neuron(9), "all").cached  # held: not asked
+        assert len(fake.stamp_requests) == stamps
+        # The hold over and the stamp equal again: checked, and kept.
+        fake.stamp_error = None
+        time.sleep(0.55)
+        neuron = structure_neuron(9)
+        assert provider.correct(neuron, "all").cached
+        assert "service_note" not in neuron.section_correction
+        assert len(fake.stamp_requests) == stamps + 1
+        # The service gone: paused for every volume, the answer on disk applied.
+        fake.server.stop(None)
+        neuron = structure_neuron(9)
+        assert provider.correct(neuron, "all").cached
+        assert provider.paused and neuron.section_correction["service_note"] == provider.last_error
+        assert len(fake.structure_requests) == 1
+    finally:
+        provider.close()
 
 
 def test_an_swc_names_the_mode(structures, tmp_path):
@@ -910,14 +1012,11 @@ def test_the_service_version_is_kept_with_a_curve_fit_correction(structures, tmp
         neuron = make_structure_neuron()
         provider.correct(neuron, "curvefit")
         assert neuron.section_correction["service_version"] == "1.2.0"
-        again = make_structure_neuron()       # answered from disk, keyed on the same version
+        again = make_structure_neuron()       # answered from disk, with the version that made it
         provider.correct(again, "curvefit")
         assert again.section_correction["cached"] and again.section_correction["service_version"] == "1.2.0"
     finally:
         provider.close()
-    assert corr.stamp_version("v1.2.0") == "1.2.0"
-    assert corr.stamp_version("2026-10-20T05:00:00+00:00") == ""
-    assert corr.stamp_version("unknown") == corr.stamp_version(None) == ""
 
 
 def test_a_lab_can_have_its_own_default_mode(web):

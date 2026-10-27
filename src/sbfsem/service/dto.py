@@ -83,8 +83,8 @@ class SectionCorrectionDTO(BaseModel):
     built_utc: datetime | None = None
     annotation_watermark: datetime | None = None
     service: str | None = None
-    #: The corrections service's version the answer was keyed on (``curvefit``
-    #: and ``all``; ``""`` when the service did not say).
+    #: The corrections service's version that made the answer (``curvefit``
+    #: and ``all``, from its ``AnswerStamp``; ``""`` when the service did not say).
     service_version: str | None = None
     cached: bool = False
     #: Annotations sampled (the cell's and its child structures'), sections

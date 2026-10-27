@@ -231,7 +231,7 @@ lab's volumes and `curvefit` for the others; off in a bare `SbfsemService`. A lo
 setting is loaded again with it. The summary's `section_correction` says
 whether it was asked for (`requested`), in which `mode`, whether it was
 `applied` and, if not, why (`note`), the set (`volume_name`, `stos_group`,
-`built_utc`), the corrections service's `service_version` the answer was keyed on
+`built_utc`), the corrections service's `service_version` that made the answer
 (`curvefit`, `all`; since 2.22.0), and what moved: `n_annotations`; `n_found`, on a published
 section (`neighbor`) or answered for by the service (`curvefit`, `all`);
 `n_trusted`, where the field has support (`neighbor`) or applied (not a line

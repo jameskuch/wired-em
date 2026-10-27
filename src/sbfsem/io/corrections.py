@@ -79,8 +79,6 @@ __all__ = [
     "sample_offsets",
     "fetch_offsets",
     "fetch_structure_offsets",
-    "service_stamp",
-    "stamp_version",
     "apply_offsets",
     "correct_neuron",
     "CorrectionsProvider",
@@ -834,6 +832,10 @@ class CellCorrection:
     source_url: str = ""
     cached: bool = False
     extras: dict = field(default_factory=dict)
+    #: Why an answer kept on disk was used without checking it against the
+    #: service's ``GetAnswerStamp``: the call's error; ``None`` when it was
+    #: checked, fetched, or not to be asked (:func:`fetch_structure_offsets`).
+    stamp_error: CorrectionsError | None = field(default=None, repr=False)
 
     @property
     def applied(self) -> pd.DataFrame:
@@ -959,59 +961,33 @@ def fetch_offsets(neuron, client: CorrectionsClient, cset: CorrectionSet, *,
 PLACEMENT_LIMIT_NM = 20_000.0
 
 
-def _structures_key(client: CorrectionsClient, cset: CorrectionSet, neuron, mode: str,
-                    service: str) -> str:
+def _structures_key(client: CorrectionsClient, cset: CorrectionSet, neuron, mode: str) -> str:
     stamp = neuron.data_stamp.isoformat() if getattr(neuron, "data_stamp", None) else "unstamped"
-    built = cset.built_utc.isoformat() if cset.built_utc else "unbuilt"
     # v2: trusted by PLACEMENT_LIMIT_NM, not by empty X/Y columns.  v3: and by
-    # the service's own stamp (service_stamp), not the set's build time alone.
-    # v4: that stamp is the service version, which a restart does not move.
-    # The curve fit's extent ratio joins it once the request carries it.  The
-    # move to protocol V2 (2026-10-26) needs no new key: V1 answers are kept
-    # under the older service versions that made them (1.4.0 answers V2
-    # alone), and the key names the mode, not its number.
-    return (f"corrections:{client.url}/{cset.volume_name}/{cset.stos_group}@{built}"
-            f"/structures-v4:{mode}@{service}/c{int(neuron.id)}/{stamp}/{len(neuron.nodes)}")
+    # the service's own stamp, not the set's build time alone.  v4: that stamp
+    # is the service version, which a restart does not move.  v5: the answer is
+    # kept with the AnswerStamp it came with and checked against GetAnswerStamp
+    # (_stamp_record), so the key names neither the set's build time nor the
+    # service version.  The curve fit's extent ratio joins it once the request
+    # carries it.
+    return (f"corrections:{client.url}/{cset.volume_name}/{cset.stos_group}"
+            f"/structures-v5:{mode}/c{int(neuron.id)}/{stamp}/{len(neuron.nodes)}")
 
 
-def service_stamp(client: CorrectionsClient) -> str:
-    """What changes when ``CorrectStructures`` may answer differently.
+def _stamp_record(stamp: dict | None) -> dict | None:
+    """An ``AnswerStamp`` as it is kept on disk and compared, times as ISO text.
 
-    The service's ``service_version`` (1.1.0 on), which moves with an
-    algorithm deploy that republishes no field: on 2026-09-25 05:56 UTC its
-    base moved to the stored positions while every set kept its
-    ``built_utc``.  An older service without one falls back to when it last
-    finished a rebuild, which it does on every start, so every restart
-    refetched every cell.  ``""`` if it cannot say.  A cached answer is keyed
-    on it.
+    ``None`` for a stamp without an annotation fingerprint: it vouches for no
+    answer, so an answer kept with it is asked for again.
     """
-    try:
-        status = client.rebuild_status()
-    except CorrectionsUnavailable:
-        raise
-    except CorrectionsError:
-        return ""
-    version = status.get("service_version")
-    if version:
-        return f"v{version}"
-    done = status.get("last_completed_utc")
-    return done.isoformat() if done else ""
-
-
-def stamp_version(stamp: str | None) -> str:
-    """The service version a :func:`service_stamp` names (``"v1.2.0"`` -> ``"1.2.0"``).
-
-    ``""`` for a stamp that is a rebuild time (a service older than 1.1.0) or
-    nothing (``""``, ``"unknown"``).
-    """
-    text = str(stamp or "")
-    return text[1:] if text[:1] == "v" and text[1:2].isdigit() else ""
+    if not stamp or not stamp.get("annotation_fingerprint"):
+        return None
+    return {k: v.isoformat() if isinstance(v, datetime) else v for k, v in stamp.items()}
 
 
 def fetch_structure_offsets(neuron, client: CorrectionsClient, cset: CorrectionSet,
                             mode: str = "curvefit", *, cache=None, allow_fetch: bool = True,
-                            timeout: float | None = None,
-                            service: str = "unknown") -> CellCorrection:
+                            timeout: float | None = None) -> CellCorrection:
     """``CorrectStructures`` for ``neuron`` and its child structures, as offsets.
 
     The correction alone (``dx``/``dy``) is what moves an annotation, from
@@ -1019,19 +995,46 @@ def fetch_structure_offsets(neuron, client: CorrectionsClient, cset: CorrectionS
     through ``cset``'s StosGroup is the live registration's.  Not trusted, so
     not moved: a Location the service did not return, and one it placed more
     than :data:`PLACEMENT_LIMIT_NM` from where this cell has it (the live
-    registration's position, else the stored one).  With a ``cache``, a cell
-    whose annotations, set and ``service`` stamp (:func:`service_stamp`) are
-    unchanged is answered from disk; ``allow_fetch=False`` answers only from there.
+    registration's position, else the stored one).
+
+    With a ``cache``, the answer is kept on disk with the ``AnswerStamp`` it
+    came with, and a later load of the same annotations asks
+    ``GetAnswerStamp`` (:meth:`CorrectionsClient.answer_stamp`: about 0.1 s,
+    against 6 s for RC1 c410's fit) instead of the fit.  Equal stamps mean an
+    identical answer ([Viking-Server]), so the kept one is used; a stamp that
+    moved -- a new service version, a rebuilt field (``all``), an annotation
+    of the structures added, changed or deleted -- asks ``CorrectStructures``
+    again.
+    ``allow_fetch=False`` uses the kept answer without asking, and so does a
+    stamp the service cannot give, with the error in ``stamp_error`` and
+    ``extras["service_note"]``.
     """
     nodes = neuron.nodes
-    key = _structures_key(client, cset, neuron, mode, service or "unknown")
-    # The version the answer is keyed on, for the cell's status and the correction log.
-    extras = {"mode": mode, "service_version": stamp_version(service)}
-    cached = cache.get(key) if cache is not None else None
-    if cached is not None and len(cached.get("ID", [])) == len(nodes):
-        return CellCorrection(cset, pd.DataFrame(cached), client.url, cached=True,
-                              extras=extras)
-    if not allow_fetch:
+    key = _structures_key(client, cset, neuron, mode)
+    kept = (cache.get(key) if cache is not None else None) or {}
+    if len(kept.get("offsets", {}).get("ID", [])) == len(nodes):
+        made = kept.get("stamp")
+        # The service version that made the answer, for the cell's status and the correction log.
+        stored = CellCorrection(
+            cset, pd.DataFrame(kept["offsets"]), client.url, cached=True,
+            extras={"mode": mode, "service_version": (made or {}).get("service_version", "")})
+        if not allow_fetch:
+            return stored
+        if made is not None:
+            try:
+                now = _stamp_record(client.answer_stamp(
+                    cset.volume_name, cset.stos_group, [int(neuron.id)],
+                    include_children=True, mode=mode))
+            except CorrectionsError as exc:
+                stored.stamp_error = exc
+                stored.extras["service_note"] = str(exc)
+                return stored
+            if now == made:
+                return stored
+            moved = sorted(k for k in made if (now or {}).get(k) != made[k])
+            log.info("c%s %s: the %s answer's stamp moved (%s); asked again",
+                     neuron.id, cset.volume_name, mode, ", ".join(moved))
+    elif not allow_fetch:
         raise CorrectionsUnavailable(
             f"c{neuron.id}: no {mode} offsets on disk for {cset.volume_name} {cset.stos_group}")
     answer = client.correct_structures(cset.volume_name, cset.stos_group, [int(neuron.id)],
@@ -1058,9 +1061,12 @@ def fetch_structure_offsets(neuron, client: CorrectionsClient, cset: CorrectionS
         "trusted": found & near,
         "found": found,
     })
+    made = answer.attrs.get("stamp") or {}
     if cache is not None:
-        cache.set(key, {c: offsets[c].tolist() for c in offsets.columns})
-    return CellCorrection(cset, offsets, client.url, extras=extras)
+        cache.set(key, {"stamp": _stamp_record(made),
+                        "offsets": {c: offsets[c].tolist() for c in offsets.columns}})
+    return CellCorrection(cset, offsets, client.url,
+                          extras={"mode": mode, "service_version": made.get("service_version", "")})
 
 
 def correct_neuron(neuron, client: CorrectionsClient | None = None, *,
@@ -1093,9 +1099,7 @@ def correct_neuron(neuron, client: CorrectionsClient | None = None, *,
             correction = fetch_offsets(neuron, client, cset, cache=cache)
             correction.extras["mode"] = mode
         else:
-            service = service_stamp(client) if cache is not None else "unknown"
-            correction = fetch_structure_offsets(neuron, client, cset, mode, cache=cache,
-                                                 service=service)
+            correction = fetch_structure_offsets(neuron, client, cset, mode, cache=cache)
     finally:
         if own:
             client.close()
@@ -1109,7 +1113,11 @@ class CorrectionsProvider:
     The published sets of each volume are asked for at most every
     ``sets_ttl_s`` and remembered on disk; after the service fails, it is not
     asked again for ``retry_after_s``, and meanwhile a cell whose offsets are
-    on disk is still corrected (its status says so).  When the service answers
+    on disk is still corrected (its status says so).  A ``CorrectStructures``
+    answer on disk is checked with ``GetAnswerStamp`` while the service is
+    asked (:func:`fetch_structure_offsets`); a stamp it cannot give leaves the
+    kept answer applied, with the error in its status, and is paused or held
+    by the rules below as any other call is.  When the service answers
     that one volume is unavailable (:func:`names_volume`: it could not reach
     that volume's server), only that volume is held so, in the modes the same
     call answers (:data:`SAME_CALL`); on 2026-10-20 Cped's and Inferior's
@@ -1145,8 +1153,6 @@ class CorrectionsProvider:
         self.volume_after = volume_after
         self.offline = offline
         self._sets: dict[str, tuple[float, list[CorrectionSet]]] = {}
-        # (monotonic time asked, service_stamp); asked as often as the sets
-        self._service: tuple[float, str] | None = None
         self._down_until = 0.0
         # (volume, mode) -> (monotonic time it may be asked again, the error)
         self._held: dict[tuple[str, str], tuple[float, str]] = {}
@@ -1280,39 +1286,30 @@ class CorrectionsProvider:
                 else self.last_error or f"{self.client.url} is not answering")
         return remembered, False
 
-    def _service_key(self) -> str:
-        return f"corrections:{self.client.url}/service-stamp"
-
-    def service_stamp(self) -> str:
-        """:func:`service_stamp`, asked at most every ``sets_ttl_s`` and
-        remembered on disk, so offsets cached under it are found while the
-        service is down; ``"unknown"`` with nothing to go on."""
-        now = time.monotonic()
-        with self._lock:
-            held = self._service
-        if held is not None and now - held[0] < self.sets_ttl_s:
-            return held[1]
-        stamp = ""
-        if not self.paused:
-            try:
-                stamp = service_stamp(self.client)
-            except CorrectionsUnavailable as exc:
+    def _unchecked(self, volume_name: str, cset: CorrectionSet, mode: str,
+                   correction: CellCorrection, structure: int) -> None:
+        """A kept answer is applied because ``GetAnswerStamp`` failed: pause the
+        service or hold the volume as for any unavailable call, and say why in
+        the cell's status.  Another error is not held: the next load asks again."""
+        exc = correction.stamp_error
+        if isinstance(exc, CorrectionsUnavailable):
+            if names_volume(exc, volume_name, cset.volume_name):
+                self._unavailable(volume_name, mode, exc)
+            else:
                 self._failed(exc)
-        if stamp:
-            with self._lock:
-                self._service = (now, stamp)
-            if self.cache is not None:
-                self.cache.set(self._service_key(), stamp)
-            return stamp
-        remembered = self.cache.get(self._service_key()) if self.cache is not None else None
-        return remembered or (held[1] if held is not None else "unknown")
+        else:
+            log.warning("section correction (%s) of c%s of %s: the answer on disk was not "
+                        "checked: %s", mode, structure, volume_name, exc)
+        correction.extras["service_note"] = self.held(volume_name, mode, structure) or str(exc)
 
     def correct(self, neuron, mode: str = "neighbor") -> CellCorrection | None:
         """Apply Viking's correction to ``neuron`` in ``mode`` (see :func:`correct_neuron`).
 
         ``None`` when its volume has no published set.  While the service is
         paused, or the volume or this structure is held after a failure in the
-        service, only offsets on disk are used.
+        service, only offsets on disk are used, and so they are when the
+        service cannot say whether a ``CorrectStructures`` answer on disk is
+        still its answer.
         """
         volume_name = neuron.volume.viking_name
         if not volume_name:
@@ -1333,8 +1330,9 @@ class CorrectionsProvider:
             else:
                 correction = fetch_structure_offsets(
                     neuron, self.client, cset, mode, cache=self.cache,
-                    allow_fetch=fresh and not held, timeout=self.structures_timeout,
-                    service=self.service_stamp())
+                    allow_fetch=fresh and not held, timeout=self.structures_timeout)
+                if correction.stamp_error is not None:
+                    self._unchecked(volume_name, cset, mode, correction, structure)
         except CorrectionsUnavailable as exc:
             if held:
                 raise CorrectionsError(held) from exc

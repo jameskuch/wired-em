@@ -142,10 +142,11 @@ volumes, which take `SBFSEM_SECTION_CORRECTIONS_NEITZ` (`all`, the field then
 the fit, since 2026-10-20, the user's decision); `neighbor` (the residual field;
 `1` means this, and it was the default on 2026-09-22 until it measured worse
 on 2026-09-23), `all`, or `off`. A `CorrectStructures` call takes 5-10 s for
-a cell of 1,700 annotations and is kept on disk until the service's version
-moves (the `service_version` its `GetRebuildStatus` reports is part of the
-key; a restart does not move it, and only a service that reports none falls
-back to its last rebuild's completion time, which every restart refreshes). An exception
+a cell of 1,700 annotations and is kept on disk with the service's
+`AnswerStamp`; each later load of the cell asks `GetAnswerStamp` (about 0.1 s)
+and asks the fit again only when the stamp moved: a new service version, a
+rebuilt field (`all`), or an annotation of the cell added, changed or deleted.
+A restart does not move it. An exception
 inside the service on one cell's request (gRPC `UNKNOWN`, `INTERNAL` or
 `INVALID_ARGUMENT`) holds that cell and mode for ten minutes, and the whole
 volume and mode once two different cells of it fail so in a row (RC1 threw
