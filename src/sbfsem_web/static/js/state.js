@@ -57,10 +57,14 @@ export const DEFAULT_DISPLAY = Object.freeze({
   discThrough: true,
   // Ring stroke width in microns.
   discStroke: 0.1,
-  // Ring depth along Z in microns. Zero is the flat ribbon in the section
-  // plane (invisible edge-on); the section thickness makes each annotation the
-  // slab of tissue it was drawn on.
+  // Ring depth along Z in microns.  Never less than one pixel on the screen, so
+  // edge-on an annotation stays a hairline at any zoom: zero is that pixel alone
+  // (since 2026-10-27; before, zero was the flat ribbon, which vanishes edge-on,
+  // and a saved zero now takes the pixel).  The section thickness makes each
+  // annotation the slab of tissue it was drawn on.
   discDepth: 0,
+  // The plain ribbon in the section plane, with no least height (Depth's "flat").
+  discFlat: false,
   // The annotations as a wireframe: each one a ring in its section plane,
   // strung along Viking's links, every ring averaged over a Z window of
   // `annoWireGain` times its own radius -- microns in a soma, a section or two
@@ -207,6 +211,7 @@ export function displayNeedsRefetch(before, after) {
   if (b.showAnnoWire && ANNO_WIRE_KEYS.some((k) => a[k] !== b[k])) return true;
   if (a.discStroke !== b.discStroke) return true;
   if (a.discDepth !== b.discDepth) return true;
+  if (a.discFlat !== b.discFlat) return true;
   if (SKELETON_GEOMETRY_KEYS.some((k) => a[k] !== b[k])) return true;
   if (typeGeometrySignature(a) !== typeGeometrySignature(b)) return true;
   return SERVER_DISPLAY_KEYS.some((k) => a[k] !== b[k]);

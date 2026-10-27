@@ -178,6 +178,11 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   Export → OBJ asks for ``ipl_flatten=true`` and its ``ipl_method`` and names the file ``-ipl-flat-<µm>um.obj``
   (``api.download`` caught: nothing is fetched or saved); unticked, every Z comes back to the bit and the rings with
   them; opening GraphApp turns it off; a reload starts it unticked, before and after Restore; in Cped the box is greyed.
+* ``annodepth`` -- annotations seen edge-on in Orthographic view stay in view by default (2026-10-27), on a dark
+  and a light page: with Show annotations ticked, the page's Orthographic box and XZ1 button, the rings and
+  outlines add pixels to the picture (each surface hidden for the count) from the least height; "one pixel" is
+  the Depth set; "flat" adds none and says flat; "one pixel" puts it back; a Render compare pane's annotations
+  are drawn edge-on too.  ``--shots DIR`` writes the 3D view at 0.012 µm a pixel, rings yellow, default and flat.
 """
 
 # ruff: noqa: UP031
@@ -3326,6 +3331,126 @@ def typed(c: Chrome, location_id: int, seconds: float = 30) -> bool:
                       % location_id, seconds)
 
 
+# -- annodepth ---------------------------------------------------------------------
+
+#: The pixels the annotations of `key` add to a renderer's picture: drawn with them and
+#: without (each cell's surface hidden for it), compared; and whether the layer has the least
+#: height on the screen (render3d.js `ringLift`).
+RING_PIXELS = r"""((r, key) => {
+  const o = r.discs.get(key); if (!o) return null;
+  const solids = [...r.meshes.values()].filter((m) => m.visible);
+  for (const m of solids) m.visible = false;
+  r.controls.update(); r._syncPlanes();
+  const gl = r.webgl.getContext(); const W = gl.drawingBufferWidth; const H = gl.drawingBufferHeight;
+  const grab = () => { r.webgl.render(r.scene, r.camera); const px = new Uint8Array(W * H * 4);
+    gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px); return px; };
+  const shown = grab(); o.visible = false; const bare = grab(); o.visible = true;
+  for (const m of solids) m.visible = true;
+  let pixels = 0; const rows = new Set();
+  for (let i = 0; i < W * H; i += 1) {
+    const k = i * 4;
+    if (Math.abs(shown[k] - bare[k]) + Math.abs(shown[k + 1] - bare[k + 1]) + Math.abs(shown[k + 2] - bare[k + 2]) > 30) {
+      pixels += 1; rows.add(Math.floor(i / W));
+    }
+  }
+  return { pixels, rows: rows.size, lifted: !!o.userData.lift,
+           umpp: +((r.camera.top - r.camera.bottom) / r.camera.zoom / r.container.clientHeight).toFixed(4) };
+})"""
+
+#: The Annotations section's Depth buttons: [label, disabled].
+DEPTH_BUTTONS = """[...document.querySelectorAll('.cell-panel .editor-row button')]
+  .filter((b) => /^(one pixel|flat|one section)/.test(b.textContent)).map((b) => [b.textContent, b.disabled])"""
+
+
+def _shoot(c: Chrome, folder: Path, name: str) -> None:
+    """The 3D view's canvas as it is, into `folder`."""
+    folder.mkdir(parents=True, exist_ok=True)
+    box = js(c, """(() => { const b = window.sbfsem.renderer.webgl.domElement.getBoundingClientRect();
+        return { x: b.left, y: b.top, width: b.width, height: b.height, scale: 1 }; })()""")
+    (folder / name).write_bytes(c.shot(clip=box))
+
+
+def _depth_button(c: Chrome, label: str) -> None:
+    _click_js(c, """[...document.querySelectorAll('.cell-panel .editor-row button')]
+        .find((b) => b.textContent.startsWith(%s))""" % json.dumps(label))
+
+
+def annodepth(c: Chrome, r: Report, ctx):
+    """Annotations seen edge-on in Orthographic view stay in view by default, a pixel tall (2026-10-27)."""
+    for scheme in ('dark', 'light'):
+        r.start(f'annodepth ({scheme} page): annotations edge-on in Orthographic view, by default')
+        boot(c, ctx.url)
+        c.scheme(scheme)
+        _dismiss_offer(c)
+        key = load(c, ctx.cell)
+        k = json.dumps(key)
+        js(c, "document.querySelector(%s).click(); true" % json.dumps(f'.neuron-item[data-key="{key}"] .chev'))
+        c.wait_for("!!document.querySelector('.cell-panel')", 10)
+        js(c, """(() => { document.querySelectorAll('.cell-panel .section-head[aria-expanded="false"]')
+            .forEach((e) => e.click());
+          const box = [...document.querySelectorAll('.cell-panel label.check')]
+            .find((l) => l.textContent.trim() === 'Show annotations')?.querySelector('input');
+          if (box && !box.checked) box.click(); return true; })()""")
+        c.wait_for(f'window.sbfsem.renderer.discs.has({k})', 60)
+        c.wait_for("!!document.querySelector('.cell-panel .editor-row button')", 10)
+        js(c, """(() => { const o = document.getElementById('ortho'); if (!o.checked) o.click();
+            document.querySelector('[data-viewpoint="xz1"]').click(); return true; })()""")
+        c.settle(2)
+        at = f'window.sbfsem.renderer, {k}'
+        least = js(c, f'{RING_PIXELS}({at})')
+        buttons = js(c, DEPTH_BUTTONS)
+        summary = js(c, """[...document.querySelectorAll('.cell-panel .cell-section')]
+            .find((s) => s.querySelector('.sec-name')?.textContent === 'Annotations')
+            ?.querySelector('.sec-summary')?.textContent""")
+        r.check('the Display default: the annotations edge-on (Orthographic, XZ1) are drawn, from the least height',
+                least and least['lifted'] and least['pixels'] > 0, least)
+        r.check('"one pixel" is the Depth set (its button is greyed), "flat" and "one section" are offered, '
+                'and the summary names no depth',
+                buttons[:2] == [['one pixel', True], ['flat', False]] and len(buttons) == 3 and not buttons[2][1]
+                and summary and 'flat' not in summary and 'deep' not in summary, {'buttons': buttons, 'summary': summary})
+        if ctx.shots and least:
+            # Yellow rings on the blue surface, close in: one hairline a section.
+            js(c, """(() => { const pick = [...document.querySelectorAll('.cell-panel .cell-section')]
+                .find((s) => s.querySelector('.sec-name')?.textContent === 'Annotations')
+                ?.querySelector('input[type=color]');
+              pick.value = '#ffd400'; pick.dispatchEvent(new Event('input', { bubbles: true })); return true; })()""")
+            js(c, "window.sbfsem.renderer.setOrthoUmPerPixel(0.012)")
+            c.settle(2)
+            _shoot(c, Path(ctx.shots), f'annodepth-{scheme}-xz1-default.png')
+
+        _depth_button(c, 'flat')
+        c.wait_for(f'!window.sbfsem.renderer.discs.get({k})?.userData.lift', 20)
+        c.settle(1)
+        flat = js(c, f'{RING_PIXELS}({at})')
+        flagged = js(c, f'{STATE}.neurons.get({k}).display.discFlat')
+        r.check('"flat" draws the ribbon with no height: edge-on it adds no pixel, and the display says flat',
+                flat and not flat['lifted'] and flat['pixels'] == 0 and flagged is True, {'flat': flat, 'discFlat': flagged})
+        if ctx.shots:
+            _shoot(c, Path(ctx.shots), f'annodepth-{scheme}-xz1-flat.png')
+        _depth_button(c, 'one pixel')
+        c.wait_for(f'!!window.sbfsem.renderer.discs.get({k})?.userData.lift', 20)
+        c.settle(1)
+        back = js(c, f'{RING_PIXELS}({at})')
+        r.check('"one pixel" puts the least height back', back and back['lifted'] and back['pixels'] > 0, back)
+
+        if scheme != 'dark':
+            continue
+        # Render compare's panes draw the annotations with their own renderers.
+        # Render compare's panes draw the annotations with their own renderers, once Compare names the cell.
+        _compare_tab(c, 2)
+        js(c, f"(() => {{ const v = {COMPARE}; v.setAnnotations(v.panes[0], true); return true; }})()")
+        _click_js(c, "document.getElementById('compare-build')")
+        drawn = c.wait_for(f"{COMPARE}.panes[0].renderer.discs.has('A')", 120)
+        pane = None
+        if drawn:
+            js(c, f"""(() => {{ const p = {COMPARE}.panes[0].renderer; p.setOrthographic(true);
+                p.setViewpoint('xz1'); return true; }})()""")
+            c.settle(2)
+            pane = js(c, f"{RING_PIXELS}({COMPARE}.panes[0].renderer, 'A')")
+        r.check('a Render compare pane\'s annotations edge-on are drawn, from the least height',
+                bool(pane and pane['lifted'] and pane['pixels'] > 0), pane)
+
+
 def locate(c: Chrome, r: Report, ctx):
     r.start('locate: /open?location= and a typed Location ID select the annotation')
     boot(c, ctx.url)
@@ -5029,6 +5154,7 @@ SECTIONS = {
     'pivot': pivot,
     'comparecube': comparecube,
     'comparepivot': comparepivot,
+    'annodepth': annodepth,
     'comparereport': comparereport,
 }
 
@@ -5047,6 +5173,7 @@ def main() -> int:
                         help='a large traced cell of --big-source, too big for a fine Voxel size')
     parser.add_argument('--big-source', default='RPC1')
     parser.add_argument('--only', help='comma list of: ' + ', '.join(SECTIONS))
+    parser.add_argument('--shots', help='annodepth: write its pictures (the 3D view) into this folder')
     parser.add_argument('-v', '--verbose', action='store_true')
     args = parser.parse_args()
     wanted = [s for s in SECTIONS if s in set((args.only or ','.join(SECTIONS)).split(','))]

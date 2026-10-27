@@ -121,6 +121,93 @@ const VIEW_DEPTH_VERTICES = 20000;
  */
 const MAX_DRAW_INDICES = 12_000_000;
 
+/**
+ * The least height of an annotation on the screen, in CSS pixels (`ringLift`):
+ * seen edge-on, a ring or traced outline is at least this tall at any zoom.
+ */
+const RING_LEAST_PX = 1;
+
+/**
+ * The annotation layer's vertex shader, after `begin_vertex`: each vertex moved
+ * along the section axis (local Z) so that the layer is never less than
+ * `liftPixels` device pixels tall on the screen (asked for 2026-10-27: "add some
+ * thickness by default so that when in orthographic view annotations do not
+ * disappear. make it the smallest thickness possible").  `ringEdge` is the vertex's
+ * own way out of its sample in the section plane (+n on one edge of the ribbon, -n
+ * on the other) and, on a band, +1 on its top and -1 on its bottom.
+ *
+ * A band is opened to `least` either side of the plane where its own half depth
+ * (`liftHalf`) is less.  A ribbon's two edges go `least` apart along Z, each the way
+ * that adds to the ribbon's own width on the screen, never the way that takes from
+ * it: the edge nearer the viewer goes down when the camera is above the plane, up
+ * when it is below.  Lifting one edge up and the other down whatever the view
+ * cancelled the ribbon's width at one slant, where half of every ring vanished.
+ * Edge-on the ribbon is then `least` tall; face-on the move is along the view and
+ * changes nothing; between, its screen width is never less than the smaller of one
+ * pixel and its width face-on.  Half a pixel is a hair at any zoom, so the ring is
+ * still drawn in its section plane, not as a slab.
+ */
+const RING_LIFT_HEAD = `
+attribute vec3 ringEdge;
+uniform float liftViewport;
+uniform float liftPixels;
+uniform float liftHalf;`;
+const RING_LIFT_BODY = `
+{
+  vec3 sectionAxis = ( modelViewMatrix * vec4( 0.0, 0.0, 1.0, 0.0 ) ).xyz;
+  vec4 here = modelViewMatrix * vec4( transformed, 1.0 );
+  bool perspective = isPerspectiveMatrix( projectionMatrix );
+  // One device pixel, in view-space units, at this vertex's depth.
+  float pixel = 2.0 * ( perspective ? max( - here.z, 0.0 ) : 1.0 )
+    / ( projectionMatrix[ 1 ][ 1 ] * liftViewport );
+  float least = 0.5 * liftPixels * pixel / max( length( sectionAxis ), 1e-20 );
+  float lift;
+  if ( ringEdge.z != 0.0 ) {
+    lift = sign( ringEdge.z ) * max( 0.0, least - liftHalf );
+  } else {
+    vec3 view = perspective ? normalize( here.xyz ) : vec3( 0.0, 0.0, - 1.0 );
+    float outward = dot( ( modelViewMatrix * vec4( ringEdge.xy, 0.0, 0.0 ) ).xyz, view );
+    float side = outward * ( dot( sectionAxis, view ) < 0.0 ? - 1.0 : 1.0 );
+    lift = side > 0.0 ? - least : least;
+  }
+  transformed.z += lift;
+}`;
+
+/**
+ * Give an annotation layer's material the least height on the screen
+ * (`RING_LIFT_BODY`); `half` is the band's own half depth in microns, 0 for a
+ * ribbon.  Returns what the layer keeps: `patch(material)` does the same to
+ * another material over the same geometry (a faded copy, `sliceGhosts`), sharing
+ * the uniforms, and `frame` is an `onBeforeRender` that gives them the drawing
+ * renderer's viewport and pixel ratio, so a zoom, a resize and a move to a screen
+ * of another density need nothing else.
+ */
+function ringLift(material, half) {
+  const uniforms = {
+    liftViewport: { value: 1 }, liftPixels: { value: 1 }, liftHalf: { value: half },
+  };
+  const viewport = new THREE.Vector4();
+  const lift = {
+    patch(target) {
+      target.onBeforeCompile = (shader) => {
+        Object.assign(shader.uniforms, uniforms);
+        shader.vertexShader = shader.vertexShader
+          .replace('#include <common>', `#include <common>\n${RING_LIFT_HEAD}`)
+          .replace('#include <begin_vertex>', `#include <begin_vertex>\n${RING_LIFT_BODY}`);
+      };
+      target.customProgramCacheKey = () => 'sbfsem-ring-lift';
+      target.needsUpdate = true;
+    },
+    frame(renderer) {
+      renderer.getCurrentViewport(viewport);
+      uniforms.liftViewport.value = Math.max(1, viewport.w);
+      uniforms.liftPixels.value = RING_LEAST_PX * renderer.getPixelRatio();
+    },
+  };
+  lift.patch(material);
+  return lift;
+}
+
 /** How near the pointer, in screen pixels, an item must pass to be selectable. */
 const SELECT_PX = 6;
 /** A surface at least this opaque is what the pick readout's pointer is on, not what is behind it. */
@@ -1067,12 +1154,16 @@ export class Renderer3D {
    * `lines` draws each ring and outline as a line in place of a band (GraphApp's,
    * 2026-10-22): no width in X and Y and no depth in Z, yet one pixel on the
    * screen at any zoom and from any side, where a band thinner than a pixel
-   * breaks up zoomed out and a flat one vanishes edge-on.  `stroke` and `depth`
-   * are then not used, and `stroke` is kept as 0.
+   * breaks up zoomed out and a flat one vanishes edge-on.  `stroke`, `depth` and
+   * `flat` are then not used, and `stroke` is kept as 0.
+   *
+   * Otherwise the layer is never less than a pixel tall on the screen
+   * (`ringLift`), so seen edge-on it shows at any zoom, whatever `depth`; `flat`
+   * draws the plain ribbon, which vanishes edge-on, with no least height.
    */
   _ringMesh(key, nodes, {
     color = '#ffffff', opacity = 0.85, stroke = 0.1, outlines = [], through = true,
-    depth = 0, ringColors = null, outlineColors = null, lines = false,
+    depth = 0, flat = false, ringColors = null, outlineColors = null, lines = false,
   } = {}) {
     const SEG = RING_SEGMENTS;
     // Kept with their place in `nodes`, which a color array is indexed by.
@@ -1115,6 +1206,10 @@ export class Renderer3D {
     const PER = deep ? 4 : 2;
     const verts = new Float32Array((rings.length * SEG + nBand) * PER * 3);
     const index = new Uint32Array((rings.length * SEG + nBand) * (deep ? 24 : 6));
+    // What the least height reads (ringLift): each vertex's way out of its
+    // sample in the section plane and, on a band, its top (+1) or bottom (-1),
+    // three bytes a vertex.  None for `flat`, the ribbon as it always was.
+    const edge = flat ? null : new Int8Array(verts.length);
     let vi = 0;
     let fi = 0;
     const tri = (a, b, c, d) => {
@@ -1134,11 +1229,20 @@ export class Renderer3D {
       tri(o, nx, o + 2, nx + 2);
       tri(o + 1, nx + 1, o + 3, nx + 3);
     };
-    const put = (xo, yo, xi, yi, z) => {
+    // (dx, dy): the unit direction from the sample to its outer vertex.
+    const ways = (at, dx, dy, top) => {
+      const ex = Math.round(dx * 127);
+      const ey = Math.round(dy * 127);
+      edge[at] = ex; edge[at + 1] = ey; edge[at + 2] = top;
+      edge[at + 3] = -ex; edge[at + 4] = -ey; edge[at + 5] = top;
+    };
+    const put = (xo, yo, xi, yi, z, dx, dy) => {
+      if (edge) ways(vi, dx, dy, deep ? 127 : 0);
       verts[vi] = xo; verts[vi + 1] = yo; verts[vi + 2] = z + half;
       verts[vi + 3] = xi; verts[vi + 4] = yi; verts[vi + 5] = z + half;
       vi += 6;
       if (!deep) return;
+      if (edge) ways(vi, dx, dy, -127);
       verts[vi] = xo; verts[vi + 1] = yo; verts[vi + 2] = z - half;
       verts[vi + 3] = xi; verts[vi + 4] = yi; verts[vi + 5] = z - half;
       vi += 6;
@@ -1152,7 +1256,7 @@ export class Renderer3D {
         const a = (k / SEG) * Math.PI * 2;
         const ca = Math.cos(a);
         const sa = Math.sin(a);
-        put(cx + rOut * ca, cy + rOut * sa, cx + rIn * ca, cy + rIn * sa, cz);
+        put(cx + rOut * ca, cy + rOut * sa, cx + rIn * ca, cy + rIn * sa, cz, ca, sa);
         quad(base, k, SEG);
       }
     }
@@ -1172,12 +1276,13 @@ export class Renderer3D {
         if (len < 1e-9) { tx = 1; ty = 0; len = 1; }
         const nx = (-ty / len) * (stroke / 2);
         const ny = (tx / len) * (stroke / 2);
-        put(x + nx, y + ny, x - nx, y - ny, z);
+        put(x + nx, y + ny, x - nx, y - ny, z, -ty / len, tx / len);
         quad(base, k, n);
       }
     }
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+    if (edge) geometry.setAttribute('ringEdge', new THREE.BufferAttribute(edge, 3, true));
     geometry.setIndex(new THREE.BufferAttribute(index, 1));
     // Colors of their own for single annotations: one more attribute, so the
     // layer is still one draw call.  The material color is then white (it
@@ -1207,10 +1312,15 @@ export class Renderer3D {
       vertexColors: painted,
     });
     setOpacity(material, opacity);
+    const lift = edge ? ringLift(material, half) : null;
     const object = new THREE.Mesh(geometry, material);
     object.raycast = () => {};
     object.name = key;
     object.userData.painted = painted;
+    if (lift) {
+      object.userData.lift = lift;
+      object.onBeforeRender = lift.frame;
+    }
     // One draw call is all or nothing, and Firefox refuses one of more than
     // 30 million indices (`webgl.max-vert-ids-per-draw`): RPC1 c2628 with a
     // depth is 38,146,920, so there every annotation vanished at any depth
@@ -1223,10 +1333,15 @@ export class Renderer3D {
         const part = new THREE.BufferGeometry();
         part.setAttribute('position', geometry.getAttribute('position'));
         if (painted) part.setAttribute('color', geometry.getAttribute('color'));
+        if (edge) part.setAttribute('ringEdge', geometry.getAttribute('ringEdge'));
         part.setIndex(geometry.getIndex());
         part.setDrawRange(start, Math.min(MAX_DRAW_INDICES, index.length - start));
         const child = new THREE.Mesh(part, material);
         child.raycast = () => {};
+        if (lift) {
+          child.userData.lift = lift;
+          child.onBeforeRender = lift.frame;
+        }
         object.add(child);
       }
     }
@@ -5452,12 +5567,16 @@ function sliceGhosts(child, slice, zPlanes) {
       faint.depthWrite = false;
       if ('transmission' in faint) faint.transmission = 0;
       faint.needsUpdate = true;
+      // An annotation layer's least height on the screen (a clone drops the patch).
+      const lift = child.userData.lift;
+      lift?.patch(faint);
       ghost = new child.constructor(child.geometry, faint);
       ghost.userData.sliceGhost = side;
       ghost.raycast = () => {};
       ghost.layers.mask = child.layers.mask;
       ghost.frustumCulled = child.frustumCulled;
-      ghost.onBeforeRender = () => {
+      ghost.onBeforeRender = (renderer) => {
+        lift?.frame(renderer);
         const { outside, rgb } = ghost.userData.fade;
         const own = child.material;
         faint.opacity = (own.transparent ? own.opacity : 1) * outside;

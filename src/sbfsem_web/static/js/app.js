@@ -3494,6 +3494,7 @@ async function refreshExtras(record, { early = null } = {}) {
         opacity: display.discOpacity,
         stroke: display.discStroke,
         depth: display.discDepth,
+        flat: display.discFlat === true,
         through: display.discThrough !== false,
         outlines,
       });
@@ -7134,7 +7135,8 @@ function cellPanel(record) {
   section(panel, record, 'discs', 'Annotations',
     display.showDiscs
       ? `${display.discStroke.toFixed(2)} µm stroke`
-        + (display.discDepth > 0 ? ` · ${Math.round(display.discDepth * 1000)} nm deep` : '')
+        + (display.discFlat ? ' · flat'
+          : display.discDepth > 0 ? ` · ${Math.round(display.discDepth * 1000)} nm deep` : '')
       : 'off',
     (body) => {
       showToggle(body, 'Show annotations', display.showDiscs, async (on) => {
@@ -7183,39 +7185,47 @@ function cellPanel(record) {
 
       // An annotation is flat, so edge-on -- the XZ and YZ views, where Z
       // levels are read -- it has nothing to show. Depth gives it a height
-      // along Z, centered on its section plane; zero is the flat ribbon.
+      // along Z, centered on its section plane, and it is never less than one
+      // pixel on the screen (render3d.js `ringLift`): zero is that pixel alone,
+      // the default since 2026-10-27, and "flat" the ribbon with no height.
       // Shown in nanometers, the unit sections are counted in (a section is
       // 50 to 90 nm; as 0.07 µm it was read as 0.00007); kept in microns in
       // the state, as every other length is and as saved workspaces have it.
       setHelp(slider(body, 'Depth', {
         key: `${record.key}:ddepth`, min: 0, max: 500, step: 5, boxStep: 1,
         value: Math.round(display.discDepth * 1000), unit: 'nm', decimals: 0,
-        onSettle: (v) => applyDisplay(record, { discDepth: Math.round(v) / 1000 })
+        onSettle: (v) => applyDisplay(record, { discDepth: Math.round(v) / 1000, discFlat: false })
           .then(renderNeuronList),
       }), 'The total height of each annotation along Z, centered on its '
         + 'section plane: 70 nm is 35 nm above the plane and 35 nm below. At the '
         + 'section thickness, annotations on consecutive sections just touch and a '
-        + 'skipped section shows as a gap. 0 is the flat ribbon, which disappears '
-        + 'when the view is edge-on.');
+        + 'skipped section shows as a gap. Never less than one pixel on the screen, '
+        + 'so seen edge-on an annotation stays a hairline at any zoom: 0, the '
+        + 'default, is that one pixel alone (a workspace or look saved with 0 '
+        + 'before 2026-10-27 now gets it too). "flat" is the ribbon with no '
+        + 'height, which disappears when the view is edge-on.');
       const sectionNm = state.volumes.find((v) => v.name === record.source)?.volume_scale?.[2];
       const depthRow = document.createElement('div');
       depthRow.className = 'row editor-row';
-      const presetDepth = (label, value, title) => {
+      const presetDepth = (label, value, flat, title) => {
         const button = document.createElement('button');
         button.type = 'button';
         button.textContent = label;
         button.title = title;
-        button.disabled = Math.abs(display.discDepth - value) < 1e-9;
+        button.disabled = display.discFlat === flat
+          && (flat || Math.abs(display.discDepth - value) < 1e-9);
         button.addEventListener('click', async () => {
-          await applyDisplay(record, { discDepth: value });
+          await applyDisplay(record, { discDepth: value, discFlat: flat });
           renderNeuronList();
         });
         depthRow.append(button);
       };
-      presetDepth('flat', 0, 'Depth 0: each annotation is a ribbon in its section plane '
-        + '(it disappears when the view is edge-on)');
+      presetDepth('one pixel', 0, false, 'Depth 0, the default: each annotation is one '
+        + 'pixel tall on the screen at any zoom, so it stays in view edge-on');
+      presetDepth('flat', 0, true, 'Each annotation as a ribbon in its section plane with '
+        + 'no height (it disappears when the view is edge-on)');
       if (Number.isFinite(sectionNm) && sectionNm > 0) {
-        presetDepth(`one section (${Math.round(sectionNm)} nm)`, sectionNm / 1000,
+        presetDepth(`one section (${Math.round(sectionNm)} nm)`, sectionNm / 1000, false,
           'Each annotation as tall as the section it was drawn on, so annotations on '
           + 'consecutive sections just touch and a skipped section shows as a gap');
       }

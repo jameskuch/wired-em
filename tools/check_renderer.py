@@ -3,6 +3,7 @@
     .venv/bin/python tools/check_renderer.py                       # the dev server on :8765
     .venv/bin/python tools/check_renderer.py --url http://127.0.0.1:8777 --cell 943 -v
     .venv/bin/python tools/check_renderer.py --only lifecycle,layers
+    .venv/bin/python tools/check_renderer.py --only edgeon
 
 It drives a headless Chrome for Testing over the DevTools protocol (the client and
 the report are ``tools/check_dropdowns.py``'s), in a throwaway profile.  It is
@@ -26,6 +27,12 @@ is checked here, on synthetic meshes, so it needs no cell:
   camera's planes were overwritten with a perspective camera's by every view reset, so after
   an orbit or a pan the cells on the camera's side of the scene vanished, as if past an
   invisible boundary).
+* ``edgeon`` -- an annotation ring and a traced outline in orthographic view, at four
+  zooms and pixel ratios 1 and 2: edge-on lit across their width and one CSS pixel tall
+  (the flat ribbon draws nothing), lit across it at the slant where a lift one way
+  whatever the view would cancel the stroke, face-on the same pixels as the flat ribbon;
+  a band's own depth where that is more; the inverted viewport, One slice at a time's
+  faded copies and a renderer of another size.
 * ``undo`` -- needs ``--cell ID``: undo and redo put back a cell's Z range, a
   crop, Hold and a context sheet, and the gradient editor's preview never lands
   in the saved view.
@@ -39,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -650,6 +658,127 @@ def planes(c: Chrome, r: Report):
         r.check(f'{kind}: the checks looked at vertices', sum(seen for _n, _b, seen in data['steps']) > 1000, data['steps'][:4])
 
 
+# One annotation drawn alone in a fresh renderer, in orthographic view, looked at from
+# `elev` degrees above its section plane (0 is edge-on, along -Y; 90 is along -Z), with
+# `umpp` microns a CSS pixel.  The ring's radius and the outline's size follow the zoom,
+# so either spans 300 CSS pixels; the stroke stays 0.1 um, so it is 20 pixels wide
+# at the closest zoom and a fifth of a pixel at the farthest.  What comes back is read
+# from the drawn pixels, column by column over the middle 80 % of the annotation's
+# width: how many columns are lit, how many show two runs (the near and far halves,
+# when the view is open enough to part them), and the tallest run, in device pixels.
+EDGE_ON = r"""
+window.__edge = ({ size = [600, 400], kind = 'ring', opts = {}, elev = 0, umpp = 0.02,
+                   inverted = false, fade = false, color = '#ff0000' } = {}) => {
+  const x = window.__make(size[0], size[1]); x.setPaused(true);
+  try {
+    x.setAxesVisible(false);   // the tripod's red X axis would read as the ring
+    if (inverted) x.setInverted(true);
+    x.setOrthographic(true);
+    const r = 150 * umpp; const z = 0.7;
+    if (kind === 'ring') {
+      x.setDiscs('E/1', [{ id: 1, z_section: 10, type_code: 1, radius_um: r, xyz_um: [0, 0, z] }],
+        { color, opacity: 1, stroke: 0.1, through: true, ...opts });
+    } else {
+      x.setDiscs('E/1', [], { color, opacity: 1, stroke: 0.1, through: true, ...opts,
+        outlines: [{ location_id: 9, z_section: 10, z_um: z,
+          outline_um: [[-r, -r], [r, -r], [r, r], [-r, r]], cutouts_um: [] }] });
+    }
+    // The faded copies One slice at a time draws outside the slice (sliceGhosts).
+    if (fade) x.setSliceFade('E/1', { lo: 5, hi: 6, outside: 0.6, above: [1, 0, 0], below: [1, 0, 0] });
+    const e = elev * Math.PI / 180;
+    const t = x.controls.target; t.set(0, 0, z);
+    x.camera.up.set(0, 0, 1);
+    if (elev >= 90) x.camera.up.set(0, 1, 0);
+    x.camera.position.set(0, -500 * Math.cos(e), z + 500 * Math.sin(e));
+    x.camera.lookAt(t); x.controls.update();
+    x.setOrthoUmPerPixel(umpp); x._syncPlanes();
+    x.webgl.render(x.scene, x.camera);
+    const gl = x.webgl.getContext(); const W = gl.drawingBufferWidth; const H = gl.drawingBufferHeight;
+    const px = new Uint8Array(W * H * 4); gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const bg = Array.from(px.slice(0, 3));
+    const lit = (i) => Math.abs(px[i * 4] - bg[0]) + Math.abs(px[i * 4 + 1] - bg[1]) + Math.abs(px[i * 4 + 2] - bg[2]) > 60;
+    const ratio = x.webgl.getPixelRatio();
+    const half = (r / umpp) * ratio;   // the annotation's half width on the screen, device pixels
+    const from = Math.round(W / 2 - 0.8 * half); const to = Math.round(W / 2 + 0.8 * half);
+    let columns = 0; let litColumns = 0; let twoRuns = 0; let tallest = 0; let pixels = 0;
+    for (let col = Math.max(0, from); col < Math.min(W, to); col += 1) {
+      columns += 1;
+      let runs = 0; let run = 0; let any = false;
+      for (let row = 0; row < H; row += 1) {
+        if (lit(row * W + col)) { run += 1; pixels += 1; any = true; if (run === 1) runs += 1; tallest = Math.max(tallest, run); }
+        else run = 0;
+      }
+      if (any) litColumns += 1;
+      if (runs >= 2) twoRuns += 1;
+    }
+    // Rows lit anywhere: a full picture, to compare one mode with another.
+    let hash = 0;
+    for (let i = 0; i < W * H; i += 1) if (lit(i)) hash = (hash * 31 + i) % 2147483647;
+    return { columns, lit: litColumns, twoRuns, tallest, pixels, hash, ratio,
+             gap: 2 * (r / umpp) * Math.sin(e) * ratio, lifted: !!x.discs.get('E/1')?.userData.lift };
+  } finally { x.dispose(); x.__div.remove(); }
+};
+"""
+
+
+def edgeon(c: Chrome, r: Report):
+    """Annotations stay in view edge-on, at any zoom, by a pixel and no more (2026-10-27)."""
+    r.start('annotations edge-on: at least a pixel tall')
+    js(c, EDGE_ON)
+    zooms = [0.005, 0.02, 0.1, 0.5]
+    for ratio in (1, 2):
+        c.send('Emulation.setDeviceMetricsOverride', width=c.width, height=c.height,
+               deviceScaleFactor=ratio, mobile=False, screenWidth=2560, screenHeight=1600)
+        for kind in ('ring', 'outline'):
+            for umpp in zooms:
+                # The slant where a lift one way whatever the view cancelled the stroke.
+                cancel = round(math.degrees(math.atan(umpp / 0.1)), 2)
+                tag = f'{kind}, {umpp} um/px, pixel ratio {ratio}'
+                edge = js(c, 'window.__edge(%s)' % json.dumps({'kind': kind, 'umpp': umpp}))
+                flat = js(c, 'window.__edge(%s)' % json.dumps({'kind': kind, 'umpp': umpp, 'opts': {'flat': True}}))
+                r.check(f'{tag}: edge-on, lit across its width and one CSS pixel tall (flat: nothing)',
+                        edge['lifted'] and edge['lit'] == edge['columns'] > 0
+                        and ratio <= edge['tallest'] <= ratio + 1 and flat['pixels'] == 0,
+                        {'least': edge, 'flat': flat})
+                # A stroke under a device pixel breaks up face-on too: there the least
+                # height promises no less than the flat ribbon, not both halves whole.
+                wide = 0.1 / umpp * ratio >= 1
+                for elev in (0.5, cancel, 2 * cancel, 20):
+                    seen = js(c, 'window.__edge(%s)' % json.dumps({'kind': kind, 'umpp': umpp, 'elev': elev}))
+                    plain = js(c, 'window.__edge(%s)' % json.dumps(
+                        {'kind': kind, 'umpp': umpp, 'elev': elev, 'opts': {'flat': True}}))
+                    # Both halves apart on the screen: both must be there.
+                    parted = seen['gap'] >= 4 * ratio
+                    both = not parted or seen['twoRuns'] >= (0.95 * seen['columns'] if wide else plain['twoRuns'])
+                    r.check(f'{tag}: {elev} deg above the plane, lit across its width'
+                            + (', both halves' if parted and wide else ', no less than flat' if parted else ''),
+                            seen['lit'] == seen['columns'] > 0 and both and seen['pixels'] >= plain['pixels'],
+                            {'least': seen, 'flat': plain})
+                face = js(c, 'window.__edge(%s)' % json.dumps({'kind': kind, 'umpp': umpp, 'elev': 90}))
+                face_flat = js(c, 'window.__edge(%s)' % json.dumps(
+                    {'kind': kind, 'umpp': umpp, 'elev': 90, 'opts': {'flat': True}}))
+                r.check(f'{tag}: face-on, the same pixels as the flat ribbon',
+                        face['pixels'] == face_flat['pixels'] and face['hash'] == face_flat['hash']
+                        and (face['pixels'] > 0 or not wide), {'least': face, 'flat': face_flat})
+        # A band keeps its own depth where that is more than a pixel, and takes the pixel where it is less.
+        deep = js(c, 'window.__edge(%s)' % json.dumps({'umpp': 0.002, 'opts': {'depth': 0.07}}))
+        thin = js(c, 'window.__edge(%s)' % json.dumps({'umpp': 0.5, 'opts': {'depth': 0.07}}))
+        r.check(f'pixel ratio {ratio}: a 70 nm band is 35 CSS pixels tall at 0.002 um/px and one at 0.5',
+                abs(deep['tallest'] - 35 * ratio) <= ratio + 1 and thin['lit'] == thin['columns']
+                and ratio <= thin['tallest'] <= ratio + 1, {'0.002': deep, '0.5': thin})
+        light = js(c, 'window.__edge(%s)' % json.dumps({'inverted': True, 'color': '#10254f'}))
+        r.check(f'pixel ratio {ratio}: on the inverted (white) viewport, a dark ring edge-on is drawn',
+                light['lit'] == light['columns'] > 0 and ratio <= light['tallest'] <= ratio + 1, light)
+        fade = js(c, 'window.__edge(%s)' % json.dumps({'fade': True}))
+        r.check(f'pixel ratio {ratio}: outside One slice at a time, the faded copy is a pixel tall edge-on too',
+                fade['lit'] == fade['columns'] > 0 and ratio <= fade['tallest'] <= ratio + 1, fade)
+        small = js(c, 'window.__edge(%s)' % json.dumps({'size': [300, 200], 'umpp': 0.01}))
+        r.check(f'pixel ratio {ratio}: a renderer of another size (a Render compare pane) reads its own viewport',
+                small['lit'] == small['columns'] > 0 and ratio <= small['tallest'] <= ratio + 1, small)
+    c.send('Emulation.setDeviceMetricsOverride', width=c.width, height=c.height,
+           deviceScaleFactor=1, mobile=False, screenWidth=2560, screenHeight=1600)
+
+
 def undo(c: Chrome, r: Report, cell: int):
     r.start(f'undo and the gradient editor (c{cell})')
     key = load_cell(c, cell)
@@ -722,11 +851,11 @@ def main() -> int:
     parser.add_argument('--url', default='http://127.0.0.1:8765', help='the dev server')
     parser.add_argument('--chrome', help='Chrome for Testing, if not in Playwright\'s cache')
     parser.add_argument('--cell', type=int, help='load this cell for the undo checks')
-    parser.add_argument('--only', help='comma list of: lifecycle, layers, planes, glow, undo')
+    parser.add_argument('--only', help='comma list of: lifecycle, layers, planes, glow, edgeon, undo')
     parser.add_argument('--cycles', type=int, default=20, help='Render compare pane rebuilds')
     parser.add_argument('-v', '--verbose', action='store_true')
     args = parser.parse_args()
-    wanted = set((args.only or 'lifecycle,layers,planes,glow,undo').split(','))
+    wanted = set((args.only or 'lifecycle,layers,planes,glow,edgeon,undo').split(','))
     report = Report(args.verbose)
     chrome = find_chrome(args.chrome)
     page = open_page(chrome, args.url)
@@ -751,6 +880,8 @@ def main() -> int:
             run('planes', planes)
         if 'glow' in wanted:
             run('glow', glow)
+        if 'edgeon' in wanted:
+            run('edgeon', edgeon)
         if 'lifecycle' in wanted:
             run('lifecycle', lifecycle, args.cycles)
         if 'undo' in wanted:

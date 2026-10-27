@@ -148,6 +148,24 @@ test('dataKey is the same for the same load and tolerates a missing summary', ()
   assert.notEqual(S.dataKey({ summary: { data_stamp: 's' } }), S.dataKey({ summary }));
 });
 
+// -- annotation depth ----------------------------------------------------------------
+test('a display saved before "flat" was its own setting, Depth 0, takes the least height (2026-10-27)', () => {
+  // Every display saved before then has discDepth 0 and no discFlat: 0 was the default.
+  const saved = { showDiscs: true, discStroke: 0.1, discDepth: 0 };
+  const d = S.normalizeDisplay(saved);
+  assert.equal(d.discDepth, 0);
+  assert.equal(d.discFlat, false, 'not the flat ribbon: the one-pixel least height');
+  assert.equal(S.normalizeDisplay({}).discFlat, false, 'the default is the least height too');
+});
+
+test('turning "flat" on or off rebuilds the rings; nothing else about it is fetched', () => {
+  const before = S.normalizeDisplay({ showDiscs: true });
+  assert.equal(S.displayNeedsRefetch(before, { ...before, discFlat: true }), true);
+  assert.equal(S.displayNeedsRefetch({ ...before, discFlat: true }, before), true);
+  assert.equal(S.displayNeedsRefetch(before, { ...before, discDepth: 0.07 }), true);
+  assert.equal(S.displayNeedsRefetch(before, { ...before }), false);
+});
+
 // -- run -------------------------------------------------------------------------
 let failed = 0;
 for (const [name, fn] of cases) {
