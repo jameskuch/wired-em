@@ -181,8 +181,10 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
 * ``annodepth`` -- annotations seen edge-on in Orthographic view stay in view by default (2026-10-27), on a dark
   and a light page: with Show annotations ticked, the page's Orthographic box and XZ1 button, the rings and
   outlines add pixels to the picture (each surface hidden for the count) from the least height; "one pixel" is
-  the Depth set; "flat" adds none and says flat; "one pixel" puts it back; a Render compare pane's annotations
-  are drawn edge-on too.  ``--shots DIR`` writes the 3D view at 0.012 µm a pixel, rings yellow, default and flat.
+  the Depth set; "flat" adds none and says flat; "one pixel" puts it back; close in, "one section" and a typed
+  200 nm are drawn on the default's triangles in one pass, each taller edge-on than the last, the summary naming
+  the depth; a Render compare pane's annotations are drawn edge-on too.  ``--shots DIR`` writes the 3D view at
+  0.012 µm a pixel, rings yellow, default and flat, and at 0.01 µm a pixel at one section and 200 nm.
 """
 
 # ruff: noqa: UP031
@@ -3353,7 +3355,8 @@ RING_PIXELS = r"""((r, key) => {
       pixels += 1; rows.add(Math.floor(i / W));
     }
   }
-  return { pixels, rows: rows.size, lifted: !!o.userData.lift,
+  return { pixels, rows: rows.size, lifted: !!o.userData.lift, indices: o.geometry.index.count,
+           single: o.material.forceSinglePass,
            umpp: +((r.camera.top - r.camera.bottom) / r.camera.zoom / r.container.clientHeight).toFixed(4) };
 })"""
 
@@ -3432,6 +3435,46 @@ def annodepth(c: Chrome, r: Report, ctx):
         c.settle(1)
         back = js(c, f'{RING_PIXELS}({at})')
         r.check('"one pixel" puts the least height back', back and back['lifted'] and back['pixels'] > 0, back)
+
+        # A Depth set by hand costs what the default does (2026-10-27): the same triangles,
+        # taller edge-on.  Close in, so that a section is several pixels tall.
+        js(c, "window.sbfsem.renderer.setOrthoUmPerPixel(0.01)")
+        c.settle(1)
+        close = js(c, f'{RING_PIXELS}({at})')
+        section = js(c, '''[...document.querySelectorAll('.cell-panel .editor-row button')]
+            .find((b) => b.textContent.startsWith('one section'))?.textContent''')
+        nm = int(''.join(ch for ch in (section or '') if ch.isdigit()) or 0)
+        _depth_button(c, 'one section')
+        c.wait_for(f'Math.abs({STATE}.neurons.get({k}).display.discDepth - {nm / 1000}) < 1e-9', 20)
+        c.wait_for(f'!!window.sbfsem.renderer.discs.get({k})?.userData.lift', 20)
+        c.settle(1)
+        sect = js(c, f'{RING_PIXELS}({at})')
+        buttons = js(c, DEPTH_BUTTONS)
+        r.check(f'"{section}": the default\'s triangles in one pass, taller edge-on than one pixel, '
+                'and its button greyed',
+                bool(nm) and sect and sect['lifted'] and sect['indices'] == close['indices'] and sect['single']
+                and sect['pixels'] > close['pixels'] and [section, True] in buttons,
+                {'one pixel': close, 'one section': sect, 'buttons': buttons})
+        if ctx.shots:
+            _shoot(c, Path(ctx.shots), f'annodepth-{scheme}-xz1-section.png')
+        js(c, '''(() => { const box = document.querySelector('.cell-panel input[aria-label="Depth value"]');
+            box.value = '200'; box.dispatchEvent(new Event('change', { bubbles: true })); return true; })()''')
+        c.wait_for(f'Math.abs({STATE}.neurons.get({k}).display.discDepth - 0.2) < 1e-9', 20)
+        c.wait_for(f'!!window.sbfsem.renderer.discs.get({k})?.userData.lift', 20)
+        c.settle(1)
+        typed = js(c, f'{RING_PIXELS}({at})')
+        summary = js(c, """[...document.querySelectorAll('.cell-panel .cell-section')]
+            .find((s) => s.querySelector('.sec-name')?.textContent === 'Annotations')
+            ?.querySelector('.sec-summary')?.textContent""")
+        r.check('a typed Depth of 200 nm: the default\'s triangles in one pass, taller edge-on again, '
+                'and the summary says 200 nm deep',
+                typed and typed['lifted'] and typed['indices'] == close['indices'] and typed['single']
+                and typed['pixels'] > sect['pixels'] and '200 nm deep' in (summary or ''),
+                {'typed': typed, 'summary': summary})
+        if ctx.shots:
+            _shoot(c, Path(ctx.shots), f'annodepth-{scheme}-xz1-200nm.png')
+        _depth_button(c, 'one pixel')
+        c.wait_for(f'{STATE}.neurons.get({k}).display.discDepth === 0', 20)
 
         if scheme != 'dark':
             continue

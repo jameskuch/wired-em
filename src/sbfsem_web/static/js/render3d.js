@@ -128,30 +128,56 @@ const MAX_DRAW_INDICES = 12_000_000;
 const RING_LEAST_PX = 1;
 
 /**
+ * Where a ring runs this close to along the view (the sine of the angle between
+ * them), its strip's inner edge is moved onto its outer one (`RING_LIFT_BODY`),
+ * all the way below half of it.  0.3 measured best against the band it replaced
+ * (c1178's rings at 0 to 45 degrees above the plane): 0.2 left the ends notched at
+ * 10 degrees, 0.5 thinned the rings' sides at 20.
+ */
+const RING_TURN = 0.3;
+
+/**
  * The annotation layer's vertex shader, after `begin_vertex`: each vertex moved
  * along the section axis (local Z) so that the layer is never less than
  * `liftPixels` device pixels tall on the screen (asked for 2026-10-27: "add some
  * thickness by default so that when in orthographic view annotations do not
  * disappear. make it the smallest thickness possible").  `ringEdge` is the vertex's
- * own way out of its sample in the section plane (+n on one edge of the ribbon, -n
- * on the other) and, on a band, +1 on its top and -1 on its bottom.
+ * own way out of its sample in the section plane, +n on one edge of the ribbon and -n
+ * on the other, then +1 on the outer edge and, on a ring's inner edge, minus the
+ * strip's width over the stroke (`liftStroke`); 0 on an outline's.
  *
- * A band is opened to `least` either side of the plane where its own half depth
- * (`liftHalf`) is less.  A ribbon's two edges go `least` apart along Z, each the way
- * that adds to the ribbon's own width on the screen, never the way that takes from
- * it: the edge nearer the viewer goes down when the camera is above the plane, up
- * when it is below.  Lifting one edge up and the other down whatever the view
- * cancelled the ribbon's width at one slant, where half of every ring vanished.
- * Edge-on the ribbon is then `least` tall; face-on the move is along the view and
- * changes nothing; between, its screen width is never less than the smaller of one
- * pixel and its width face-on.  Half a pixel is a hair at any zoom, so the ring is
- * still drawn in its section plane, not as a slab.
+ * The ribbon's two edges go `reach` either side of the plane along Z, `reach` the
+ * larger of half a pixel and the Depth's own half (`liftHalf`), each the way that
+ * adds to the ribbon's own width on the screen, never the way that takes from it:
+ * the edge nearer the viewer goes down when the camera is above the plane, up when
+ * it is below.  Lifting one edge up and the other down whatever the view cancelled
+ * the ribbon's width at one slant, where half of every ring vanished.  Edge-on the
+ * ribbon is then the Depth tall, or a pixel where that is more; face-on the move is
+ * along the view and changes nothing; between, it covers on the screen what a band
+ * of that depth would, the top and the near wall together (stroke times the sine of
+ * the slant plus depth times its cosine), as one slanted strip.
+ *
+ * Except at a ring's two ends, where it runs along the view: there one slanted strip
+ * is a diagonal of the band's end, and edge-on each end lost a notch half the stroke
+ * deep, stacked rings showing a sawtooth (c1178: 1.8 % of the band's pixels).  Where
+ * the ring runs within `liftTurn` of the view, its inner edge is moved onto its outer
+ * one, so the end is the band's outer wall: none of the band's pixels lost edge-on,
+ * 0.3 to 0.4 % at 10 degrees above the plane (from 0.7), nothing changed beyond 17
+ * degrees or face-on.  Not on traced outlines: their long runs along the view lost
+ * their width (6 to 9 % of c2628's band), where the plain strip loses 0.02 %.
+ *
+ * A Depth is drawn this way, on the ribbon's own triangles, since 2026-10-27 ("by
+ * no means should something that I personally just turn on manually create a huge
+ * computational cost"): before, it was a band with a top, a bottom and two walls,
+ * four times the triangles (RPC1 c2628: 25.4 million against 6.4).
  */
 const RING_LIFT_HEAD = `
 attribute vec3 ringEdge;
 uniform float liftViewport;
 uniform float liftPixels;
-uniform float liftHalf;`;
+uniform float liftHalf;
+uniform float liftStroke;
+uniform float liftTurn;`;
 const RING_LIFT_BODY = `
 {
   vec3 sectionAxis = ( modelViewMatrix * vec4( 0.0, 0.0, 1.0, 0.0 ) ).xyz;
@@ -161,30 +187,34 @@ const RING_LIFT_BODY = `
   float pixel = 2.0 * ( perspective ? max( - here.z, 0.0 ) : 1.0 )
     / ( projectionMatrix[ 1 ][ 1 ] * liftViewport );
   float least = 0.5 * liftPixels * pixel / max( length( sectionAxis ), 1e-20 );
-  float lift;
-  if ( ringEdge.z != 0.0 ) {
-    lift = sign( ringEdge.z ) * max( 0.0, least - liftHalf );
-  } else {
-    vec3 view = perspective ? normalize( here.xyz ) : vec3( 0.0, 0.0, - 1.0 );
-    float outward = dot( ( modelViewMatrix * vec4( ringEdge.xy, 0.0, 0.0 ) ).xyz, view );
-    float side = outward * ( dot( sectionAxis, view ) < 0.0 ? - 1.0 : 1.0 );
-    lift = side > 0.0 ? - least : least;
+  float reach = max( least, liftHalf );
+  vec3 view = perspective ? normalize( here.xyz ) : vec3( 0.0, 0.0, - 1.0 );
+  vec3 out3 = ( modelViewMatrix * vec4( ringEdge.xy, 0.0, 0.0 ) ).xyz;
+  float side = dot( out3, view ) * ( dot( sectionAxis, view ) < 0.0 ? - 1.0 : 1.0 );
+  // Exactly across the view, the outer edge up and the inner down.
+  if ( side == 0.0 ) side = ringEdge.z > 0.0 ? - 1.0 : 1.0;
+  transformed.z += side > 0.0 ? - reach : reach;
+  // Where the ring runs along the view, the inner edge onto the outer.
+  if ( ringEdge.z < 0.0 && liftTurn > 0.0 ) {
+    float across = length( cross( normalize( cross( sectionAxis, out3 ) ), view ) );
+    float onto = 1.0 - smoothstep( 0.5 * liftTurn, liftTurn, across );
+    transformed.xy += ringEdge.xy * ringEdge.z * liftStroke * onto;
   }
-  transformed.z += lift;
 }`;
 
 /**
  * Give an annotation layer's material the least height on the screen
- * (`RING_LIFT_BODY`); `half` is the band's own half depth in microns, 0 for a
- * ribbon.  Returns what the layer keeps: `patch(material)` does the same to
+ * (`RING_LIFT_BODY`); `half` is half the Depth in microns, 0 for the default
+ * pixel.  Returns what the layer keeps: `patch(material)` does the same to
  * another material over the same geometry (a faded copy, `sliceGhosts`), sharing
  * the uniforms, and `frame` is an `onBeforeRender` that gives them the drawing
  * renderer's viewport and pixel ratio, so a zoom, a resize and a move to a screen
  * of another density need nothing else.
  */
-function ringLift(material, half) {
+function ringLift(material, half, stroke) {
   const uniforms = {
     liftViewport: { value: 1 }, liftPixels: { value: 1 }, liftHalf: { value: half },
+    liftStroke: { value: stroke }, liftTurn: { value: RING_TURN },
   };
   const viewport = new THREE.Vector4();
   const lift = {
@@ -198,6 +228,7 @@ function ringLift(material, half) {
       target.customProgramCacheKey = () => 'sbfsem-ring-lift';
       target.needsUpdate = true;
     },
+    uniforms,
     frame(renderer) {
       renderer.getCurrentViewport(viewport);
       uniforms.liftViewport.value = Math.max(1, viewport.w);
@@ -1158,8 +1189,10 @@ export class Renderer3D {
    * `flat` are then not used, and `stroke` is kept as 0.
    *
    * Otherwise the layer is never less than a pixel tall on the screen
-   * (`ringLift`), so seen edge-on it shows at any zoom, whatever `depth`; `flat`
-   * draws the plain ribbon, which vanishes edge-on, with no least height.
+   * (`ringLift`), so seen edge-on it shows at any zoom, and `depth` (microns) is
+   * the height the vertex shader gives it where that is more, on the same
+   * triangles: any depth costs what the default does.  `flat` draws the plain
+   * ribbon, which vanishes edge-on, with no least height.
    */
   _ringMesh(key, nodes, {
     color = '#ffffff', opacity = 0.85, stroke = 0.1, outlines = [], through = true,
@@ -1195,56 +1228,43 @@ export class Renderer3D {
         color, opacity, outlines, through, ringColors, outlineColors,
       });
     }
-    // `depth` gives the flat ribbon a height along Z, centered on the section
-    // plane: a band with a rectangular cross-section, stroke wide and depth
-    // tall (asked for 2026-09-19 -- a ribbon in the section plane has no
-    // thickness, so from the side, where Z levels are read, the annotations
-    // vanished).  Zero keeps the ribbon exactly as it was: two vertices a
-    // sample and one quad; a band is four vertices and four quads.
-    const deep = depth > 0;
-    const half = deep ? depth / 2 : 0;
-    const PER = deep ? 4 : 2;
-    const verts = new Float32Array((rings.length * SEG + nBand) * PER * 3);
-    const index = new Uint32Array((rings.length * SEG + nBand) * (deep ? 24 : 6));
-    // What the least height reads (ringLift): each vertex's way out of its
-    // sample in the section plane and, on a band, its top (+1) or bottom (-1),
-    // three bytes a vertex.  None for `flat`, the ribbon as it always was.
+    // `depth` gives the ribbon a height along Z, centered on the section plane
+    // (asked for 2026-09-19 -- a ribbon in the section plane has no thickness,
+    // so from the side, where Z levels are read, the annotations vanished).  It
+    // is drawn by the vertex shader on the ribbon's own two vertices a sample
+    // and one quad (ringLift): its two edges moved apart along Z, as far as the
+    // depth or a pixel, whichever is more.  Until 2026-10-27 a depth built a
+    // band, four vertices a sample and four quads.
+    const verts = new Float32Array((rings.length * SEG + nBand) * 2 * 3);
+    const index = new Uint32Array((rings.length * SEG + nBand) * 6);
+    // What the shader reads (ringLift), three bytes a vertex: its way out of its
+    // sample in the section plane, and +1 on the outer edge; on a ring's inner
+    // edge minus the strip's width over `stroke` (how far `RING_TURN` moves it),
+    // on an outline's 0 (never moved).  None for `flat`, the ribbon as it always
+    // was, which has no height.
     const edge = flat ? null : new Int8Array(verts.length);
     let vi = 0;
     let fi = 0;
-    const tri = (a, b, c, d) => {
-      index[fi] = a; index[fi + 1] = b; index[fi + 2] = c;
-      index[fi + 3] = c; index[fi + 4] = b; index[fi + 5] = d;
+    // Per sample: outer, inner.  One quad between consecutive samples.
+    const quad = (base, k, n) => {
+      const o = base + k * 2;
+      const nx = base + ((k + 1) % n) * 2;
+      index[fi] = o; index[fi + 1] = nx; index[fi + 2] = o + 1;
+      index[fi + 3] = o + 1; index[fi + 4] = nx; index[fi + 5] = nx + 1;
       fi += 6;
     };
-    // Per sample: outer, inner (at +half when deep), then outer, inner at
-    // -half.  Quads between consecutive samples: the top ribbon, and for a
-    // band the bottom ribbon and the outer and inner walls.
-    const quad = (base, k, n) => {
-      const o = base + k * PER;
-      const nx = base + ((k + 1) % n) * PER;
-      tri(o, nx, o + 1, nx + 1);
-      if (!deep) return;
-      tri(o + 2, nx + 2, o + 3, nx + 3);
-      tri(o, nx, o + 2, nx + 2);
-      tri(o + 1, nx + 1, o + 3, nx + 3);
-    };
     // (dx, dy): the unit direction from the sample to its outer vertex.
-    const ways = (at, dx, dy, top) => {
-      const ex = Math.round(dx * 127);
-      const ey = Math.round(dy * 127);
-      edge[at] = ex; edge[at + 1] = ey; edge[at + 2] = top;
-      edge[at + 3] = -ex; edge[at + 4] = -ey; edge[at + 5] = top;
-    };
-    const put = (xo, yo, xi, yi, z, dx, dy) => {
-      if (edge) ways(vi, dx, dy, deep ? 127 : 0);
-      verts[vi] = xo; verts[vi + 1] = yo; verts[vi + 2] = z + half;
-      verts[vi + 3] = xi; verts[vi + 4] = yi; verts[vi + 5] = z + half;
-      vi += 6;
-      if (!deep) return;
-      if (edge) ways(vi, dx, dy, -127);
-      verts[vi] = xo; verts[vi + 1] = yo; verts[vi + 2] = z - half;
-      verts[vi + 3] = xi; verts[vi + 4] = yi; verts[vi + 5] = z - half;
+    const put = (xo, yo, xi, yi, z, dx, dy, ring) => {
+      if (edge) {
+        const ex = Math.round(dx * 127);
+        const ey = Math.round(dy * 127);
+        const across = ring && stroke > 0 ? Math.hypot(xo - xi, yo - yi) / stroke : 0;
+        edge[vi] = ex; edge[vi + 1] = ey; edge[vi + 2] = 127;
+        edge[vi + 3] = -ex; edge[vi + 4] = -ey;
+        edge[vi + 5] = ring ? -Math.min(127, Math.max(1, Math.round(across * 127))) : 0;
+      }
+      verts[vi] = xo; verts[vi + 1] = yo; verts[vi + 2] = z;
+      verts[vi + 3] = xi; verts[vi + 4] = yi; verts[vi + 5] = z;
       vi += 6;
     };
     for (const n of rings) {
@@ -1256,7 +1276,7 @@ export class Renderer3D {
         const a = (k / SEG) * Math.PI * 2;
         const ca = Math.cos(a);
         const sa = Math.sin(a);
-        put(cx + rOut * ca, cy + rOut * sa, cx + rIn * ca, cy + rIn * sa, cz, ca, sa);
+        put(cx + rOut * ca, cy + rOut * sa, cx + rIn * ca, cy + rIn * sa, cz, ca, sa, true);
         quad(base, k, SEG);
       }
     }
@@ -1276,7 +1296,7 @@ export class Renderer3D {
         if (len < 1e-9) { tx = 1; ty = 0; len = 1; }
         const nx = (-ty / len) * (stroke / 2);
         const ny = (tx / len) * (stroke / 2);
-        put(x + nx, y + ny, x - nx, y - ny, z, -ty / len, tx / len);
+        put(x + nx, y + ny, x - nx, y - ny, z, -ty / len, tx / len, false);
         quad(base, k, n);
       }
     }
@@ -1303,7 +1323,7 @@ export class Renderer3D {
           (o) => o.location_id, toRgb, polygons.map((p) => p.oi)),
         polygonSamples: polygons.map((p) => p.pts.length),
         segments: SEG,
-        perSample: PER,
+        perSample: 2,
         fallback: [layerColor.r, layerColor.g, layerColor.b],
       }), 3));
     }
@@ -1312,7 +1332,7 @@ export class Renderer3D {
       vertexColors: painted,
     });
     setOpacity(material, opacity);
-    const lift = edge ? ringLift(material, half) : null;
+    const lift = edge ? ringLift(material, depth > 0 ? depth / 2 : 0, stroke) : null;
     const object = new THREE.Mesh(geometry, material);
     object.raycast = () => {};
     object.name = key;
@@ -5445,6 +5465,14 @@ function applyDiscDepth(object, through) {
   material.depthTest = !through;
   material.depthWrite = !through;
   material.transparent = transparent;
+  // three.js draws a transparent two-sided mesh twice a frame, its back faces and
+  // then its front.  Through the surface, with no depth written and one color for
+  // the whole layer (not `painted`), every fragment is the same blend, and the same
+  // blends come out the same in any order: one pass draws the same pixels for half
+  // the vertex work (2026-10-27).  Rings tested against depth write it, so there the
+  // order decides which of two overlapping rings is kept, and a painted layer's
+  // overlapping rings differ in color: both keep the two passes.
+  material.forceSinglePass = through && !object.userData.painted;
   // The children are the rest of a layer too large for one draw call.
   object.traverse((child) => { child.renderOrder = through ? 3 : 0; });
 }
@@ -5568,8 +5596,11 @@ function sliceGhosts(child, slice, zPlanes) {
       if ('transmission' in faint) faint.transmission = 0;
       faint.needsUpdate = true;
       // An annotation layer's least height on the screen (a clone drops the patch).
+      // Its copy is one color and writes no depth, so one pass draws what two
+      // would (applyDiscDepth).
       const lift = child.userData.lift;
       lift?.patch(faint);
+      if (lift) faint.forceSinglePass = true;
       ghost = new child.constructor(child.geometry, faint);
       ghost.userData.sliceGhost = side;
       ghost.raycast = () => {};

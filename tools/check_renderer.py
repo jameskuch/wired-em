@@ -31,8 +31,15 @@ is checked here, on synthetic meshes, so it needs no cell:
   zooms and pixel ratios 1 and 2: edge-on lit across their width and one CSS pixel tall
   (the flat ribbon draws nothing), lit across it at the slant where a lift one way
   whatever the view would cancel the stroke, face-on the same pixels as the flat ribbon;
-  a band's own depth where that is more; the inverted viewport, One slice at a time's
-  faded copies and a renderer of another size.
+  a Depth's own height where that is more; the inverted viewport, One slice at a time's
+  faded copies and a renderer of another size.  Any Depth (one section, 70 and 90 nm, and
+  typed ones up to 500 nm) on the default's own triangles: as many as the one-pixel layer,
+  three bytes a vertex more than the flat ribbon, and at 0, 10 and 45 degrees above the
+  plane the ring's near and far sides as tall on the screen as a band of that depth
+  (stroke times the sine plus depth times the cosine); edge-on, the ring fills its
+  rectangle to the ends, as a band did.  Through the surface and of one
+  color, the layer is drawn in one pass, to the pixel what two draw; painted or tested
+  against depth it keeps two.
 * ``undo`` -- needs ``--cell ID``: undo and redo put back a cell's Z range, a
   crop, Hold and a context sheet, and the gradient editor's preview never lands
   in the saved view.
@@ -714,17 +721,86 @@ window.__edge = ({ size = [600, 400], kind = 'ring', opts = {}, elev = 0, umpp =
     // Rows lit anywhere: a full picture, to compare one mode with another.
     let hash = 0;
     for (let i = 0; i < W * H; i += 1) if (lit(i)) hash = (hash * 31 + i) % 2147483647;
-    return { columns, lit: litColumns, twoRuns, tallest, pixels, hash, ratio,
-             gap: 2 * (r / umpp) * Math.sin(e) * ratio, lifted: !!x.discs.get('E/1')?.userData.lift };
+    // The runs lit in the middle column, top to bottom: the ring's far and near sides.
+    const mid = Math.round(W / 2); const runs = []; let at = 0;
+    for (let row = 0; row < H; row += 1) {
+      if (lit(row * W + mid)) at += 1; else if (at) { runs.push(at); at = 0; }
+    }
+    if (at) runs.push(at);
+    // How much of the box round everything lit is lit: 1 for a ring seen edge-on as a band would be.
+    let x0 = W; let x1 = -1; let y0 = H; let y1 = -1; let all = 0;
+    for (let i = 0; i < W * H; i += 1) {
+      if (!lit(i)) continue;
+      const cx = i % W; const cy = Math.floor(i / W); all += 1;
+      x0 = Math.min(x0, cx); x1 = Math.max(x1, cx); y0 = Math.min(y0, cy); y1 = Math.max(y1, cy);
+    }
+    const fill = all ? all / ((x1 - x0 + 1) * (y1 - y0 + 1)) : 0;
+    const layer = x.discs.get('E/1');
+    const ghosts = []; layer.traverse((o) => { if (o.userData.sliceGhost) ghosts.push(o.material.forceSinglePass); });
+    return { columns, lit: litColumns, twoRuns, tallest, pixels, hash, ratio, runs, fill: +fill.toFixed(4),
+             gap: 2 * (r / umpp) * Math.sin(e) * ratio, lifted: !!layer?.userData.lift,
+             indices: layer.geometry.index.count, edgeSize: layer.geometry.getAttribute('ringEdge')?.itemSize ?? 0,
+             single: layer.material.forceSinglePass, ghosts };
   } finally { x.dispose(); x.__div.remove(); }
 };
 """
 
 
+# Overlapping rings drawn with the layer in two passes (three.js's way for a transparent
+# two-sided mesh) and in one, compared pixel by pixel; and the pass count the layer chose.
+EDGE_PASSES = r"""
+window.__passes = ({ through = true, painted = false, depth = 0.07, elev = 30 } = {}) => {
+  const x = window.__make(600, 400); x.setPaused(true);
+  try {
+    x.setAxesVisible(false); x.setOrthographic(true);
+    const nodes = [];
+    for (let k = 0; k < 12; k += 1) {
+      nodes.push({ id: k, z_section: 10 + (k % 3), type_code: 1, radius_um: 0.6 + 0.1 * (k % 4),
+                   xyz_um: [0.3 * (k % 4), 0.25 * Math.floor(k / 4), 4.7 + 0.07 * (k % 3)] });
+    }
+    // Traced outlines overlapping in pairs, the nearer traced one way round and the farther
+    // the other, in both orders: three.js's two passes draw a pair in the order of their
+    // facing, one pass in the order of the buffer, so one of the pairs differs where its
+    // order shows (colors of their own, or a depth written).
+    const square = (cx, cy, h, turn) => {
+      const pts = [[cx - h, cy - h], [cx + h, cy - h], [cx + h, cy + h], [cx - h, cy + h]];
+      return turn ? pts : pts.reverse();
+    };
+    const outlines = [];
+    [[-0.9, true], [1.8, false]].forEach(([cx, turn], k) => {
+      outlines.push({ location_id: 100 + 2 * k, z_section: 12, z_um: 4.84, cutouts_um: [], outline_um: square(cx, 0.2, 0.5, turn) });
+      outlines.push({ location_id: 101 + 2 * k, z_section: 11, z_um: 4.77, cutouts_um: [], outline_um: square(cx + 0.05, 0.25, 0.5, !turn) });
+    });
+    const palette = ['#ff0000', '#00ff00', '#0000ff'];
+    const colors = painted ? { ringColors: (n, i) => palette[i % 3], outlineColors: (o, i) => palette[i % 3] } : {};
+    x.setDiscs('P/1', nodes, { color: '#ffd400', opacity: 0.6, stroke: 0.1, through, depth, outlines, ...colors });
+    // A surface under them (the sheet rises to 3 um), as a cell's would be.
+    x.setMesh('S/1', window.__sheet(20, -20, -20), { color: '#3050ff', opacity: 1 });
+    const e = elev * Math.PI / 180; const t = x.controls.target; t.set(0.45, 0.25, 4.77);
+    x.camera.up.set(0, 0, 1);
+    x.camera.position.set(t.x, t.y - 500 * Math.cos(e), t.z + 500 * Math.sin(e));
+    x.camera.lookAt(t); x.controls.update(); x.setOrthoUmPerPixel(0.006); x._syncPlanes();
+    const gl = x.webgl.getContext(); const W = gl.drawingBufferWidth; const H = gl.drawingBufferHeight;
+    const m = x.discs.get('P/1').material; const chosen = m.forceSinglePass;
+    const grab = (one) => { m.forceSinglePass = one; x.webgl.render(x.scene, x.camera);
+      const px = new Uint8Array(W * H * 4); gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      return [px, x.webgl.info.render.triangles]; };
+    const [two, trianglesTwo] = grab(false); const [one, trianglesOne] = grab(true);
+    m.forceSinglePass = chosen;
+    let differ = 0;
+    for (let i = 0; i < W * H * 4; i += 4) {
+      if (two[i] !== one[i] || two[i + 1] !== one[i + 1] || two[i + 2] !== one[i + 2]) differ += 1;
+    }
+    return { chosen, differ, trianglesTwo, trianglesOne, layer: x.discs.get('P/1').geometry.index.count / 3 };
+  } finally { x.dispose(); x.__div.remove(); }
+};
+"""
+
 def edgeon(c: Chrome, r: Report):
     """Annotations stay in view edge-on, at any zoom, by a pixel and no more (2026-10-27)."""
     r.start('annotations edge-on: at least a pixel tall')
     js(c, EDGE_ON)
+    js(c, EDGE_PASSES)
     zooms = [0.005, 0.02, 0.1, 0.5]
     for ratio in (1, 2):
         c.send('Emulation.setDeviceMetricsOverride', width=c.width, height=c.height,
@@ -760,18 +836,66 @@ def edgeon(c: Chrome, r: Report):
                 r.check(f'{tag}: face-on, the same pixels as the flat ribbon',
                         face['pixels'] == face_flat['pixels'] and face['hash'] == face_flat['hash']
                         and (face['pixels'] > 0 or not wide), {'least': face, 'flat': face_flat})
-        # A band keeps its own depth where that is more than a pixel, and takes the pixel where it is less.
+        # A Depth keeps its own height where that is more than a pixel, and takes the pixel where it is less.
         deep = js(c, 'window.__edge(%s)' % json.dumps({'umpp': 0.002, 'opts': {'depth': 0.07}}))
         thin = js(c, 'window.__edge(%s)' % json.dumps({'umpp': 0.5, 'opts': {'depth': 0.07}}))
-        r.check(f'pixel ratio {ratio}: a 70 nm band is 35 CSS pixels tall at 0.002 um/px and one at 0.5',
+        r.check(f'pixel ratio {ratio}: a 70 nm Depth is 35 CSS pixels tall at 0.002 um/px and one at 0.5',
                 abs(deep['tallest'] - 35 * ratio) <= ratio + 1 and thin['lit'] == thin['columns']
                 and ratio <= thin['tallest'] <= ratio + 1, {'0.002': deep, '0.5': thin})
+        # Any Depth is drawn on the default's own triangles (2026-10-27): "one section" (70 nm
+        # on RC1/RC2/RPC1, 90 nm on Inferior Monkey) and typed ones.  0.005 um a pixel: the
+        # stroke is 20 CSS pixels and 70 nm is 14.
+        base = js(c, 'window.__edge(%s)' % json.dumps({'umpp': 0.005}))
+        plain = js(c, 'window.__edge(%s)' % json.dumps({'umpp': 0.005, 'opts': {'flat': True}}))
+        r.check(f'pixel ratio {ratio}: the one-pixel layer is the flat ribbon\'s triangles, three bytes a vertex more',
+                base['indices'] == plain['indices'] and base['edgeSize'] == 3 and plain['edgeSize'] == 0,
+                {'pixel': base['indices'], 'flat': plain['indices']})
+        # Seen edge-on, a ring with a Depth is the rectangle a band was, to its ends: where the
+        # ring runs along the view its strip's inner edge is on its outer one.  Without that each
+        # end lost a notch half the stroke deep (a fill of 0.985 here).
+        for depth in (0.07, 0.2):
+            end = js(c, 'window.__edge(%s)' % json.dumps({'umpp': 0.005, 'opts': {'depth': depth}}))
+            r.check(f'pixel ratio {ratio}: a ring {round(depth * 1000)} nm deep edge-on fills its rectangle to the ends',
+                    end['fill'] >= 0.995, {'fill': end['fill'], 'runs': end['runs']})
+        for depth in (0.05, 0.07, 0.09, 0.2, 0.5):
+            for elev in (0, 10, 45):
+                seen = js(c, 'window.__edge(%s)' % json.dumps({'umpp': 0.005, 'elev': elev, 'opts': {'depth': depth}}))
+                e = math.radians(elev)
+                # A band's near (and far) side on the screen: its top and its wall, device pixels.
+                side = (0.1 * math.sin(e) + depth * math.cos(e)) / 0.005 * ratio
+                parted = elev > 0 and seen['gap'] > side + 2 * ratio
+                runs = seen['runs']
+                tall = (len(runs) == 2 and all(abs(n - side) <= ratio + 1 for n in runs)) if parted else (
+                    len(runs) == 1 and abs(runs[0] - (side if elev == 0 else side + seen['gap'])) <= ratio + 1)
+                r.check(f'pixel ratio {ratio}: Depth {round(depth * 1000)} nm, {elev} deg above the plane: '
+                        f'the default\'s triangles, lit across its width, '
+                        + ('each side' if parted else 'the ring') + f' {side / ratio:.1f} CSS pixels tall as a band',
+                        seen['lifted'] and seen['indices'] == base['indices'] and seen['lit'] == seen['columns'] > 0
+                        and tall, {'runs': runs, 'band': round(side, 1), 'gap': round(seen['gap'], 1),
+                                   'indices': seen['indices'], 'default': base['indices']})
+        # One pass where it draws the same pixels as two, two where it would not.
+        for spec, want in (({}, True), ({'depth': 0}, True), ({'elev': 80}, True),
+                           ({'painted': True}, False), ({'through': False}, False)):
+            got = js(c, 'window.__passes(%s)' % json.dumps(spec))
+            what = ', '.join(f'{k} {v}' for k, v in spec.items()) or 'Depth 70 nm'
+            if want:
+                r.check(f'pixel ratio {ratio}: through the surface, one color ({what}): one pass, '
+                        'to the pixel what two draw, half the triangles',
+                        got['chosen'] is True and got['differ'] == 0
+                        and got['trianglesTwo'] - got['trianglesOne'] == got['layer'] > 0, got)
+            else:
+                r.check(f'pixel ratio {ratio}: {what}: two passes kept (one would change the overlaps)',
+                        got['chosen'] is False and got['differ'] > 0, got)
         light = js(c, 'window.__edge(%s)' % json.dumps({'inverted': True, 'color': '#10254f'}))
         r.check(f'pixel ratio {ratio}: on the inverted (white) viewport, a dark ring edge-on is drawn',
                 light['lit'] == light['columns'] > 0 and ratio <= light['tallest'] <= ratio + 1, light)
         fade = js(c, 'window.__edge(%s)' % json.dumps({'fade': True}))
-        r.check(f'pixel ratio {ratio}: outside One slice at a time, the faded copy is a pixel tall edge-on too',
-                fade['lit'] == fade['columns'] > 0 and ratio <= fade['tallest'] <= ratio + 1, fade)
+        r.check(f'pixel ratio {ratio}: outside One slice at a time, the faded copy is a pixel tall edge-on too, '
+                'in one pass', fade['lit'] == fade['columns'] > 0 and ratio <= fade['tallest'] <= ratio + 1
+                and len(fade['ghosts']) > 0 and all(fade['ghosts']), fade)
+        fade = js(c, 'window.__edge(%s)' % json.dumps({'fade': True, 'umpp': 0.002, 'opts': {'depth': 0.07}}))
+        r.check(f'pixel ratio {ratio}: the faded copy of a 70 nm Depth is 35 CSS pixels tall at 0.002 um/px',
+                fade['lit'] == fade['columns'] > 0 and abs(fade['tallest'] - 35 * ratio) <= ratio + 1, fade)
         small = js(c, 'window.__edge(%s)' % json.dumps({'size': [300, 200], 'umpp': 0.01}))
         r.check(f'pixel ratio {ratio}: a renderer of another size (a Render compare pane) reads its own viewport',
                 small['lit'] == small['columns'] > 0 and ratio <= small['tallest'] <= ratio + 1, small)
