@@ -18,7 +18,8 @@ const jsDir = process.env.SBFSEM_JS_DIR
     'src', 'sbfsem_web', 'static', 'js');
 const load = (name) => import(pathToFileURL(path.join(jsDir, name)).href);
 const {
-  api, ApiError, ConnectionLostError, pollJob, POLL_TIMING, pollWaitFor,
+  api, ApiError, ConnectionLostError, DownloadFailedError, pollJob, POLL_TIMING, pollWaitFor,
+  MESH_MEDIA_TYPE, sizeText, progressText, onBusy,
 } = await load('api.js');
 // What the module chose for a page with no navigation entry (node): no wait.
 const LOADED_WAIT = POLL_TIMING.wait;
@@ -26,7 +27,8 @@ const { stageText } = await load('loadprogress.js');
 
 // A generous window and no per-poll timeout unless a case asks for them.
 const BASE_TIMING = {
-  first: 1, every: 2, wait: 0, giveUp: 60000, requestTimeout: 0, now: () => Date.now(),
+  first: 1, every: 2, wait: 0, giveUp: 60000, requestTimeout: 0, stallTimeout: 0, downloadTries: 3,
+  now: () => Date.now(),
 };
 Object.assign(POLL_TIMING, BASE_TIMING);
 
@@ -545,6 +547,278 @@ test('onSubmitted: called once with the job id when the server has taken it, bef
 test('the old synchronous POSTs are gone from the API object', () => {
   assert.equal(api.meshDiff, undefined);
   assert.equal(api.meshDeviation, undefined);
+});
+
+// -- a finished surface that takes long to download (2026-10-27) ------------------------------
+// RC1 c9025 at Voxel 0.02 um: 8,539,810 triangles, a 154 MB reply, 50 MB on the wire.  At
+// 0.7 MB/s a 20 s limit on each poll cut it off at 12 to 15 MB four times, and the page
+// said the build "may still finish" although it had finished.
+
+/** A finished mesh job's binary reply (mesh_binary.py's layout): 4 vertices and
+ * `faces` triangles, no vertex_data. */
+function binaryReply(faces = 2000) {
+  const head = {
+    job_id: 'j1', status: 'done', kind: 'mesh', seconds: 40.9,
+    mesh: { mesh_id: 'm1', n_faces: faces, n_vertices: 4, vertices: null, faces: null, vertex_data: null },
+    arrays: { vertices: [0, 12], faces: [48, faces * 3], vertex_data: null },
+  };
+  let text = JSON.stringify(head);
+  text += ' '.repeat((8 - ((4 + text.length) % 8)) % 8);
+  const bytes = new Uint8Array(4 + text.length + 48 + faces * 12);
+  new DataView(bytes.buffer).setUint32(0, text.length, true);
+  bytes.set(new TextEncoder().encode(text), 4);
+  new Int32Array(bytes.buffer, 4 + text.length, 12).set(Array.from({ length: 12 }, (_, k) => k * 10000));
+  return bytes;
+}
+
+/**
+ * A reply whose body arrives in `pieces` pieces `gap` ms apart, as a download does,
+ * and errors when the request's signal fires.  After `stopAfter` pieces it stops
+ * arriving and never ends (a stalled download); `breakAfter` errors it there instead
+ * (a connection reset).  Each piece moves `clock` on by `tick` ms.  `asked` collects
+ * each request's options.
+ */
+function streamed(bytes, {
+  pieces = 10, gap = 2, stopAfter = Infinity, breakAfter = Infinity, clock = null, tick = 0, asked = null,
+  type = MESH_MEDIA_TYPE,
+} = {}) {
+  return (options) => {
+    asked?.push(options);
+    const size = Math.ceil(bytes.byteLength / pieces);
+    let timer = null;
+    let ended = false;
+    let at = 0;
+    let sent = 0;
+    const body = new ReadableStream({
+      start(controller) {
+        const fail = (reason) => {
+          clearTimeout(timer);
+          if (!ended) { ended = true; controller.error(reason); }
+        };
+        options.signal?.addEventListener('abort', () => fail(options.signal.reason));
+        const next = () => {
+          if (ended) return;
+          if (sent >= breakAfter) { fail(new TypeError('network error')); return; }
+          if (sent >= stopAfter) return;
+          if (at >= bytes.byteLength) { ended = true; controller.close(); return; }
+          if (clock) clock.t += tick;
+          controller.enqueue(bytes.slice(at, at + size));
+          at += size;
+          sent += 1;
+          timer = setTimeout(next, gap);
+        };
+        timer = setTimeout(next, gap);
+      },
+    });
+    return new Response(body, { status: 200, headers: { 'content-type': type } });
+  };
+}
+
+const polls = (calls) => calls.filter((c) => c.method === 'GET' && c.url.startsWith('/api/mesh-jobs/'));
+
+test('sizes read as nginx counts them, and a download as part of its whole', () => {
+  assert.equal(sizeText(153707436), '154 MB');
+  assert.equal(sizeText(4300000), '4.3 MB');
+  assert.equal(sizeText(24480), '24 kB');
+  assert.equal(sizeText(12), '1 kB');
+  assert.equal(progressText(15260874, 153707436), '15 of 154 MB');
+  assert.equal(progressText(2500000, 7200000), '2.5 of 7.2 MB');
+  assert.equal(progressText(9800, 24480), '9 of 24 kB');
+  assert.equal(progressText(12000000, null), '12 MB');
+  // Rounded down: one byte short of the end is not the whole.
+  assert.equal(progressText(1591440, 1591593), '1.5 of 1.6 MB');
+  assert.equal(progressText(153707435, 153707436), '153 of 154 MB');
+  assert.equal(progressText(1591593, 1591593), '1.6 of 1.6 MB', 'and the whole reads as its size');
+});
+
+test('the message for c9025: the surface was built, how big it is, and that the download failed', () => {
+  const error = new DownloadFailedError('c9025 build', {
+    mesh: true, faces: 8539810, total: 153707436, received: 15260874, tries: 3,
+  });
+  assert.ok(error instanceof ApiError);
+  assert.equal(error.status, 0);
+  assert.equal(error.detail, 'c9025 build finished on the server (8,539,810 triangles, 154 MB), but '
+    + 'downloading the surface failed: it broke off 3 times, at most 15 of 154 MB in. The server keeps '
+    + 'it, so asking for it again downloads it without building it again; a coarser setting makes a '
+    + 'smaller surface.');
+  assert.doesNotMatch(error.detail, /lost contact|may still finish|running/);
+  // Not a failure of the settings: the render fallback leaves it alone (it reads serverDetail).
+  assert.equal(error.serverDetail, undefined);
+  const quiet = new DownloadFailedError('c9025 build', { mesh: true, faces: 8539810, total: 153707436,
+    received: 15260874, lostSeconds: 63 });
+  assert.match(quiet.detail, /failed: the server stopped answering for 63 s after 15 of 154 MB had arrived\./);
+});
+
+test('a download that outlasts the poll limit but keeps arriving is read whole, in one poll', async () => {
+  // 25 pieces 10 ms apart: 250 ms in all, against 40 ms for the headers and 150 ms between pieces.
+  Object.assign(POLL_TIMING, { requestTimeout: 40, stallTimeout: 150 });
+  const bytes = binaryReply(2000);
+  const calls = server({
+    'GET /api/neurons/i/1/mesh-job': [started],
+    'GET /api/mesh-jobs/j1': [streamed(bytes, { pieces: 25, gap: 10 })],
+  });
+  const seen = [];
+  const t0 = Date.now();
+  const mesh = await within(5000, api.mesh('i', 1, {}, { onStatus: (j) => seen.push(j) }));
+  assert.ok(Date.now() - t0 >= 200, 'the download took longer than the poll limit');
+  assert.equal(mesh.n_faces, 2000);
+  assert.ok(mesh.faces instanceof Uint32Array);
+  assert.equal(mesh.faces.length, 6000);
+  assert.equal(mesh.vertices[3], 3);
+  assert.equal(polls(calls).length, 1, 'never cut off and asked again');
+  assert.equal(seen.filter((j) => j.reconnecting).length, 0);
+});
+
+test('the give-up window does not count time spent downloading', async () => {
+  const clock = fakeClock(0);
+  Object.assign(POLL_TIMING, { requestTimeout: 1000, stallTimeout: 1000, giveUp: 60000 });
+  const bytes = binaryReply(2000);
+  server({
+    'GET /api/neurons/i/1/mesh-job': [started],
+    // Twice broken off after 80 s of steady bytes, then whole: 160 s between the
+    // first failure and the second, every second of it the server talking.
+    'GET /api/mesh-jobs/j1': [
+      streamed(bytes, { pieces: 12, breakAfter: 8, clock, tick: 10000 }),
+      streamed(bytes, { pieces: 12, breakAfter: 8, clock, tick: 10000 }),
+      streamed(bytes, { pieces: 12, clock, tick: 10000 }),
+    ],
+  }, { clock });
+  const mesh = await within(3000, api.mesh('i', 1));
+  assert.equal(mesh.n_faces, 2000);
+});
+
+test('a download that stops arriving is dropped after the stall limit and asked for again', async () => {
+  Object.assign(POLL_TIMING, { requestTimeout: 1000, stallTimeout: 40 });
+  const bytes = binaryReply(2000);
+  const calls = server({
+    'GET /api/neurons/i/1/mesh-job': [started],
+    'GET /api/mesh-jobs/j1': [streamed(bytes, { stopAfter: 3 }), streamed(bytes)],
+  });
+  const seen = [];
+  const mesh = await within(3000, api.mesh('i', 1, {}, { onStatus: (j) => seen.push(j) }));
+  assert.equal(mesh.n_faces, 2000);
+  assert.equal(polls(calls).length, 2);
+  const retry = seen.find((j) => j.reconnecting);
+  assert.ok(retry, 'the retry was reported');
+  assert.equal(retry.downloading.broke, true);
+  assert.equal(retry.downloading.total, bytes.byteLength, 'the size, from the reply\'s header');
+  assert.equal(retry.downloading.faces, 2000);
+  assert.match(retry.error, /the download broke off at \d+ of \d+ kB: the download stopped/);
+  assert.equal(stageText(retry), `downloading the surface broke off at ${progressText(retry.downloading.received,
+    bytes.byteLength)}, asking again`);
+});
+
+test('a download that keeps breaking off ends saying the surface was built, with its size', async () => {
+  Object.assign(POLL_TIMING, { requestTimeout: 1000, stallTimeout: 30, downloadTries: 3 });
+  const bytes = binaryReply(2000);
+  const calls = server({
+    'GET /api/neurons/i/1/mesh-job': [started],
+    'GET /api/mesh-jobs/j1': [streamed(bytes, { stopAfter: 2 }), streamed(bytes, { breakAfter: 4 }),
+      streamed(bytes, { stopAfter: 3 })],
+    'DELETE /api/mesh-jobs/j1': [{ body: {} }],
+  });
+  const error = await within(3000, rejects(api.mesh('i', 1)));
+  assert.ok(error instanceof DownloadFailedError, String(error));
+  assert.ok(error instanceof ApiError);
+  assert.ok(!(error instanceof ConnectionLostError));
+  assert.ok(!error.aborted);
+  assert.equal(polls(calls).length, 3);
+  assert.equal(error.faces, 2000);
+  assert.equal(error.total, bytes.byteLength);
+  assert.equal(error.received, Math.ceil(bytes.byteLength / 10) * 4);
+  assert.match(error.detail, /^c1 build finished on the server \(2,000 triangles, \d+ kB\), but downloading the surface failed: it broke off 3 times, at most \d+ of \d+ kB in\./);
+  assert.doesNotMatch(error.detail, /lost contact|may still finish/);
+  await nextTick();
+  assert.equal(calls.filter((c) => c.method === 'DELETE').length, 1);
+});
+
+test('a server that goes silent after part of the surface arrived: the download failed, not "may still finish"', async () => {
+  const clock = fakeClock(25000);
+  Object.assign(POLL_TIMING, { requestTimeout: 1000, stallTimeout: 30, downloadTries: 5 });
+  const bytes = binaryReply(2000);
+  server({
+    'GET /api/neurons/i/1/mesh-job': [started],
+    'GET /api/mesh-jobs/j1': [streamed(bytes, { stopAfter: 3 }), new TypeError('network down')],
+    'DELETE /api/mesh-jobs/j1': [{ body: {} }],
+  }, { clock });
+  const error = await within(3000, rejects(api.mesh('i', 1)));
+  assert.ok(error instanceof DownloadFailedError, String(error));
+  assert.ok(error.lostSeconds > 60);
+  assert.match(error.detail, /^c1 build finished on the server \(2,000 triangles, \d+ kB\), but downloading the surface failed: the server stopped answering for \d+ s after \d+ of \d+ kB had arrived\./);
+});
+
+test('Stop during a download aborts the request itself, and releases the job', async () => {
+  const bytes = binaryReply(2000);
+  const asked = [];
+  const calls = server({
+    'GET /api/neurons/i/1/mesh-job': [started],
+    'GET /api/mesh-jobs/j1': [streamed(bytes, { pieces: 100, gap: 10, asked })],
+    'DELETE /api/mesh-jobs/j1': [{ body: {} }],
+  });
+  const controller = new AbortController();
+  const promise = api.mesh('i', 1, {}, { signal: controller.signal });
+  await nextTick(60);
+  controller.abort();
+  const error = await within(500, rejects(promise));
+  assert.equal(error.aborted, true);
+  assert.equal(error.message, 'c1 build stopped');
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].signal.aborted, true, 'the download was ended, not left running');
+  await nextTick();
+  assert.equal(calls.filter((c) => c.method === 'DELETE').length, 1);
+});
+
+test('a cell unloaded during a download stands down at once, ending the download', async () => {
+  const bytes = binaryReply(2000);
+  const asked = [];
+  server({
+    'GET /api/neurons/i/1/mesh-job': [started],
+    'GET /api/mesh-jobs/j1': [streamed(bytes, { pieces: 100, gap: 10, asked })],
+    'DELETE /api/mesh-jobs/j1': [{ body: {} }],
+  });
+  let wanted = true;
+  const promise = api.mesh('i', 1, {}, { alive: () => wanted });
+  await nextTick(60);
+  wanted = false;
+  const error = await within(500, rejects(promise));
+  assert.equal(error.aborted, true);
+  assert.equal(error.message, 'c1 build abandoned');
+  assert.equal(asked[0].signal.aborted, true);
+});
+
+test('a download says how far it has got, from half a second in, with the size from its header', async () => {
+  const clock = fakeClock(0);
+  const bytes = binaryReply(2000);
+  server({
+    'GET /api/neurons/i/1/mesh-job': [started],
+    'GET /api/mesh-jobs/j1': [running(), streamed(bytes, { pieces: 10, clock, tick: 300 })],
+  }, { clock });
+  const seen = [];
+  const busy = [];
+  const off = onBusy(({ message }) => busy.push(message));
+  try {
+    await within(3000, api.mesh('i', 1, {}, { onStatus: (j) => seen.push(j) }));
+  } finally {
+    off();
+  }
+  const down = seen.filter((j) => j.downloading);
+  // Pieces at 300 ms steps: none in the first half second, then each 300 ms (over 250).
+  assert.equal(down.length, 8);
+  assert.ok(down.every((j) => j.downloading.total === bytes.byteLength && j.downloading.faces === 2000));
+  assert.ok(down.every((j, i) => i === 0 || j.downloading.received > down[i - 1].downloading.received));
+  // The last stage the build reported is not shown as still going.
+  assert.ok(down.every((j) => j.progress === null && j.kind === 'mesh'));
+  assert.match(stageText(down[0]), /^downloading the surface, \d+ of \d+ kB$/);
+  assert.ok(busy.some((m) => /^c1 build: downloading \d+ of \d+ kB$/.test(m)), busy.join(' | '));
+  assert.equal(busy.at(-1), 'ready', 'the busy line does not keep saying the download');
+  assert.equal(seen.at(-1).status, 'done');
+});
+
+test('stageText: a result that is not a surface, and a download whose size is not known', () => {
+  assert.equal(stageText({ status: 'running', kind: 'deviation', downloading: { received: 12e6, total: null } }),
+    'downloading the result, 12 MB');
+  assert.equal(stageText({ status: 'done', kind: 'mesh', downloading: { received: 25e6, total: 153707436 } }),
+    'downloading the surface, 25 of 154 MB');
 });
 
 let failed = 0;

@@ -17,12 +17,23 @@
  * starts no further cells.
  */
 
+import { progressText } from './api.js';
+
 const LINGER_MS = 2500;
 const LINGER_FAILED_MS = 6000;
 
 /** What the poll's state means to someone watching, for one cell. */
 export function stageText(job) {
   if (!job) return 'building';
+  // A finished product on its way down (api.js pollJob): a surface of millions
+  // of triangles can take a minute on a slow link, and is no longer building.
+  const down = job.downloading;
+  if (down) {
+    const what = job.kind === 'mesh' ? 'the surface' : 'the result';
+    const got = progressText(down.received, down.total);
+    if (down.broke && job.reconnecting) return `downloading ${what} broke off at ${got}, asking again`;
+    return `downloading ${what}, ${got}`;
+  }
   // The follow lost the server (api.js pollJob keeps trying for a minute): say
   // so, rather than leave the last stage and clock frozen on screen.
   if (job.reconnecting) {

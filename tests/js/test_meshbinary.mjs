@@ -18,7 +18,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const jsDir = process.env.SBFSEM_JS_DIR || path.join(here, '..', '..', 'src', 'sbfsem_web', 'static', 'js');
 const load = (name) => import(pathToFileURL(path.join(jsDir, name)).href);
 const {
-  api, decodeMeshReply, MESH_MEDIA_TYPE, POLL_TIMING,
+  api, decodeMeshReply, meshReplySize, MESH_MEDIA_TYPE, POLL_TIMING,
 } = await load('api.js');
 const { meshWeight } = await load('appcore.js');
 
@@ -68,6 +68,19 @@ const test = (name, fn) => cases.push([name, fn]);
 for (const [name, reply] of Object.entries(fixture)) {
   test(`${name}: the binary decodes to exactly what JSON.parse gives`, () => {
     sameAsJson(decodeMeshReply(bufferOf(reply.binary)), JSON.parse(reply.json));
+  });
+}
+
+for (const [name, reply] of Object.entries(fixture)) {
+  test(`${name}: the header says how long the whole reply is and how many triangles it carries`, () => {
+    const bytes = new Uint8Array(bufferOf(reply.binary));
+    const parsed = JSON.parse(reply.json);
+    assert.deepEqual(meshReplySize(bytes), { total: bytes.byteLength, faces: parsed.mesh.n_faces });
+    // Known from the header alone, before any of the arrays has arrived.
+    const headerEnd = 4 + new DataView(bytes.buffer).getUint32(0, true);
+    assert.deepEqual(meshReplySize(bytes.subarray(0, headerEnd)), meshReplySize(bytes));
+    assert.equal(meshReplySize(bytes.subarray(0, headerEnd - 1)), null, 'not until the header is whole');
+    assert.equal(meshReplySize(bytes.subarray(0, 3)), null);
   });
 }
 

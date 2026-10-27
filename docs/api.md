@@ -149,6 +149,11 @@ order and `null` where `vertices`, `faces` and `vertex_data` go. It adds
 `arrays`: `{"vertices": [offset, count], "faces": [offset, count],
 "vertex_data": [offset, count] or null}`, each offset in bytes from the start
 of the data, each array starting at a multiple of its own element size.
+The header comes first, so the whole reply's length is known from its first
+bytes: `4 + H` plus the end of the last array. The viewer reads it there to
+count a download (through nginx the reply is compressed and has no
+`Content-Length`), and reads the body as it arrives, dropping it only after 20 s
+with no bytes.
 
 - `vertices`: `int32`, each coordinate (µm) as `rint(v × 10⁴)`, the JSON's own
   fourth decimal. Read it back as `k / 10⁴` in float64 (a division: `k × 10⁻⁴`

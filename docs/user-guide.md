@@ -183,6 +183,16 @@ lost contact, though the job may still finish on the server; and the mesh
 downloads (GLB, OBJ and the other exports) still build inside one request.
 Removing a cell mid-build abandons its job.
 
+**A finished surface downloads for as long as it keeps arriving.** A fine
+Voxel size can make a surface of millions of triangles (RC1 c9025 at 0.02 µm:
+8.5 million, 154 MB, 50 MB on the wire), which takes a minute on a slow link.
+The busy line and the progress card count it ("downloading the surface, 23 of
+154 MB"). Only a download that stops arriving for 20 s is dropped and asked for
+again; after three of those, the banner says **Download failed**: the surface
+was built on the server, with its triangles and size, and downloading it
+failed. The server keeps it, so Apply (or ↻ on the cell's row) asks for it
+again without building it again; a coarser setting makes a smaller surface.
+
 ### Where the controls live
 
 **Volume** sits at the top of the left column, above Load a neuron. The left
@@ -3178,10 +3188,13 @@ bar just moves and the clock is the signal), the seconds elapsed on your own
 clock so it keeps moving between updates, and a **Stop** button for that pane
 (it stops all of the pane's layers, the ones still waiting too; a mesh another
 pane is also waiting for keeps downloading for it).
-A job still waiting for a worker or for server memory says so. If the server
+A job still waiting for a worker or for server memory says so. A finished
+surface on its way down says how much has come ("downloading the surface, 23
+of 154 MB", the bar filling with it). If the server
 stops answering, the card says "no answer for N s, retrying" and keeps trying
 for a minute, then reports that contact was lost (the job may still finish on
-the server; Retry looks again). A restart that loses the job is noticed and the
+the server; Retry looks again); a surface whose download kept breaking off is
+reported as built and not downloaded, with its size. A restart that loses the job is noticed and the
 job is started again once, if the cell is back: a mesh comes back from the
 server's disk cache, but an error map or a Difference starts over from zero
 (minutes, on a big cell).

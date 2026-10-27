@@ -255,14 +255,46 @@ function pageProtocol() {
  * build up to `every` late (0.5 s on average, measured 0 to 0.7 s on production,
  * 2026-10-20).  A poll the server answered at once although it was asked to wait
  * (one that predates `wait`) is followed after the rest of `every`.
- * `requestTimeout` bounds one poll, so a hung connection counts as a failed poll
- * after that long instead of holding the follow (and `alive`/Stop) until the
- * proxy's 300 s.  `now` is the clock the give-up window and a poll's time are
- * measured on.  Overridable for tests. */
+ * `requestTimeout` bounds the wait for a poll's answer to begin (its headers), so
+ * a hung connection counts as a failed poll after that long instead of holding
+ * the follow (and `alive`/Stop) until the proxy's 300 s.  Its body is then read
+ * for as long as it keeps arriving, and given up only after `stallTimeout` with
+ * no bytes: a finished surface of 8.5 M triangles is 154 MB, 50 MB on the wire,
+ * and a limit on the whole poll cut it off at 12 to 15 MB every 20 s and began
+ * it again from nothing until the follow gave up (RC1 c9025, 2026-10-27, on a
+ * link carrying 0.7 MB/s).  A finished product whose download breaks off
+ * `downloadTries` times ends the follow with a DownloadFailedError.  `now` is
+ * the clock the give-up window and a poll's time are measured on.  Overridable
+ * for tests. */
 export const POLL_TIMING = {
-  first: 150, every: 1000, wait: pollWaitFor(pageProtocol()), giveUp: 60000, requestTimeout: 20000,
+  first: 150,
+  every: 1000,
+  wait: pollWaitFor(pageProtocol()),
+  giveUp: 60000,
+  requestTimeout: 20000,
+  stallTimeout: 20000,
+  downloadTries: 3,
   now: () => Date.now(),
 };
+
+/** "860 kB", "4.3 MB", "154 MB": a size in decimal units, as nginx's log counts bytes. */
+export function sizeText(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1e6) return `${Math.max(1, Math.round(n / 1e3))} kB`;
+  return n < 1e7 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.round(n / 1e6).toLocaleString('en-US')} MB`;
+}
+
+/** "23 of 154 MB", or "23 MB" when the whole is not known.  The part is rounded
+ * down, so a download one byte short of its end never reads as the whole. */
+export function progressText(received, total) {
+  if (!(total > 0)) return sizeText(received);
+  if (received >= total) return `${sizeText(total).split(' ')[0]} of ${sizeText(total)}`;
+  const unit = sizeText(total).split(' ')[1];
+  const tenths = total < 1e7 && unit === 'MB';
+  const scaled = received / (unit === 'kB' ? 1e3 : 1e6) * (tenths ? 10 : 1);
+  const part = Math.floor(scaled + 1e-9) / (tenths ? 10 : 1);
+  return `${tenths ? part.toFixed(1) : part.toLocaleString('en-US')} of ${sizeText(total)}`;
+}
 
 /** The viewer stopped hearing from the server while a job ran.  Not a
  * statement about the job: it may well finish there. */
@@ -271,6 +303,34 @@ export class ConnectionLostError extends ApiError {
     super(0, `lost contact with the server for ${seconds} s while ${what} was running. `
       + 'It may still finish there: ask for it again in a moment.');
     this.lostSeconds = seconds;
+  }
+}
+
+/**
+ * The job finished on the server, and its product would not come down: the
+ * download broke off `tries` times, or the server went quiet after part of it
+ * had arrived (`lostSeconds`).  `mesh` says the product was a surface (a binary
+ * reply always is), with `faces` triangles and `total` bytes when the reply's
+ * header said so; `received` is the most of it any try got.  The server keeps a
+ * finished build, so asking again downloads it without building it again.
+ */
+export class DownloadFailedError extends ApiError {
+  constructor(what, {
+    mesh = false, faces = null, total = null, received = 0, tries = 0, lostSeconds = 0,
+  } = {}) {
+    const size = [faces > 0 ? `${faces.toLocaleString('en-US')} triangles` : '', total > 0 ? sizeText(total) : '']
+      .filter(Boolean).join(', ');
+    const got = received > 0 ? progressText(received, total) : '';
+    const how = lostSeconds
+      ? `the server stopped answering for ${lostSeconds} s` + (got ? ` after ${got} had arrived` : '')
+      : `it broke off ${tries === 1 ? 'once' : `${tries} times`}` + (got ? `, at most ${got} in` : '');
+    super(0, mesh
+      ? `${what} finished on the server${size ? ` (${size})` : ''}, but downloading the surface failed: ${how}. `
+        + 'The server keeps it, so asking for it again downloads it without building it again; '
+        + 'a coarser setting makes a smaller surface.'
+      : `${what}: the server answered, but downloading its answer failed: ${how}. `
+        + 'Ask for it again in a moment.');
+    Object.assign(this, { faces, total, received, tries, lostSeconds, mesh });
   }
 }
 
@@ -317,29 +377,142 @@ export function decodeMeshReply(buffer) {
   return job;
 }
 
-/** A poll's answer: the binary of a finished mesh, or JSON (a job still
- * running, a failure, a measurement, a mesh the binary cannot carry, a server
- * from before the binary). */
-async function readJob(response) {
-  const type = response.headers?.get?.('content-type') || '';
-  if (type.split(';')[0].trim() === MESH_MEDIA_TYPE) {
-    return decodeMeshReply(await response.arrayBuffer());
+/** The bytes each array of the binary takes per number (mesh_binary.py `_ARRAYS`). */
+const ARRAY_BYTES = { vertices: 4, faces: 4, vertex_data: 8 };
+
+/**
+ * What the first bytes of a binary reply say about all of it: `{ total, faces }`,
+ * its length in bytes and the surface's triangles, or null while its header is
+ * still on the way (or is not one).  From the header's `arrays`, because
+ * through production's nginx the reply is compressed and has no Content-Length.
+ */
+export function meshReplySize(bytes) {
+  if (bytes.byteLength < 4) return null;
+  const length = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
+  if (bytes.byteLength < 4 + length) return null;
+  let head;
+  try {
+    head = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + length)));
+  } catch {
+    return null;
   }
-  return response.json();
+  let end = 0;
+  for (const [name, where] of Object.entries(head?.arrays || {})) {
+    if (where) end = Math.max(end, where[0] + where[1] * (ARRAY_BYTES[name] || 1));
+  }
+  const faces = Number(head?.mesh?.n_faces);
+  return { total: 4 + length + end, faces: Number.isFinite(faces) ? faces : null };
 }
 
-/** One poll of a job, bounded in time.  Asks for a finished mesh as binary:
- * 7.2 MB instead of 12.7 MB of JSON for c1178, which production's nginx
- * compressed for 0.6 s of every finished poll, and no JSON.parse.  `wait`
- * (seconds) asks the server to hold the poll until the job ends. */
-function pollOnce(jobId, label, timeout, wait = 0) {
-  const options = {};
-  if (timeout > 0 && typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
-    options.signal = AbortSignal.timeout(timeout);
+/** `chunks` (Uint8Arrays) as one, `bytes` long. */
+function joined(chunks, bytes) {
+  if (chunks.length === 1) return chunks[0];
+  const out = new Uint8Array(bytes);
+  let at = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, at);
+    at += chunk.byteLength;
   }
+  return out;
+}
+
+function stopError(message, flags) {
+  return Object.assign(new Error(message), flags);
+}
+
+/**
+ * One poll of a job.  Asks for a finished mesh as binary: 7.2 MB instead of
+ * 12.7 MB of JSON for c1178, which production's nginx compressed for 0.6 s of
+ * every finished poll, and no JSON.parse.  `wait` (seconds) asks the server to
+ * hold the poll until the job ends.
+ *
+ * The answer must begin (its headers) within `timeout` ms.  Its body is then
+ * read as it arrives, however long that takes, and given up only when nothing
+ * arrives for `stall` ms (POLL_TIMING).  `signal` aborts the request itself, so
+ * Stop ends a download rather than leave it running behind the page.
+ * `progress(received, total)` follows a body; when it answers false (the cell
+ * is no longer wanted) the download is dropped with an error marked
+ * `abandoned`.  `seen` is filled as the poll goes, for the caller to read when
+ * it fails: `heard` (the clock's time of the headers or of the last bytes),
+ * `answered` (the headers came, status 2xx), `mesh` (a binary, so a finished
+ * surface), `received`, `total` and `faces` (from the binary's header, else
+ * an uncompressed Content-Length; null when not known).
+ */
+async function pollOnce(jobId, label, {
+  timeout = 0, stall = 0, wait = 0, signal = null, progress = null, seen = {}, clock = Date.now,
+} = {}) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const options = controller ? { signal: controller.signal } : {};
   if (LITTLE_ENDIAN) options.headers = { Accept: `${MESH_MEDIA_TYPE}, application/json` };
-  const query = wait > 0 ? `?wait=${wait}` : '';
-  return request(`/api/mesh-jobs/${jobId}${query}`, options, label).then(readJob);
+  let timer = null;
+  let failure = null;
+  const abort = (error) => {
+    failure ??= error;
+    controller?.abort(error);
+  };
+  // The limit on the next sign of life: first the headers, then each piece of the body.
+  const arm = (ms, message) => {
+    clearTimeout(timer);
+    if (ms > 0 && controller) timer = setTimeout(() => abort(stopError(message, { timedOut: true })), ms);
+  };
+  const stop = () => abort(stopError('stopped', { stopped: true }));
+  if (signal?.aborted) stop();
+  signal?.addEventListener('abort', stop, { once: true });
+  Object.assign(seen, { heard: 0, answered: false, mesh: false, received: 0, total: null, faces: null });
+  try {
+    arm(timeout, `no answer in ${Math.round(timeout / 1000)} s`);
+    const query = wait > 0 ? `?wait=${wait}` : '';
+    const response = await request(`/api/mesh-jobs/${jobId}${query}`, options, label);
+    seen.heard = clock();
+    seen.answered = true;
+    const type = (response.headers?.get?.('content-type') || '').split(';')[0].trim();
+    seen.mesh = type === MESH_MEDIA_TYPE;
+    const reader = response.body?.getReader?.();
+    arm(stall, `the download stopped for ${Math.round(stall / 1000)} s`);
+    if (!reader) {
+      // No stream to follow (an old browser, a test's reply): read whole.
+      return seen.mesh ? decodeMeshReply(await response.arrayBuffer()) : await response.json();
+    }
+    if (!response.headers.get('content-encoding')) {
+      const length = Number(response.headers.get('content-length'));
+      if (length > 0) seen.total = length;
+    }
+    const chunks = [];
+    let sized = null;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      arm(stall, `the download stopped for ${Math.round(stall / 1000)} s`);
+      chunks.push(value);
+      seen.received += value.byteLength;
+      seen.heard = clock();
+      if (seen.mesh && !sized && seen.received < 1 << 20) {
+        sized = meshReplySize(joined(chunks, seen.received));
+        if (sized) Object.assign(seen, sized);
+      }
+      if (progress && progress(seen.received, seen.total) === false) {
+        const dropped = stopError('no longer wanted', { abandoned: true });
+        abort(dropped);
+        throw dropped;
+      }
+    }
+    clearTimeout(timer);
+    const body = joined(chunks, seen.received);
+    chunks.length = 0;
+    if (seen.mesh) {
+      // A typed array's own buffer: a lone chunk may be a view into a larger one.
+      const exact = body.byteOffset === 0 && body.byteLength === body.buffer.byteLength
+        ? body.buffer : body.slice().buffer;
+      return decodeMeshReply(exact);
+    }
+    return JSON.parse(new TextDecoder().decode(body));
+  } catch (error) {
+    // What this poll's own limits or Stop did, in place of the bare AbortError a browser may give.
+    throw failure || error;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', stop);
+  }
 }
 
 /** Statuses a proxy answers while the service restarts or is busy: the job
@@ -392,12 +565,20 @@ function jobFailure(job, what) {
  * displays, and while polls fail `onStatus({ ...lastJob, reconnecting: true,
  * reconnectSeconds, error })`.  `onSubmitted(jobId)` is called once, when the
  * server has taken the job (its start answered), before the first poll.  A
- * network failure, a poll that outlasts
- * `POLL_TIMING.requestTimeout`, or a 502/503/504 is tolerated for
- * `POLL_TIMING.giveUp` ms; after that a ConnectionLostError says so (and the
- * job is released, as it is before any other error ends the follow).
+ * network failure, a poll whose answer does not begin within
+ * `POLL_TIMING.requestTimeout`, or a 502/503/504 is tolerated until the server
+ * has been silent for `POLL_TIMING.giveUp` ms; after that a ConnectionLostError
+ * says so (and the job is released, as it is before any other error ends the
+ * follow).  The silence is counted from the last bytes heard, so a long
+ * download is never counted in it.  While a finished product downloads,
+ * `onStatus({ ...lastJob, downloading: { received, total, faces } })` follows
+ * it (about four times a second, from half a second in).  A download that
+ * breaks off is asked for again; after `POLL_TIMING.downloadTries` of them, or
+ * the give-up window after one, a DownloadFailedError says the product was made
+ * and would not come down.
  * `signal` (an AbortSignal) and `alive` (a function, consulted between
- * polls and before a resubmit) both stop the follow: a DELETE cancels a
+ * polls, before a resubmit and while a download arrives) both stop the follow,
+ * and end a download in progress: a DELETE cancels a
  * still-queued job (a running one cannot be interrupted; its result lands in
  * the server cache so nothing is wasted) and the rejection carries
  * `aborted: true`, so callers go quiet rather than announce an error the
@@ -411,7 +592,7 @@ export async function pollJob(start, {
   label = 'working…', what = 'job', signal, alive, onStatus, onSubmitted, timing,
 } = {}) {
   const {
-    first, every, wait, giveUp, requestTimeout, now: clock,
+    first, every, wait, giveUp, requestTimeout, stallTimeout, downloadTries, now: clock,
   } = { ...POLL_TIMING, ...timing };
   // A poll that waits on the server is sent at once; the server answers when there is news.
   const firstDelay = wait > 0 ? 0 : first;
@@ -449,7 +630,12 @@ export async function pollJob(start, {
   let resubmitted = false;
   let jobId = null;
   let lastJob = null;
-  let failingSince = 0;
+  // While polls fail: since when the server has been silent, and the downloads
+  // that broke off (`broken`: how many; `product`: what they said of it).
+  let silentSince = 0;
+  let broken = 0;
+  let product = null;
+  const downloadFailed = (extra) => new DownloadFailedError(what, { ...product, tries: broken, ...extra });
   try {
     if (alive && !alive()) throw stopped(null, `${what} abandoned`);
     jobId = await submit();
@@ -467,11 +653,33 @@ export async function pollJob(start, {
       if (alive && !alive()) throw stopped(jobId, `${what} abandoned`);
       const asked = clock();
       const seconds = Math.round((asked - t0) / 1000);
+      const seen = {};
+      let began = 0;
+      let shown = 0;
+      // A body on its way (a finished product): said once it has taken half a
+      // second, and given up when the cell is no longer wanted.
+      const progress = (received, total) => {
+        if (alive && !alive()) return false;
+        const at = clock();
+        began ||= at;
+        if (at - began < 500 || at - shown < 250) return true;
+        shown = at;
+        notify(`${what}: downloading ${progressText(received, total)}`, 'busy');
+        report({
+          ...(lastJob || { status: 'running' }), progress: null,
+          kind: seen.mesh ? 'mesh' : lastJob?.kind,
+          downloading: { received, total, faces: seen.faces },
+        });
+        return true;
+      };
       let job;
       try {
-        job = await abortable(signal, pollOnce(jobId, `${label} ${seconds}s`, requestTimeout, wait));
+        job = await abortable(signal, pollOnce(jobId, `${label} ${seconds}s`, {
+          timeout: requestTimeout, stall: stallTimeout, wait, signal, progress, seen, clock,
+        }));
       } catch (error) {
         if (error === ABORT) throw error;
+        if (error?.abandoned) throw stopped(jobId, `${what} abandoned`);
         if (error instanceof ApiError && error.status === 404) {
           // Nobody wants the job any more: do not start another for them.
           if (alive && !alive()) throw stopped(null, `${what} abandoned`);
@@ -494,21 +702,49 @@ export async function pollJob(start, {
           throw error;
         }
         const now = clock();
-        if (!failingSince) failingSince = now;
-        if (now - failingSince > giveUp) {
+        if (seen.answered) {
+          // The server answered and its answer broke off part way: a download
+          // that failed, not a server that went away.
+          broken += 1;
+          product = {
+            mesh: seen.mesh || !!product?.mesh,
+            faces: seen.faces ?? product?.faces ?? null,
+            total: seen.total ?? product?.total ?? null,
+            received: Math.max(seen.received, product?.received || 0),
+          };
+          if (broken >= downloadTries) {
+            cancel(jobId);
+            throw downloadFailed();
+          }
+        }
+        silentSince = seen.heard ? Math.max(silentSince, seen.heard) : (silentSince || now);
+        const silent = Math.round((now - silentSince) / 1000);
+        if (now - silentSince > giveUp) {
           // The poll's own error ("504 ... the gateway gave up") describes a
           // build request, not this follow: say what happened to it instead.
           cancel(jobId);
-          throw new ConnectionLostError(what, Math.round((now - failingSince) / 1000));
+          throw product ? downloadFailed({ lostSeconds: silent }) : new ConnectionLostError(what, silent);
         }
         report({
           ...(lastJob || { status: 'unknown' }), reconnecting: true,
-          reconnectSeconds: Math.round((now - failingSince) / 1000),
-          error: String(error?.detail || error?.message || error),
+          reconnectSeconds: silent,
+          ...(seen.answered ? {
+            progress: null,
+            kind: seen.mesh ? 'mesh' : lastJob?.kind,
+            downloading: { received: seen.received, total: seen.total, faces: seen.faces, broke: true },
+          } : {}),
+          error: seen.answered
+            ? `the download broke off at ${progressText(seen.received, seen.total)}: ${error?.message || error}`
+            : String(error?.detail || error?.message || error),
         });
         continue;
+      } finally {
+        // The busy line said the download: give it back to whatever else is in the air.
+        if (shown) notify(pending ? 'working…' : 'ready', pending ? 'busy' : '');
       }
-      failingSince = 0;
+      silentSince = 0;
+      broken = 0;
+      product = null;
       lastJob = job;
       report(job);
       if (job.status === 'done') return job;

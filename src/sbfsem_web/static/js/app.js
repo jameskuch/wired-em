@@ -1,6 +1,8 @@
 // Wiring: DOM events -> API calls -> views.
 
-import { api, onBusy, ApiError, setMovesProvider, loadsOf } from './api.js';
+import {
+  api, onBusy, ApiError, DownloadFailedError, setMovesProvider, loadsOf,
+} from './api.js';
 import {
   state, subscribe, upsertNeuron, removeNeuron, loadGeneration, selectNeuron, selectedRecord,
   selectedRecords, setSelected, selectRange, selectAll, clearSelection,
@@ -547,7 +549,7 @@ function fail(error) {
  * the viewport naming the cell, the technique it failed under, and why --
  * enough to know which parameter to walk back.
  */
-function showRenderError(record, options, reason, { failure = null, exhausted = false } = {}) {
+function showRenderError(record, options, reason, { failure = null, exhausted = false, downloaded = false } = {}) {
   // Every parameter of the technique that was in use (the schema knows which
   // those are), not only the three pathways' first ones.
   const knobs = knobSummary(options);
@@ -563,17 +565,23 @@ function showRenderError(record, options, reason, { failure = null, exhausted = 
   } else if (failure) {
     next = 'the Render panel marks the settings to change, with ways to fix them'
       + (failure.fits ? ` (Voxel size ${failure.fits} µm or coarser fits).` : '.');
+  } else if (downloaded) {
+    // Built, and kept on the server: only the download is left to do.
+    next = 'ask for it again (Apply, or ↻ on its row).';
   } else {
     next = 'nothing in its settings caused this: try again in a moment (Apply, or ↻ on its row).';
   }
-  $('render-error-title').textContent = 'Render failed.';
+  $('render-error-title').textContent = downloaded ? 'Download failed.' : 'Render failed.';
   $('render-error-text').textContent =
     `c${record.id} with ${techniqueLabel(options)}`
     + (knobs.length ? ` (${knobs.join(', ')})` : '')
-    + ` — ${reason}. The cell is not shown: ${next}`;
+    // A reason that is sentences ends with its own period.
+    + ` — ${String(reason).replace(/\.$/, '')}. The cell is not shown: ${next}`;
   const banner = $('render-error');
   banner.dataset.key = record.key;
   banner.hidden = false;
+  // Apply asks again for a cell whose draw failed, its settings unchanged or not.
+  record.drawFailed = true;
 }
 
 /**
@@ -604,6 +612,7 @@ function showRenderNotice(headline, detail, { action = null, ms = 15000 } = {}) 
 
 /** A cell rendering successfully clears its own failure banner. */
 function clearRenderError(record) {
+  record.drawFailed = false;
   const banner = $('render-error');
   if (!banner.hidden && banner.dataset.key === record.key) banner.hidden = true;
 }
@@ -2807,7 +2816,8 @@ async function applyRenderTo(records, { fitPixel = false } = {}) {
     });
     // Settings asked for anew: what the cell fell back from is no longer what it asks.
     if (asked) r.fallback = null;
-    return asked;
+    // The same settings again are a retry of a draw that failed (the banner says to press Apply).
+    return asked || !!r.drawFailed;
   });
   if (fitted.size) {
     const sizes = [...new Set(fitted.values())];
@@ -3231,7 +3241,8 @@ async function addToScene(record, {
     // own action, not an error.
     if (error?.aborted) return 'skipped';
     fail(error);
-    showRenderError(record, options, error instanceof ApiError ? error.detail : String(error.message || error));
+    showRenderError(record, options, error instanceof ApiError ? error.detail : String(error.message || error),
+      { downloaded: error instanceof DownloadFailedError });
     return 'failed';
   } finally {
     if (draws.current(record.key, drawn)) {

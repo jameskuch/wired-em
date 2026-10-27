@@ -165,6 +165,12 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   Compare builds each from its own copy, named on its chip and in its build's request; an error map is measured
   against its own copy; the report dialog says each rendering's registration, and "Across registrations" ticks their
   three pairs.
+* ``download`` -- a finished surface that takes longer to download than a poll's limit (RC1 c9025 on a
+  0.7 MB/s link, 2026-10-27): with the page's limits at 2 s and Chrome's network throttled so the surface
+  takes about 7 s, it lands from one download that is never cut off and asked for again, the busy line
+  says how far it has got, and the busy line is "ready" after it; the network cut part way through a
+  second download ends it with "Download failed." saying the surface was built, its triangles and size,
+  and not that the build may still be running; back online, Apply draws it.
 * ``flatten`` -- Display → Flatten IPL 1:1 (2.33.0), on Inferior Monkey c943 with its rings, skeleton and the INL and
   GCL sheets shown: ticked, the INL sheet lies flat at Z = 0 and the GCL at the volume's median IPL thickness along the
   normals (27.66 µm, the note under the box says so), the surface and skeleton move in Z with their X and Y unchanged to
@@ -4852,6 +4858,146 @@ def comparepivot(c: Chrome, r: Report, ctx):
     c.settle(2)
 
 
+# -- download ---------------------------------------------------------------------------
+
+def _page_module(c: Chrome, name: str, as_: str) -> bool:
+    """Put the page's own instance of static/js/<name>, the one app.js imported, at window[as_]."""
+    return bool(js(c, """(async () => {
+        const url = performance.getEntriesByType('resource').map((e) => e.name)
+          .find((n) => new URL(n).pathname === '/static/js/%s');
+        if (!url) return false;
+        window[%s] = await import(url);
+        return true; })()""" % (name, json.dumps(as_)), wait=True))
+
+
+def _mesh_polls(c: Chrome, since: int = 0) -> list[dict]:
+    """The page's polls of /api/mesh-jobs/ seen by the DevTools Network domain after event `since`:
+    each one's binary or not, seconds from its headers to its end, bytes, and why it failed."""
+    polls: dict[str, dict] = {}
+    for e in c.events[since:]:
+        method, params = e.get('method', ''), e.get('params', {})
+        rid = params.get('requestId')
+        if method == 'Network.requestWillBeSent' and '/api/mesh-jobs/' in params['request']['url'] \
+                and params['request'].get('method', 'GET') == 'GET':
+            polls[rid] = {'url': params['request']['url'], 'sent': params['timestamp'], 'mime': '',
+                          'headers': None, 'end': None, 'bytes': 0, 'failed': ''}
+        elif rid in polls and method == 'Network.responseReceived':
+            polls[rid].update(mime=params['response'].get('mimeType', ''), headers=params['timestamp'])
+        elif rid in polls and method == 'Network.loadingFinished':
+            polls[rid].update(end=params['timestamp'], bytes=params.get('encodedDataLength', 0))
+        elif rid in polls and method == 'Network.loadingFailed':
+            polls[rid].update(end=params['timestamp'], failed=params.get('errorText', 'failed'))
+    out = list(polls.values())
+    for poll in out:
+        poll['binary'] = poll['mime'] == 'application/x-sbfsem-mesh'
+        poll['seconds'] = round(poll['end'] - poll['headers'], 2) if poll['end'] and poll['headers'] else None
+    return out
+
+
+def download(c: Chrome, r: Report, ctx):
+    r.start('download: a finished surface that takes longer than a poll\'s limit')
+    boot(c, ctx.url)
+    c.send('Network.enable')
+    first = len(c.events)
+    key = load(c, ctx.cell)
+    r.check("the page's api module is the one app.js uses",
+            _page_module(c, 'api.js', '__apiModule') and js(c, 'window.__apiModule.api === window.sbfsem.api'))
+    finished = [p for p in _mesh_polls(c, first) if p['binary'] and p['end'] and not p['failed']]
+    if not finished:
+        r.check('the first build came down as binary', False, _mesh_polls(c, first)[-3:])
+        return
+    size = finished[-1]['bytes']
+    # The c9025 case in miniature: 2 s for the answer to begin and for any pause in it, and a link
+    # that carries the surface in about 7 s.
+    js(c, """Object.assign(window.__apiModule.POLL_TIMING, { requestTimeout: 2000, stallTimeout: 2000 });
+        window.__busy = []; window.__apiModule.onBusy((e) => window.__busy.push(e.message)); 0""")
+    rate = max(1000, size // 7)
+    c.send('Network.emulateNetworkConditions', offline=False, latency=20, downloadThroughput=rate,
+           uploadThroughput=-1)
+    base = js(c, f'{STATE}.neurons.get({json.dumps(key)}).render.tie_um')
+    mark = len(c.events)
+    js(c, 'window.__landed.length = 0')
+    apply_tie(c, base + 1, key)
+    landed = c.wait_for('window.__landed.some(([, t]) => t === %s)' % json.dumps(base + 1), 90)
+    polls = _mesh_polls(c, mark)
+    downloads = [p for p in polls if p['binary']]
+    r.check('the surface lands', landed, polls[-4:])
+    r.check('from one download, never cut off and asked for again',
+            len(downloads) == 1 and not downloads[0]['failed'] and not any(p['failed'] for p in polls),
+            [(p['bytes'], p['seconds'], p['failed']) for p in polls if p['binary'] or p['failed']])
+    r.check('which took longer than the 2 s limit on a poll',
+            bool(downloads) and (downloads[0]['seconds'] or 0) > 3, downloads[:1] and downloads[0]['seconds'])
+    busy = js(c, 'window.__busy')
+    said = [m for m in busy if re.search(r'build: downloading [\d.,]+ of [\d.,]+ (MB|kB)$', m)]
+    r.check('the busy line says how far the download has got', len(said) >= 3, said[-3:] or busy[-6:])
+    r.check('and is given back when it is done', said and busy.index(said[-1]) < len(busy) - 1
+            and 'downloading' not in busy[-1], busy[-3:])
+
+    # A download that stops part way.  Chrome's emulated network cannot stall one already flowing (new
+    # conditions, offline included, hand it the rest at once), so the page's fetch passes the server's
+    # first 300 kB of a surface through and then nothing: the page's own stall limit ends each try, the
+    # tries run out, and the message says the surface was built.
+    c.send('Network.emulateNetworkConditions', offline=False, latency=0, downloadThroughput=-1,
+           uploadThroughput=-1)
+    js(c, """(() => {
+        Object.assign(window.__apiModule.POLL_TIMING, { giveUp: 3000, downloadTries: 3 });
+        window.__stallAfter = 300000;
+        window.__tries = [];
+        const real = window.__realFetch = window.fetch;
+        window.fetch = async (url, options = {}) => {
+          const response = await real(url, options);
+          const type = response.headers.get('content-type') || '';
+          if (window.__stallAfter == null || !String(url).includes('/api/mesh-jobs/')
+              || !type.startsWith('application/x-sbfsem-mesh')) return response;
+          const reader = response.body.getReader();
+          const tried = { sent: 0, ended: '' };
+          window.__tries.push(tried);
+          const body = new ReadableStream({
+            start(controller) {
+              options.signal?.addEventListener('abort', () => {
+                tried.ended = String(options.signal.reason?.message || options.signal.reason);
+                controller.error(options.signal.reason);
+              });
+            },
+            async pull(controller) {
+              if (tried.sent >= window.__stallAfter) return new Promise(() => {});
+              const { done, value } = await reader.read();
+              if (done) { controller.close(); return; }
+              const part = value.subarray(0, window.__stallAfter - tried.sent);
+              tried.sent += part.byteLength;
+              controller.enqueue(part);
+            },
+          });
+          return new Response(body, { status: response.status, headers: response.headers });
+        };
+        return 0; })()""")
+    apply_tie(c, base + 2, key)
+    failed = c.wait_for("!document.getElementById('render-error').hidden", 60)
+    banner = js(c, """({ title: document.getElementById('render-error-title').textContent,
+        text: document.getElementById('render-error-text').textContent })""")
+    tries = js(c, 'window.__tries')
+    r.check('three tries, each ended by the page\'s stall limit part way', len(tries) == 3 and all(
+        t['ended'] == 'the download stopped for 2 s' and t['sent'] == 300000 for t in tries), tries)
+    r.check('the banner says the download failed', failed and banner['title'] == 'Download failed.', banner)
+    text = banner['text']
+    r.check('that the surface was built, with its triangles and size',
+            re.search(r'build finished on the server \([\d,]+ triangles, [\d.]+ (MB|kB)\), but downloading '
+                      r'the surface failed: (it broke off \d+ times, at most [\d.,]+ of [\d.,]+ (MB|kB) in'
+                      r'|the server stopped answering for \d+ s after [\d.,]+ of [\d.,]+ (MB|kB) had arrived)\.',
+                      text) is not None, text)
+    r.check('and not that the build may still be running',
+            not re.search(r'may still finish|lost contact|was running', text), text)
+    r.check('with how much of it came', 'at most 0.3 of 1.' in text or 'after 0.3 of 1.' in text, text)
+    r.check('in sentences that end once', '..' not in text, text)
+    # The link whole again: asking again draws it (the server kept it).
+    js(c, 'window.__stallAfter = null; window.__landed.length = 0')
+    js(c, "document.getElementById('apply-selected').click()")
+    again = c.wait_for('window.__landed.some(([, t]) => t === %s)' % json.dumps(base + 2), 60)
+    r.check('with the link whole again, Apply draws it', again)
+    r.check('and the banner is gone', js(c, "document.getElementById('render-error').hidden"))
+    c.send('Network.disable')
+
+
 SECTIONS = {
     'notice': notice, 'waiting': waiting, 'draws': draws, 'undo': undo, 'idle': idle,
     'picker': picker, 'save': save, 'analysis': analysis, 'strata': strata, 'strataexport': strataexport, 'twod': twod, 'sheets': sheets, 'volume': volume,
@@ -4875,6 +5021,7 @@ SECTIONS = {
     'visualizations': visualizations,
     'locate': locate,
     'hover': hover,
+    'download': download,
     'flatten': flatten,
     'narrow': narrow,
     'registrations': registrations,

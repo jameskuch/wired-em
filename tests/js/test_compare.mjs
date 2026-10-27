@@ -2049,6 +2049,30 @@ test('the card says the server stopped answering once, not twice', () => {
   assert.doesNotMatch(card.stage.textContent, /no answer/);
 });
 
+test('the card shows a finished surface on its way down, with a bar when its size is known', () => {
+  const host = new El('div');
+  const card = new JobCard(host, {});
+  const spoken = [];
+  Object.defineProperty(card.live, 'textContent', {
+    set(v) { spoken.push(v); }, get() { return spoken.at(-1) ?? ''; }, configurable: true,
+  });
+  card.show({ title: 'Building X' });
+  card.update({ status: 'running', progress: null, kind: 'mesh',
+    downloading: { received: 25e6, total: 153707436, faces: 8539810 } });
+  assert.equal(card.stage.textContent, 'downloading the surface, 25 of 154 MB');
+  assert.equal(card.bar.max, 153707436);
+  assert.equal(card.bar.value, 25e6);
+  card.update({ status: 'running', progress: null, kind: 'mesh',
+    downloading: { received: 50e6, total: 153707436, faces: 8539810 } });
+  assert.equal(spoken.at(-1), 'Building X: downloading the surface', 'spoken once, not at every count');
+  assert.equal(spoken.filter((v) => /downloading/.test(v)).length, 1);
+  // Broken off: the stage keeps what had come, the line below says it is retrying.
+  card.update({ status: 'running', progress: null, kind: 'mesh', reconnecting: true, reconnectSeconds: 20,
+    downloading: { received: 50e6, total: 153707436, broke: true } });
+  assert.equal(card.stage.textContent, 'downloading the surface, 50 of 154 MB');
+  assert.match(card.retrying.textContent, /no answer for 20 s, retrying/);
+});
+
 test('Stop, Retry and Dismiss hand keyboard focus back to the pane', () => {
   const host = new El('div');
   const target = new El('select');

@@ -242,10 +242,12 @@ export class JobCard {
     if (this.stage.textContent !== text) this.stage.textContent = text;
 
     const p = job?.progress;
+    const down = job?.downloading;
     const counted = !!(p && p.total > 0 && Number.isFinite(p.done));
-    if (counted) {
-      this.bar.max = p.total;
-      this.bar.value = Math.min(p.done, p.total);
+    if (counted || down?.total > 0) {
+      // The server's count, or a download's bytes when the whole is known.
+      this.bar.max = counted ? p.total : down.total;
+      this.bar.value = counted ? Math.min(p.done, p.total) : Math.min(down.received, down.total);
       this.bar.setAttribute('aria-valuetext', text);
     } else {
       // No value attribute: the browser's own indeterminate bar.  Never a
@@ -266,7 +268,8 @@ export class JobCard {
 
     // Spoken only when the work changes phase: the title, the stage's name
     // (not its counts) and whether the server is answering.
-    const stageName = job?.status === 'queued' ? text : (p?.stage || text.replace(/ \d[\d,]* of [\d,]+$/, ''));
+    const stageName = down ? text.split(',')[0]
+      : job?.status === 'queued' ? text : (p?.stage || text.replace(/ \d[\d,]* of [\d,]+$/, ''));
     const spoken = `${this.title.textContent}: ${stageName}`
       + (this.reconnectSince ? '. No answer from the server, retrying' : '');
     if (spoken !== this._announced) {
