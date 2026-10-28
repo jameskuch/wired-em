@@ -87,6 +87,7 @@ import { dismissApplyAll, visualizationItems, visualizationSelect } from './vism
 import { buildFigure } from './helpfigures.js';
 import { ENDED as PIVOT_ENDED, pivotAtPointer } from './pivot.js';
 import { buildMovie, loadMovies, movieFor, movieManifest } from './helpmovies.js';
+import { DAMAGED_COLOR, damagedText } from './damaged.js';
 import {
   MODE_LABELS, REG_FIGURES, REG_HELP, correctionChip, correctionForCell, correctionSetting, transformsChip,
 } from './regstatus.js';
@@ -266,6 +267,16 @@ function volumeHasBoundary(source) {
 // coordinates (rings, outlines, the annotation wireframe, the Position shift layer,
 // manual moves, markers), which a flattened Z cannot carry.
 let iplFlat = false;
+
+// Display → Mark damaged sections: a ring where each cell crosses a damaged section of
+// its volume (one its slice-to-volume registration was built without; Viking's
+// correction service lists them), and a line in the cell's Registration section.  Off
+// at every page load and not in the session, like Pivot and Hold; off, nothing is
+// asked for or drawn.
+let damagedOn = false;
+// key -> the server's /damaged-sections answer for the cell's current load (forgetDrawn
+// lets it go with the cell's other extras).
+const damagedCache = new Map();
 
 /** Whether `record` is drawn on the flattened IPL: the view is, and its volume has boundary markers. */
 function flatFor(record) {
@@ -1508,6 +1519,14 @@ function bindEvents() {
   $('pivot-toggle').addEventListener('change', (e) => {
     if (e.target.checked) renderer.armPivot(true);
     else renderer.clearPivot('off');
+  });
+  // Mark damaged sections: the page's alone (not in the session), so off at every load,
+  // even where a browser would put a ticked box back after a reload.
+  $('ctx-damaged').checked = false;
+  $('ctx-damaged').addEventListener('change', (e) => {
+    damagedOn = e.target.checked;
+    for (const record of state.neurons.values()) refreshDamaged(record);
+    compare?.setDamaged(damagedOn);
   });
   $('pivot-chip').addEventListener('click', () => {
     hideHelp();
@@ -3518,6 +3537,9 @@ async function refreshExtras(record, { early = null } = {}) {
   else await shifts?.refresh(record, { gone });
   if (gone()) return;
 
+  await refreshDamaged(record, gone);
+  if (gone()) return;
+
   if (display.showAnnoWire && !flat) {
     try {
       const params = annoWireParams(display);
@@ -3695,6 +3717,81 @@ function nearestNode(nodes, point) {
 function askNodes(record) {
   return sharedRequest(nodesAsked, record.key, loadGeneration(record.key),
     () => askKept(record, 'nodes', () => api.nodes(record.source, record.id)));
+}
+
+/**
+ * Display → Mark damaged sections for one cell: its rings and its Registration line,
+ * asked of the server once per load of the cell while the box is ticked; taken away
+ * when it is not, or on the flattened IPL (the rings are in section coordinates).
+ * `gone` is the caller's "the cell was let go or loaded again" (refreshExtras').
+ */
+async function refreshDamaged(record, gone = null) {
+  const gen = loadGeneration(record.key);
+  const stale = gone || (() => loadGeneration(record.key) !== gen);
+  if (!damagedOn || flatFor(record)) {
+    renderer.removeDamaged(record.key);
+    showDamagedRows(record);
+    return;
+  }
+  let answer = damagedCache.get(record.key);
+  if (!answer) {
+    showDamagedRows(record);
+    try {
+      answer = await api.damagedSections(record.source, record.id);
+    } catch (error) {
+      if (stale()) return;
+      console.warn(`c${record.id} ${record.source}: damaged sections not asked:`, error);
+      showDamagedRows(record, `Damaged sections could not be asked for: ${error?.detail || error?.message || error}`);
+      return;
+    }
+    if (stale()) return;
+    damagedCache.set(record.key, answer);
+    // Unticked (or flattened) while it was asked: kept for the next time, not drawn.
+    if (!damagedOn || flatFor(record)) return;
+  }
+  if (renderer.damaged.get(record.key)?.userData.from !== answer) {
+    renderer.setDamaged(record.key, answer.marks || []);
+    const drawn = renderer.damaged.get(record.key);
+    if (drawn) drawn.userData.from = answer;
+  }
+  showDamagedRows(record);
+}
+
+/**
+ * The Registration section's damaged-sections line of `record`, where its panel is
+ * open: what the server said, or `failure`; hidden while the box is unticked.
+ */
+function showDamagedRows(record, failure = null) {
+  for (const row of document.querySelectorAll('.damaged-row')) {
+    if (row.dataset.damagedFor === record.key) fillDamagedRow(row, record, failure);
+  }
+}
+
+/** One damaged-sections line (showDamagedRows), in the page or not yet. */
+function fillDamagedRow(row, record, failure = null) {
+  row.hidden = !damagedOn;
+  row.replaceChildren();
+  if (damagedOn) {
+    const swatch = document.createElement('span');
+    swatch.className = 'damaged-swatch';
+    swatch.style.borderColor = DAMAGED_COLOR;
+    swatch.setAttribute('aria-hidden', 'true');
+    const said = failure ? { text: failure, lines: [] } : damagedText(damagedCache.get(record.key) || null);
+    const text = document.createElement('span');
+    text.className = 'damaged-text';
+    text.textContent = said.text;
+    row.append(swatch, text);
+    const help = [
+      'Display → Mark damaged sections. A damaged section is one the volume\'s slice-to-volume '
+        + 'registration was built without (Viking\'s list). Viking\'s section correction gives each '
+        + 'its own shift, fitted against the sections either side, and corrects no other section '
+        + 'from it, so what an annotation there shows is less sure.',
+      'A solid magenta ring is an annotation on one; a dashed ring is a link that skips over it, '
+        + 'where no annotation is.',
+      ...(said.lines.length ? ['', ...said.lines] : []),
+    ];
+    setHelp(row, help.join('\n'));
+  }
 }
 
 async function nodesFor(record) {
@@ -5151,6 +5248,7 @@ function forgetDrawn(record, { keepSurfaces = false, keepDrawn = false } = {}) {
   edgesCache.delete(record.key);
   outlinesCache.delete(record.key);
   annoWireCache.delete(record.key);
+  damagedCache.delete(record.key);
   // `keepDrawn`: what is on screen stays until the next draw replaces it, piece by
   // piece (the manual moves' Apply: the cell never leaves the screen while it builds).
   if (keepDrawn) return;
@@ -7571,6 +7669,13 @@ function buildRegistration(body, record) {
     correctionChip(sc, { stamp: humanStamp }),
     (on) => setRegistration(record, { corrections: on ? volumeDefaultCorrection(record.source) : 'off' }))
     .dataset.reg = 'correction';
+
+  // While Display → Mark damaged sections is ticked: the damaged sections the cell crosses.
+  const damaged = document.createElement('div');
+  damaged.className = 'damaged-row';
+  damaged.dataset.damagedFor = record.key;
+  body.append(damaged);
+  fillDamagedRow(damaged, record);
 }
 
 /**
@@ -9636,6 +9741,8 @@ window.sbfsem = {
   get moves() { return moves; },
   get compare() { return compare; },
   get network() { return network; },
+  /** Display → Mark damaged sections: whether it is on, and the answers held, by cell key. */
+  damaged() { return { on: damagedOn, answers: Object.fromEntries(damagedCache) }; },
   state,
   api,
   history() {
@@ -9651,6 +9758,7 @@ window.sbfsem = {
       keptExtras: keptExtras.size, keptExtraNumbers: keptExtras.weight,
       skeletons: skeletonCache.size, nodes: nodesCache.size,
       edges: edgesCache.size, outlines: outlinesCache.size, annotationWires: annoWireCache.size,
+      damaged: damagedCache.size,
     };
   },
   sceneInfo() {

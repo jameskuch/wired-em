@@ -398,6 +398,7 @@ Opening the editor changes nothing on screen; each edit previews on the depth-co
             <label class="field">Opacity
               <input id="ctx-opacity" type="range" min="0.05" max="1" step="0.05" value="0.45">
             </label>
+            <label class="check" data-help="A magenta ring where each cell crosses a damaged section of its volume: one the volume's slice-to-volume registration was built without (Viking's list, from its section-correction service). Viking's section correction gives each damaged section its own shift, fitted against the sections either side, and corrects no other section from it, so what an annotation there shows is less sure. A solid ring is an annotation on a damaged section; a dashed ring is a link that skips over one, where no annotation is (InferiorMonkey's 916 to 935 hold none). Each cell's Registration section lists the ones it crosses, or says that none are listed for its volume. In Render compare's panes too; not on the flattened IPL. For this page only: off whenever the page loads, and not saved with the session."><input type="checkbox" id="ctx-damaged" autocomplete="off"> Mark damaged sections</label>
           </div>
 
           <div class="panel-group" id="vol-group" hidden>

@@ -1068,6 +1068,13 @@ export const api = {
    */
   shiftSummary: (source, id, pair = 'correction') =>
     getJSON(`/api/neurons/${source}/${id}/shift-summary${q({ pair })}`),
+  /**
+   * The damaged sections of the cell's volume, the ones the cell crosses and a disc at
+   * each crossing (`marks`), for Display → Mark damaged sections; `copy` names another
+   * copy than the tab's (a Render compare layer's).
+   */
+  damagedSections: (source, id, { copy } = {}) =>
+    getJSON(`/api/neurons/${source}/${id}/damaged-sections${copyQuery(copy)}`, 'damaged sections…'),
   /** The cell's own rows of the Correction log at `ratio`, from the copy the page loaded. */
   correctionPulls: (source, id, ratio) =>
     getJSON(`/api/neurons/${source}/${id}/correction-pulls${q({ ratio })}`),

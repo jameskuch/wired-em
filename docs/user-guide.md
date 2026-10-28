@@ -425,6 +425,29 @@ DAE) saying what Z is. The pick readout gives the depth from the INL. It starts
 off at every page load and is off in Cped, RPC1 and RPC2, which have no boundary
 markers.
 
+**Mark damaged sections** (since 2.43.0) draws a thin magenta ring where each
+cell crosses a damaged section of its volume. A damaged section is one the
+volume's slice-to-volume registration was built without (Viking's
+`NonStosSectionNumbers`). Viking's section-correction service lists them
+(service 1.6.0 on), gives each one its own shift, fitted against the corrected
+sections either side, and corrects no other section from it, so what an
+annotation there shows is less sure. A solid ring, in the section's plane and
+a little wider than the annotation, rings an annotation on a damaged section. A
+dashed ring marks where a link between two of the cell's annotations skips over
+one, at the link's place and width there: Inferior Monkey's 916 to 935 hold no
+annotation at all, and c1178 crosses all twenty by three long links. The rings
+are drawn over everything and never take a click. Each cell's **Registration**
+section then has a line saying which it crosses ("Crosses 21 of
+InferiorMonkey's 22 damaged sections: 915–935"), with the annotations and links
+on each in its hover, or "No damaged sections listed for RC1" for a volume whose
+set lists none (RC1's list arrives with its next rebuild under service 1.7.0).
+On 2026-10-28 the service listed 66 for RC2 (792 among them), 39 for RPC2, 29 for
+Cped, 23 for RPC1, 22 for Inferior Monkey and 2 for Temporal Monkey. Render
+compare's panes draw the same rings, each from the copy it draws (a Difference
+pane draws none). The marking is not drawn on the flattened IPL. It is off at
+every page load and is not saved with the session; while it is off nothing is
+asked for or drawn.
+
 ### Volume offsets
 
 Cells from different volumes share one scene, each in its own volume's

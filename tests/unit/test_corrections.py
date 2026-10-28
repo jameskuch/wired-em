@@ -40,6 +40,10 @@ GOLDEN = {
     "correct_structures_request_neighbor": "0a200a0e496e666572696f724d6f6e6b6579120e536c696365546f566f6c756d6531120488aa01051801",
     "correct_structures_response": "0a33089bd50f1088aa0118940622120900000000e40a00411100000000488a04412a120900000000000029401100000000000024c00a02080512320a05312e342e30120608b882c9d5061a19313a353532353a36333932383233343237323432333030303022060880f7c4d506",
     "answer_stamp": "0a05312e342e301a19313a353532353a363339323832333432373234323330303030220c0880f7c4d50610c0efd9c901",
+    # From the V2 proto at viking_gRPC_protos 7fceb4e (2026-10-28), which adds
+    # CorrectionSet.damaged_z (field 6): RC2 with sections 790-793 and damaged
+    # 0, 5, 792, 1433, then RC1 with no list.
+    "list_sets_response_damaged": "0a430a150a03524332120e536c696365546f566f6c756d6531120608a0c785d706190000000000409f4021000000000040bf402a089606970698069906320600059806990b0a0f0a0d0a035243311206677269643136",
 }
 
 
@@ -105,6 +109,28 @@ def test_decode_correction_sets_with_their_sections():
     # The sections stay out of the description (the disk cache, a cell's status).
     assert "sections" not in cset.describe()
     assert corr.CorrectionSet.from_description(cset.describe()) == cset
+
+
+def test_decode_the_damaged_sections_of_a_set():
+    answer = corr.decode(golden("list_sets_response_damaged"), corr.LIST_SETS_RESPONSE_SCHEMA)
+    rc2, rc1 = [corr.CorrectionSet.from_message(m) for m in answer["sets"]]
+    assert rc2.sections == (790, 791, 792, 793)
+    # Packed int64 as protoc writes it, 0 included.
+    assert rc2.damaged == (0, 5, 792, 1433)
+    # A volume that lists none, or whose list the service could not read.
+    assert rc1.damaged == ()
+    # The list is a few dozen sections: the description carries it, and reads it back.
+    assert rc2.describe()["damaged_z"] == [0, 5, 792, 1433]
+    assert corr.CorrectionSet.from_description(rc2.describe()) == rc2
+    assert corr.CorrectionSet.from_description(rc1.describe()).damaged == ()
+    # A description kept on disk before 2.43.0 does not say.
+    old = {k: v for k, v in rc2.describe().items() if k != "damaged_z"}
+    assert corr.CorrectionSet.from_description(old).damaged is None
+    # Unpacked (proto2 style) reads the same, out of order and repeated.
+    body = corr.encode({"z": [5], "damaged_z": []}, corr._CORRECTION_SET)
+    for z in (792, 5, 792):
+        body += corr._varint(6 << 3) + corr._varint(z)
+    assert corr.CorrectionSet.from_message(corr.decode(body, corr._CORRECTION_SET)).damaged == (5, 792)
 
 
 def test_decode_section_lattice_with_negative_indices():
@@ -210,6 +236,8 @@ class FakeService:
         # annotations as (a delete moves it); the (status, details) a
         # GetAnswerStamp answers with while it cannot give one.
         self.built = 1790067000
+        # CorrectionSet.damaged_z (service 1.6.0): the volume's damaged sections.
+        self.damaged: list[int] = []
         self.fingerprint = "f1"
         self.stamp_error: tuple[str, str] | None = None
 
@@ -233,6 +261,7 @@ class FakeService:
                 "built_utc": {"seconds": self.built}, "pitch_nm": 2000.0,
                 "kernel_radius_nm": 8000.0,
                 "z": sorted(z for z in self.field if z != "*"),
+                "damaged_z": list(self.damaged),
             } for name in self.volumes if asked in ("", name)]}
 
         def volume_down(request, context):
@@ -615,6 +644,44 @@ def test_a_web_load_applies_the_correction_and_says_so(web):
     again = svc.neuron(1178, "i")
     svc.load_neuron(1178, "i", include_synapses=False)
     assert svc.neuron(1178, "i") is again
+
+
+def test_the_damaged_sections_a_cell_crosses_with_or_without_its_correction(web):
+    """c1178 crosses InferiorMonkey's 916-935, which hold no annotation, by its
+    long links; the list comes with the correction's status, and from the
+    provider for a copy loaded without one."""
+    fake, svc = web
+    fake.damaged = [396, *range(915, 936)]
+    detail = svc.load_neuron(1178, "i", include_synapses=False)
+    assert detail.summary.section_correction.damaged_z == fake.damaged
+    calls = len(fake.calls)
+    damaged = svc.damaged_sections(1178, "i")
+    assert len(fake.calls) == calls  # from the status, nothing asked
+    assert (damaged.volume_name, damaged.stos_group, damaged.listed) == ("InferiorMonkey", "Grid16", True)
+    assert damaged.damaged_z == fake.damaged
+    hole = {s.z: s for s in damaged.sections if 916 <= s.z <= 935}
+    assert sorted(hole) == list(range(916, 936))
+    assert all(s.n_annotations == 0 and s.n_links_over > 0 for s in hole.values())
+    assert damaged.n_links_over == sum(s.n_links_over for s in damaged.sections)
+    assert damaged.n_annotations == sum(s.n_annotations for s in damaged.sections)
+    # A disc for each, in the plane of its section, in the copy's frame.
+    assert len(damaged.marks) == damaged.n_annotations + damaged.n_links_over
+    nodes = {n.z_section: n.xyz_um[2] for n in svc.nodes(1178, "i")}
+    thickness = (max(nodes.values()) - min(nodes.values())) / (max(nodes) - min(nodes))
+    for mark in damaged.marks:
+        assert mark.xyz_um[2] == pytest.approx(mark.z * thickness, abs=1e-3)
+    # The hole holds no annotation: every mark there is a link over it.
+    assert all(m.over for m in damaged.marks if 916 <= m.z <= 935)
+
+    svc.load_neuron(1178, "i", include_synapses=False, section_corrections=False)
+    plain = svc.damaged_sections(1178, "i")
+    assert plain.sections == damaged.sections and plain.listed
+
+    fake.damaged = []
+    svc.corrections()._sets.clear()
+    none = svc.damaged_sections(1178, "i")
+    assert (none.listed, none.sections, none.damaged_z) == (False, [], [])
+    assert none.note == "No damaged sections listed for InferiorMonkey"
 
 
 def test_an_unreachable_service_leaves_the_cell_as_viking_stores_it(tmp_path):

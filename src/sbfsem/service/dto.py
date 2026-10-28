@@ -101,6 +101,12 @@ class SectionCorrectionDTO(BaseModel):
     median_um: float = 0.0
     p95_um: float = 0.0
     max_um: float = 0.0
+    #: The set's damaged sections (``CorrectionSet.damaged_z``): the volume's
+    #: sections its slice-to-volume registration was built without, each
+    #: shifted on its own.  ``[]`` when the volume lists none (or the service
+    #: could not read the list); ``None`` when the status does not say (a
+    #: correction kept from before 2.43.0, or not applied).
+    damaged_z: list[int] | None = None
 
 
 class LiveRegistrationDTO(BaseModel):
@@ -940,6 +946,53 @@ class CoherentSectionDTO(BaseModel):
     mean_dy_um: float
     mean_um: float
     resultant: float
+
+
+class DamagedSectionDTO(BaseModel):
+    """One damaged section a cell crosses (:class:`sbfsem.analysis.damaged.DamagedCrossing`)."""
+
+    z: int
+    n_annotations: int
+    n_links_over: int
+
+
+class DamagedMarkDTO(BaseModel):
+    """Where a cell crosses a damaged section (:class:`sbfsem.analysis.damaged.DamagedMark`):
+    a disc in that section's plane, in the copy's frame (``/nodes``' ``xyz_um``);
+    ``over`` for a link that skips the section, else an annotation on it."""
+
+    z: int
+    xyz_um: list[float]
+    radius_um: float
+    over: bool = False
+
+
+class DamagedSectionsDTO(BaseModel):
+    """``GET /api/neurons/{source}/{id}/damaged-sections``: the damaged sections
+    of the cell's volume, from the correction set its section correction uses,
+    and the ones the cell crosses (an annotation on it or a link over it).
+
+    ``listed`` is false, with ``note`` saying why, when there is no list: the
+    volume lists none (or Viking's service could not read it), it is not a
+    Viking volume, no set is published for it, or the service is not
+    answering and nothing is remembered.
+    """
+
+    neuron_id: int
+    source: str
+    volume_name: str | None = None
+    stos_group: str | None = None
+    built_utc: datetime | None = None
+    listed: bool = False
+    #: Every damaged section of the volume, ascending.
+    damaged_z: list[int] = Field(default_factory=list)
+    #: The ones the cell crosses, ascending.
+    sections: list[DamagedSectionDTO] = Field(default_factory=list)
+    #: A disc for each annotation and link counted there, by section: what the viewer draws.
+    marks: list[DamagedMarkDTO] = Field(default_factory=list)
+    n_annotations: int = 0
+    n_links_over: int = 0
+    note: str = ""
 
 
 class ShiftSummaryDTO(BaseModel):

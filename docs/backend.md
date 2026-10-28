@@ -140,6 +140,26 @@ along each link at the current positions, which is what
 summary as `/api/neurons/{source}/{id}/shift-summary`; the `nodes` table
 carries each annotation's two moves (`shift_um`, `live_shift_um`).
 
+A correction set names its volume's damaged sections (2.43.0): the ones the
+slice-to-volume registration was built without, which Viking's service 1.6.0 on
+lists as `CorrectionSet.damaged_z`, shifts each on its own and corrects no other
+section from. `CorrectionSet.damaged` holds them (empty when the volume lists
+none), and a cell's correction status carries them as `damaged_z`.
+`sbfsem.analysis.damaged` says where a cell crosses one, by an annotation on it or
+a link that skips over it:
+
+```python
+from sbfsem.analysis.damaged import crossings, find
+from sbfsem.io.corrections import CorrectionsClient, choose_set
+
+with CorrectionsClient() as client:
+    cset = choose_set(client.correction_sets("InferiorMonkey"))
+crossings(c, cset.damaged)   # [DamagedCrossing(z=916, n_annotations=0, n_links_over=3), ...]
+found, marks = find(c, cset.damaged)   # and a disc in the section plane for each
+```
+
+The web app serves both as `/api/neurons/{source}/{id}/damaged-sections`.
+
 `sbfsem.analysis.correction_checks` (2.22.0) finds the annotations Viking's
 curve fit pulled toward a much wider linked annotation. Service 1.2.0 takes a
 soma's or a large outline's centroid as a control point of the process, so a

@@ -411,6 +411,10 @@ _CORRECTION_SET: Schema = {
     3: ("pitch_nm", "double", False),
     4: ("kernel_radius_nm", "double", False),
     5: ("z", "int64", True),  # the sections with a map, ascending
+    # The damaged sections the field was built with, ascending: the volume's
+    # NonStosSectionNumbers (service 1.6.0; RC1's from 1.7.0).  Empty both
+    # when the volume lists none and when its list could not be read.
+    6: ("damaged_z", "int64", True),
 }
 # Node (row, col) sits at (col * pitch_nm, row * pitch_nm); fields 1 and 2
 # (gx, gy) are reserved.
@@ -499,9 +503,15 @@ class CorrectionSet:
     ``sections`` (the sections with a map, ascending) is what
     ``ListCorrectionSets`` says; it is not part of :meth:`describe`, so a cell's
     status and the disk cache do not carry a thousand section numbers, and it
-    is left out of comparisons.  Protocol V1 also named the annotation
-    watermark the field was built from and the votes a lattice node needed;
-    V2 does not.
+    is left out of comparisons.  ``damaged`` (service 1.6.0's ``damaged_z``)
+    is the volume's damaged sections, the ones its slice-to-volume
+    registration was built without (``NonStosSectionNumbers``): they correct
+    no other section, and each gets its own shift.  A few dozen at most, so
+    :meth:`describe` carries them; empty when the volume lists none, the
+    service could not read the list, or the service predates 1.6.0, and
+    ``None`` from a description kept on disk before 2.43.0.  Protocol V1 also
+    named the annotation watermark the field was built from and the votes a
+    lattice node needed; V2 does not.
     """
 
     volume_name: str
@@ -510,6 +520,7 @@ class CorrectionSet:
     pitch_nm: float = 0.0
     kernel_radius_nm: float = 0.0
     sections: tuple[int, ...] = field(default=(), compare=False, repr=False)
+    damaged: tuple[int, ...] | None = ()
 
     @classmethod
     def from_message(cls, message: dict, volume_name: str = "") -> CorrectionSet:
@@ -522,6 +533,7 @@ class CorrectionSet:
             pitch_nm=float(message.get("pitch_nm") or 0.0),
             kernel_radius_nm=float(message.get("kernel_radius_nm") or 0.0),
             sections=tuple(int(z) for z in message.get("z") or ()),
+            damaged=tuple(sorted({int(z) for z in message.get("damaged_z") or ()})),
         )
 
     @classmethod
@@ -535,6 +547,8 @@ class CorrectionSet:
             built_utc=when(d.get("built_utc")),
             pitch_nm=float(d.get("pitch_nm") or 0.0),
             kernel_radius_nm=float(d.get("kernel_radius_nm") or 0.0),
+            damaged=(tuple(int(z) for z in d["damaged_z"])
+                     if d.get("damaged_z") is not None else None),
         )
 
     def describe(self) -> dict:
@@ -544,6 +558,7 @@ class CorrectionSet:
             "built_utc": self.built_utc.isoformat() if self.built_utc else None,
             "pitch_nm": self.pitch_nm,
             "kernel_radius_nm": self.kernel_radius_nm,
+            "damaged_z": list(self.damaged) if self.damaged is not None else None,
         }
 
 

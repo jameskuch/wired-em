@@ -24,6 +24,7 @@ import {
 } from './pickgeom.js';
 import { ContextGesture, SURFACE_REACH_PX, listCandidates, pickOf } from './contextmenu.js';
 import { nearestAnnotation as nearestOnRay } from './hoverpick.js';
+import { DAMAGED_COLOR, damagedRingSegments } from './damaged.js';
 import { pivotEnds, staleDepth } from './pivot.js';
 import {
   FAT_FRAGMENT_SHADER, FAT_VERTEX_SHADER, TAIL_ALPHA, WIDTH_DEFAULT, fatArrows, fatColors, fatRange,
@@ -385,6 +386,7 @@ export class Renderer3D {
     this.shifts = new Map();   // key -> Position shift layer (arrows, original rings, slice plane)
     this.moveArrows = new Map(); // key -> a cell's manual moves, an arrow each (setMoveArrows)
     this.moveSets = new Map();   // key -> the rings of what a manual step moves (setMoveSet)
+    this.damaged = new Map();    // key -> where the cell crosses a damaged section (setDamaged)
     // key -> the cell as GraphApp draws it (setGraphCell): one group of the skeleton,
     // rings, a dot per annotation, the flagged annotations and the synapses.
     this.graphs = new Map();
@@ -1944,6 +1946,42 @@ export class Renderer3D {
   }
 
   /**
+   * Display → Mark damaged sections: a ring where the cell crosses a damaged section of
+   * its volume (`marks`, the server's `/damaged-sections` answer, in the cell's frame),
+   * in its section plane, solid around an annotation on it, dashed where a link skips
+   * over it (damaged.js).  Magenta, thin, over everything, never picked.  `[]` or null
+   * takes them away.
+   */
+  setDamaged(key, marks = []) {
+    this._dispose(this.damaged, key);
+    const positions = damagedRingSegments(marks);
+    if (!positions.length) return;
+    const buffers = fatSegments(positions);
+    const tint = new THREE.Color(DAMAGED_COLOR);
+    const rgb = new Float32Array(buffers.position.length);
+    for (let v = 0; v < rgb.length; v += 3) { rgb[v] = tint.r; rgb[v + 1] = tint.g; rgb[v + 2] = tint.b; }
+    const object = wideLines({ ...buffers, color: rgb }, 'rings');
+    object.raycast = () => {};
+    object.userData.role = 'damaged';
+    object.userData.setWidth(2);
+    object.material.opacity = 0.95;
+    object.material.depthTest = false;
+    object.material.depthWrite = false;
+    object.renderOrder = 32;
+    const group = new THREE.Group();
+    group.name = key;
+    group.userData.marks = marks.length;
+    group.add(object);
+    this._place(group, this._sourceOf(key));
+    group.visible = !this._hiddenCells.has(key);
+    this.renderLayer.add(group);
+    this.damaged.set(key, group);
+    this._applyZHide(key);
+  }
+
+  removeDamaged(key) { this._dispose(this.damaged, key); }
+
+  /**
    * Draw a marker's ring `delta` ([dx, dy, dz] um, volume frame) from where it is: a
    * manual move not yet applied to the cell (null puts it back).  Nothing is rebuilt.
    */
@@ -2262,7 +2300,7 @@ export class Renderer3D {
    */
   _cellLayers() {
     return [this.meshes, this.skeletons, this.synapses, this.discs, this.annoWires,
-      this.shifts, this.points, this.lines, this.moveArrows, this.moveSets, this.graphs];
+      this.shifts, this.points, this.lines, this.moveArrows, this.moveSets, this.damaged, this.graphs];
   }
 
   removeAll(key) {
@@ -2274,6 +2312,7 @@ export class Renderer3D {
     this.removeShifts(key);
     this.removeMoveArrows(key);
     this._dispose(this.moveSets, key);
+    this.removeDamaged(key);
     this.removePoints(key);
     this.removeLines(key);
     this.removeGraphCell(key);

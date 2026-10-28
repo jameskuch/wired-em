@@ -105,7 +105,7 @@ from ..geometry.unify import (
     raw_budget,
 )
 from ..geometry.volume import curve_volume_to_mesh
-from ..io.corrections import CorrectionsError, CorrectionsProvider, correction_mode
+from ..io.corrections import CorrectionsError, CorrectionsProvider, choose_set, correction_mode
 from ..io.loader import NeuronLoader
 from ..io.odata import ODataClient, ODataError, odata_utc
 from ..io.registration import RegistrationError, RegistrationProvider
@@ -137,6 +137,9 @@ from .dto import (
     CorrectionOutlineMoveDTO,
     CorrectionPullDTO,
     CorrectionPullsDTO,
+    DamagedMarkDTO,
+    DamagedSectionDTO,
+    DamagedSectionsDTO,
     DendriteDiameterDTO,
     DeviationAnnotationsDTO,
     DeviationBiasDTO,
@@ -4279,6 +4282,63 @@ class SbfsemService:
         from ..analysis.shifts import shift_summary
 
         return ShiftSummaryDTO(**shift_summary(self.neuron(neuron_id, source), pair).as_dict())
+
+    def damaged_sections(self, neuron_id: int, source) -> DamagedSectionsDTO:
+        """The damaged sections of a cell's volume, and the ones the cell crosses
+        (:mod:`sbfsem.analysis.damaged`): what the viewer's *Mark damaged
+        sections* draws.  About the copy of the cell this call is about
+        (``requested_copy``).
+
+        The list is the one in the cell's correction status when it carries
+        one (the set that corrected it); otherwise the set its correction
+        would use, asked of the provider, which remembers a volume's sets for
+        ten minutes and on disk.  So a copy loaded without a correction is
+        marked too: the damaged sections are the volume's, not the correction's.
+        """
+        from ..analysis.damaged import find
+
+        neuron = self.neuron(neuron_id, source)
+        out = DamagedSectionsDTO(neuron_id=int(neuron.id), source=neuron.source)
+        status = neuron.section_correction or {}
+        if status.get("damaged_z") is not None:
+            out.volume_name, out.stos_group = status.get("volume_name"), status.get("stos_group")
+            out.built_utc = status.get("built_utc")
+            damaged = [int(z) for z in status["damaged_z"]]
+        else:
+            volume_name = neuron.volume.viking_name
+            if not volume_name:
+                out.note = f"{neuron.volume.display_name} is not a Viking volume: no damaged sections listed"
+                return out
+            provider = self.corrections()
+            try:
+                sets, _fresh = provider.sets(volume_name)
+            except CorrectionsError as exc:
+                out.volume_name = volume_name
+                out.note = f"Viking's section-correction service is not answering: {exc}"
+                return out
+            cset = choose_set(sets, provider.stos_group)
+            if cset is None:
+                out.volume_name = volume_name
+                out.note = f"No section correction is published for {volume_name}: no damaged sections listed"
+                return out
+            out.volume_name, out.stos_group, out.built_utc = (
+                cset.volume_name, cset.stos_group, cset.built_utc)
+            if cset.damaged is None:
+                out.note = ("Viking's section-correction service is not answering, and the sets "
+                            "remembered from it do not list damaged sections")
+                return out
+            damaged = list(cset.damaged)
+        out.damaged_z = sorted(set(damaged))
+        out.listed = bool(out.damaged_z)
+        if not out.listed:
+            out.note = f"No damaged sections listed for {out.volume_name or 'this volume'}"
+            return out
+        found, marks = find(neuron, out.damaged_z)
+        out.sections = [DamagedSectionDTO(**c.as_dict()) for c in found]
+        out.marks = [DamagedMarkDTO(**m.as_dict()) for m in marks]
+        out.n_annotations = sum(c.n_annotations for c in found)
+        out.n_links_over = sum(c.n_links_over for c in found)
+        return out
 
     def registration_quality(self, neuron_id: int, source) -> RegistrationQualityDTO:
         """How the copy of a cell this call is about (``requested_copy``) lines it up, and

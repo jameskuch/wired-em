@@ -179,6 +179,11 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   200 nm are drawn on the default's triangles in one pass, each taller edge-on than the last, the summary naming
   the depth; a Render compare pane's annotations are drawn edge-on too.  ``--shots DIR`` writes the 3D view at
   0.012 µm a pixel, rings yellow, default and flat, and at 0.01 µm a pixel at one section and 200 nm.
+* ``damaged`` -- Display → Mark damaged sections (2.43.0) on c1178 of NeitzInferiorMonkey: unticked on a fresh
+  page, nothing asked and nothing drawn; ticked, the server lists the volume's damaged sections and c1178 crosses
+  915 to 935, the hole by links only, with a ring for each annotation and link counted, in its section plane; the
+  Registration section says so in a line; Render compare's panes draw the same rings (not the Difference pane);
+  unticked, every ring and the line go; after a reload it is off again, before and after Restore, and asks nothing.
 """
 
 # ruff: noqa: UP031
@@ -3120,6 +3125,102 @@ def shiftpulls(c: Chrome, r: Report, ctx):
             got)
 
 
+DAMAGED_SPY = r"""
+(() => {
+  const api = window.sbfsem.api;
+  if (api.__damagedCalls) return;
+  api.__damagedCalls = [];
+  const asked = api.damagedSections;
+  api.damagedSections = (source, id, opts = {}) => {
+    api.__damagedCalls.push({ source, id, copy: opts.copy ?? null });
+    return asked(source, id, opts);
+  };
+})()
+"""
+
+
+def damaged(c: Chrome, r: Report, ctx):
+    """Display → Mark damaged sections (2.43.0): InferiorMonkey lists 915 to 935 among its damaged
+    sections (Viking's correction service 1.6.0 on), and c1178 crosses the hole 916 to 935, which
+    holds no annotation, by its long links."""
+    r.start('damaged: Mark damaged sections, off at every load, rings in the 3D view and Render compare')
+    boot(c, ctx.url)
+    _dismiss_offer(c)
+    set_control(c, 'pathway', 'original')
+    js(c, DAMAGED_SPY)
+    key = load(c, 1178, source='NeitzInferiorMonkey')
+    box = "document.getElementById('ctx-damaged')"
+    calls = 'window.sbfsem.api.__damagedCalls.length'
+    off = js(c, f"({{ checked: {box}.checked, calls: {calls}, drawn: window.sbfsem.renderer.damaged.size }})")
+    r.check('a fresh page: unticked, nothing asked for and nothing drawn',
+            off == {'checked': False, 'calls': 0, 'drawn': 0}, off)
+
+    js(c, f"(() => {{ document.getElementById('toggle-display').click(); {box}.click(); }})()")
+    drawn = c.wait_for('window.sbfsem.renderer.damaged.has(%s)' % json.dumps(key), 60)
+    answer = js(c, 'window.sbfsem.damaged().answers[%s]' % json.dumps(key)) or {}
+    sections = {s['z']: s for s in answer.get('sections', [])}
+    hole = [sections.get(z) for z in range(916, 936)]
+    r.check('ticked, the server lists InferiorMonkey\'s damaged sections, 915 to 935 among them',
+            drawn and answer.get('listed') and set(range(915, 936)) <= set(answer.get('damaged_z', [])),
+            {k: answer.get(k) for k in ('listed', 'volume_name', 'stos_group', 'damaged_z', 'note')})
+    r.check('c1178 crosses all of 916 to 935 by links over them, with no annotation there',
+            all(h and h['n_annotations'] == 0 and h['n_links_over'] > 0 for h in hole),
+            [(z, h and (h['n_annotations'], h['n_links_over'])) for z, h in zip(range(916, 936), hole, strict=True)])
+    marks = answer.get('marks', [])
+    nodes = js(c, """(async () => (await window.sbfsem.api.nodes('NeitzInferiorMonkey', 1178))
+        .map((n) => [n.z_section, n.xyz_um[2]]))()""", wait=True)
+    (z0, u0), (z1, u1) = min(nodes), max(nodes)
+    thickness = (u1 - u0) / (z1 - z0)
+    planar = all(abs(m['xyz_um'][2] - m['z'] * thickness) < 1e-3 for m in marks)
+    counted = answer.get('n_annotations', 0) + answer.get('n_links_over', 0)
+    ring = js(c, 'window.sbfsem.renderer.damaged.get(%s).userData.marks' % json.dumps(key))
+    r.check('a ring for each annotation and link counted, each in its section plane, all drawn',
+            len(marks) == counted == ring and planar,
+            {'marks': len(marks), 'counted': counted, 'drawn': ring, 'planar': planar, 'thickness': thickness})
+    r.check('asked once for the cell', js(c, calls) == 1, js(c, 'window.sbfsem.api.__damagedCalls'))
+
+    js(c, "document.querySelector(%s).click(); true" % json.dumps(f'.neuron-item[data-key="{key}"] .chev'))
+    c.wait_for("!!document.querySelector('.cell-panel')", 10)
+    js(c, """(() => { const h = [...document.querySelectorAll('.cell-panel .section-head')]
+        .find((x) => x.textContent.includes('Registration')); h.click(); })()""")
+    c.settle(2)
+    line = js(c, """(() => { const row = document.querySelector('.damaged-row');
+        return row && { hidden: row.hidden, text: row.textContent, help: row.dataset.help || '' }; })()""")
+    r.check("the Registration section says which it crosses: 21 of InferiorMonkey's, 915–935",
+            bool(line) and not line['hidden'] and line['text'].startswith('Crosses 21 of InferiorMonkey')
+            and line['text'].endswith('915–935') and '916–935:' in line['help'], line)
+
+    _compare_tab(c, 2)
+    js(c, "document.getElementById('compare-build').click()")
+    built = c.wait_for(f"{COMPARE}.panes.length === 2 && {COMPARE}.panes.every((p) => p.damagedDrawn"
+                       " || (p.layers.length === 1 && p.layers[0].config.tech === 'diff'))", 240)
+    panes = js(c, f"""{COMPARE}.panes.map((p) => ({{ techs: p.layers.map((l) => l.config.tech),
+        rings: p.renderer.damaged.get('cmp-damaged')?.userData.marks ?? 0 }}))""")
+    r.check('Render compare: each pane that draws the cell has the same rings',
+            built and all(p['rings'] == len(marks) for p in panes if 'diff' not in p['techs']), panes)
+
+    js(c, f'{box}.click()')
+    c.settle(2)
+    gone = js(c, f"""({{ main: window.sbfsem.renderer.damaged.size,
+        panes: {COMPARE}.panes.map((p) => p.renderer.damaged.size),
+        line: document.querySelector('.damaged-row')?.hidden ?? true }})""")
+    r.check('unticked, every ring and the line go', gone['main'] == 0 and not any(gone['panes']) and gone['line'],
+            gone)
+
+    js(c, f'{box}.click()')         # ticked again as the page is left: a reload still starts unticked
+    c.settle(2)
+    boot(c, ctx.url, keep=True)
+    js(c, DAMAGED_SPY)
+    c.wait_for("!document.getElementById('restore-banner').hidden", 30)
+    r.check('after a reload it is off, before Restore', js(c, f'{box}.checked') is False)
+    js(c, "document.getElementById('restore-yes').click()")
+    c.wait_for('window.sbfsem.renderer.meshes.size >= 1', 240)
+    c.settle(3)
+    after = js(c, f"({{ checked: {box}.checked, calls: {calls}, drawn: window.sbfsem.renderer.damaged.size }})")
+    r.check('and after it: nothing asked for and nothing drawn', after == {'checked': False, 'calls': 0, 'drawn': 0},
+            after)
+
+
 def visualizations(c: Chrome, r: Report, ctx):
     """The Visualizations menu (2026-10-19): the open row's Look dropdown, the right-click submenu
     with its "apply to all cells" follow-up, Save, and the manager's file and delete."""
@@ -5088,6 +5189,7 @@ SECTIONS = {
     'comparepivot': comparepivot,
     'annodepth': annodepth,
     'comparereport': comparereport,
+    'damaged': damaged,
 }
 
 

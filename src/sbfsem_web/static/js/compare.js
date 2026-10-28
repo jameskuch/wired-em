@@ -122,6 +122,8 @@ const SHIFT_KEY = 'cmp-shift';
 // The annotations overlay of a pane: one per pane, however many layers it has.
 // (A key never holds a '/': the renderer reads the text before one as a volume.)
 const ANNOTATION_KEY = 'A';
+// Display → Mark damaged sections (the main page's box): its rings in a pane.
+const DAMAGED_KEY = 'cmp-damaged';
 const layerKey = (id) => `L${id}`;
 
 // A pane narrower than this (px) shows its layers as dots: the names are in the
@@ -272,6 +274,9 @@ export class CompareView {
     this._syncing = false;
     this._outdated = false;  // the cell picker now names another cell or load
     this._annotations = new Map(); // `${cell}#${load}@${copy}` -> the annotations, fetched once
+    // Display → Mark damaged sections, set by the main page (setDamaged): off at every load.
+    this._damagedOn = false;
+    this._damaged = new Map(); // `${cell}#${load}@${copy}` -> the /damaged-sections answer, asked once
     this._copies = new Map();  // `${cell}#${load}|${tag}` -> { tag, summary }: a registration's copy, loaded once
     this.maximized = null;   // the pane that fills the grid, if one does
     this.viewCube = null;    // the view cube in the grid's top-right corner (setViewCube)
@@ -395,6 +400,7 @@ export class CompareView {
       state: 'idle',          // the worst of the layers' (see _renderState)
       shift: false,           // the Position shift layer (shared settings, the strip)
       shiftLayer: null,       // the Position shift layer this pane draws (shiftlayer.js)
+      damagedDrawn: null,     // which cell load and copy its damaged-section rings are of
       annotations: false,     // the annotations overlay (discs as rings, outlines)
       annotationsVisible: true,
       annotationsDrawn: null, // the cell load the rings on screen were drawn for
@@ -1456,6 +1462,7 @@ export class CompareView {
     const range = pane.zRange ?? {};
     for (const layer of pane.layers) pane.renderer.setZHide(layer.key, range);
     pane.renderer.setZHide(ANNOTATION_KEY, range);
+    pane.renderer.setZHide(DAMAGED_KEY, range);
   }
 
   /** Make `pane` fill the grid (the others keep everything and wait), or put the grid back. */
@@ -2874,7 +2881,55 @@ export class CompareView {
     for (const layer of pane.layers) this._styleLayer(layer, layer.colored);
     // Never throws, and is not waited for, so it cannot hold up the annotations.
     this._applyShifts(pane);
+    this._applyDamaged(pane);
     await this._applyAnnotations(pane);
+  }
+
+  /**
+   * Display → Mark damaged sections, from the main page: a ring in every pane where the
+   * compared cell crosses a damaged section, in the copy each pane draws (its first
+   * layer's registration).  Off, nothing is asked for and the rings go.
+   */
+  setDamaged(on) {
+    this._damagedOn = !!on;
+    for (const pane of this.panes) this._applyDamaged(pane);
+  }
+
+  /** One pane's damaged-section rings: asked once per cell load and copy.  Never throws. */
+  async _applyDamaged(pane) {
+    const { record } = this;
+    if (!this._damagedOn || !record || this._isDiff(pane)) {
+      pane.renderer.removeDamaged(DAMAGED_KEY);
+      pane.damagedDrawn = null;
+      return;
+    }
+    const registration = this._paneRegistration(pane);
+    const tag = registrationTag(registration) ?? '';
+    const wanted = () => this._damagedOn && this.panes.includes(pane) && !this._isDiff(pane)
+      && this.record === record && (registrationTag(this._paneRegistration(pane)) ?? '') === tag;
+    let answer;
+    let token;
+    try {
+      const { tag: copy } = await this._copyFor(record, registration);
+      token = this._annotationsToken(record, copy);
+      let promise = this._damaged.get(token);
+      if (!promise) {
+        for (const old of this._damaged.keys()) if (!this._sameLoad(old, record)) this._damaged.delete(old);
+        promise = api.damagedSections(record.source, record.id, { copy: copy ?? undefined });
+        this._damaged.set(token, promise);
+        promise.catch(() => { if (this._damaged.get(token) === promise) this._damaged.delete(token); });
+      }
+      answer = await promise;
+    } catch (error) {
+      if (!wanted()) return;
+      this.onStatus(`Pane ${pane.index + 1}: the damaged sections could not be asked for: `
+        + `${error?.detail || error?.message || error}`, 'error');
+      return;
+    }
+    if (!wanted() || pane.damagedDrawn === token) return;
+    pane.renderer.setDamaged(DAMAGED_KEY, answer.marks || []);
+    pane.renderer.setZHide(DAMAGED_KEY, pane.zRange ?? {});
+    pane.damagedDrawn = token;
   }
 
   /** The annotations overlay: drawn once per cell load, taken away when off. */

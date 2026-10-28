@@ -233,6 +233,8 @@ export class Renderer3D {
     this.calls.push(['setShiftWindow', key, range && range.arrows ? [range.arrows.first, range.arrows.count] : null]);
   }
   setShiftPlane(key, z) { this.calls.push(['setShiftPlane', key, z]); }
+  setDamaged(key, marks) { this.calls.push(['setDamaged', key, marks.length]); }
+  removeDamaged(key) { this.calls.push(['removeDamaged', key]); }
   cameraState() { return {}; } restoreCamera() {}
   resetView() { this.clearPivot('reset'); this.framed += 1; this.realFramed = !this.paused; }
   // The pivot point, as the real one keeps it: set, let go (saying why) or waiting for a click, the app told
@@ -408,6 +410,12 @@ globalThis.fetch = async (url, init = {}) => {
     return server.failNodes ? reply({ detail: 'nodes broke' }, 500) : reply(server.nodes);
   }
   if (method === 'GET' && /closed-curves/.test(pathname)) return reply([]);
+  if (method === 'GET' && /damaged-sections$/.test(pathname)) {
+    return reply({ listed: true, volume_name: 'InferiorMonkey', damaged_z: [915, 916],
+      sections: [{ z: 915, n_annotations: 1, n_links_over: 0 }, { z: 916, n_annotations: 0, n_links_over: 1 }],
+      marks: [{ z: 915, xyz_um: [0, 0, 64.05], radius_um: 1, over: false },
+        { z: 916, xyz_um: [1, 0, 64.12], radius_um: 1, over: true }] });
+  }
   if (method === 'POST' && pathname === '/api/neurons') {
     server.copyLoads.push(body);
     const mode = body.section_corrections;
@@ -2743,6 +2751,29 @@ test('a pane that becomes a Difference loses its annotations overlay', async () 
   setTech(view, 0, 'diff');
   assert.equal(view.panes[0].annotations, false);
   assert.equal(calls(view.panes[0].renderer, 'removeDiscs').at(-1)[1], 'A');
+});
+
+test('Mark damaged sections: off, nothing is asked; on, every pane but a Difference draws the rings once', async () => {
+  resetServer({ nodes: [] });
+  const { view } = makeView(2);
+  await view.build(record);
+  const asked = () => server.log.filter(([m, p]) => m === 'GET' && /damaged-sections$/.test(p)).length;
+  assert.equal(asked(), 0, 'nothing asked while off');
+  assert.equal(calls(view.panes[0].renderer, 'setDamaged').length, 0);
+  view.setDamaged(true);
+  await until(() => view.panes.every((p) => calls(p.renderer, 'setDamaged').length === 1), 'the rings');
+  assert.deepEqual(calls(view.panes[0].renderer, 'setDamaged')[0], ['setDamaged', 'cmp-damaged', 2]);
+  assert.equal(asked(), 1, 'one answer for the cell load and copy, shared by the panes');
+  // A display pass draws nothing again.
+  await view._applyDisplay(view.panes[0]);
+  assert.equal(calls(view.panes[0].renderer, 'setDamaged').length, 1);
+  // A Difference pane draws none; off takes them away everywhere.
+  setTech(view, 1, 'diff');
+  await view._applyDamaged(view.panes[1]);
+  assert.equal(calls(view.panes[1].renderer, 'removeDamaged').at(-1)[1], 'cmp-damaged');
+  view.setDamaged(false);
+  await until(() => calls(view.panes[0].renderer, 'removeDamaged').length, 'the rings taken away');
+  assert.equal(asked(), 1);
 });
 
 test('the annotations overlay is one per pane under its own key, however many layers; hiding keeps it', async () => {

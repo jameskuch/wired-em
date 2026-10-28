@@ -18,6 +18,42 @@
 - README (Wired, how to deploy without naming the server, contributing), LICENSE.txt (the port's notice beside the original), CONTRIBUTING.md and CITATION.cff (GitHub's *Cite this repository*). CI (`.github/workflows/ci.yml`) now runs on the public copy: Ubuntu with Python 3.11 to 3.13 and macOS with 3.13; Windows joins once the suite has been run there. Tests: `tests/unit/test_publish_public.py` (new, 6: what is left out and replaced, every refusal, and a publish from a real repository and clone that carries only the committed tree).
 - **The first public CI run found that skimage on Apple Silicon draws knife-edge pixels differently.** Its arm64 build fuses `x0*y1 - x1*y0` into one multiply-add (rounding `x1*y0` alone), so on GitHub's macOS runner two of the random-polygon cases came out 11 and 1 pixels away from the fill; `math.fma` reproduces exactly those pixels, and the x86_64 builds (this Mac's Python, the Ubuntu runners, production) match the fill bit for bit. The fill is numpy, which never fuses, so it gives one answer everywhere; where skimage fuses, `tests/unit/test_rasterize.py` now holds it to skimage's rule with each product rounded on its own (`unfused_mask`), and checks that rule against skimage itself wherever skimage does not fuse (+12 tests, all 3,600 random polygons). Rings the library hands to skimage itself (small, not finite, or too large) are still compared with skimage on every platform.
 
+## 2.43.0 — 2026-10-28
+
+### Damaged sections: read from Viking's correction service, and marked on request (2026-10-28)
+
+- **The client reads each correction set's damaged sections, `CorrectionSet.damaged_z` (field 6, packed `repeated int64`, added to the V2 proto in viking_gRPC_protos `7fceb4e`).** A damaged section is one a volume's slice-to-volume registration was built without (its `NonStosSectionNumbers`). Since service 1.6.0 Viking corrects no other section from a damaged one and gives each its own shift, fitted against the corrected sections either side. `CorrectionSet.damaged` holds the list. A cell's correction status carries it as `section_correction.damaged_z`: `[]` when the volume lists none, `null` when the status does not say. The description kept on disk carries it too; one kept before 2.43.0 reads as not knowing. Live against corrections.codepharm.net 1.7.0 on 2026-10-28:
+
+  | Volume | Damaged sections | Notes |
+  |---|---:|---|
+  | RC2 | 66 | 792 included |
+  | RPC2 | 39 | |
+  | Cped | 29 | |
+  | RPC1 | 23 | |
+  | InferiorMonkey | 22 | 396 and 915–935 |
+  | TemporalMonkey | 2 | |
+  | RC1 | 0 | Set built 02:38 UTC; its list comes with the next rebuild under 1.7.0 |
+
+  The golden bytes are protoc's, from the new proto.
+- **Display → Context → Mark damaged sections, off at every page load, draws a thin magenta ring where each cell crosses a damaged section of its volume.**
+  - A solid ring, in the section plane and a little wider than the annotation, rings an annotation on a damaged section.
+  - A dashed ring marks where a link between two of the cell's own annotations skips over a damaged section, at the link's place and width there. InferiorMonkey's 916–935 hold no annotation at all; c1178 crosses all twenty by three long links (63 rings: 1 annotation on 915, 62 link crossings).
+  - The rings are drawn over everything and never take a click.
+  - Each cell's Registration section gets a line: "Crosses 21 of InferiorMonkey's 22 damaged sections: 915–935", with the annotations and links on each section in its hover. A volume that lists none says "No damaged sections listed for RC1".
+  - Render compare's panes draw the same rings, each from the copy it draws; a Difference pane draws none. Nothing is drawn on the flattened IPL.
+  - The box is the page's, like Pivot and Hold: not saved with the session, and unticked after a reload even where the browser would restore a form. Off, nothing is asked for or drawn.
+  - It lives in Display's Context group, beside the INL/GCL boundaries and the vessels, because it is the volume's context. It reaches every cell and redraws without reloading one. The Registration switches above it reload the cell.
+  - RC2 c74420 crosses 37 of RC2's 66 damaged sections, 792 among them (5 annotations, 12 links over): 434 rings.
+- **`GET /api/neurons/{source}/{id}/damaged-sections`** (new) answers the volume's list, from the cell's correction status or else the set its correction would use, so a copy loaded without a correction answers too. It gives the sections the cell crosses (`z`, `n_annotations`, `n_links_over`), a disc for each (`marks`, in the copy's frame), and a `note` when there is no list. `sbfsem.analysis.damaged` (`crossings`, `find`) is the rule.
+- Not a render option: no `GEOMETRY_VERSION` change and no render-schema entry.
+- Tests:
+  - `tests/unit/test_damaged.py` (new, 7): annotations on a damaged section, links over one, a link stored both ways, a section only spanned, child structures, marks in the section plane at the link's place and width.
+  - `test_corrections.py` +2: the protoc golden with `damaged_z`, packed and unpacked; c1178 through the facade with and without its correction, and an empty list.
+  - `tests/js/test_damaged.mjs` (new, 7): rings, runs, the panel's words.
+  - `test_compare.mjs` +1: off asks nothing; on, one answer shared by the panes; a Difference pane draws none.
+- Browser check: `tools/check_app.py --only damaged`, 11 of 11 on a dev server of this tree.
+- Docs: user guide (Volume context), `docs/api.md`, `docs/backend.md`.
+
 ## 2.42.0 — 2026-10-27
 
 ### Section corrections ask Viking's service for the residual field, or nothing (2026-10-27)

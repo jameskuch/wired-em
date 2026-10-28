@@ -45,6 +45,7 @@ from sbfsem.service.dto import (
     ConnectivityDTO,
     CorrectionLogDTO,
     CorrectionPullsDTO,
+    DamagedSectionsDTO,
     DendriteDiameterDTO,
     DeviationMapDTO,
     EdgeDTO,
@@ -1947,6 +1948,20 @@ def shift_summary(request: Request, source: str, neuron_id: int,
     src = _source(source)
     _neuron_or_404(svc, neuron_id, src)
     return svc.shift_summary(neuron_id, src, pair)
+
+
+@router.get("/neurons/{source}/{neuron_id}/damaged-sections", response_model=DamagedSectionsDTO)
+def damaged_sections(request: Request, source: str, neuron_id: int):
+    """The damaged sections of the cell's volume (Viking's ``CorrectionSet.damaged_z``:
+    the sections its slice-to-volume registration was built without) and the ones
+    the cell crosses, with an annotation on it or a link over it, for the copy
+    named by ``?copy=``.  ``listed`` false says why in ``note``.  The viewer asks
+    only while *Mark damaged sections* is ticked.
+    """
+    svc = service(request)
+    src = _source(source)
+    _neuron_or_404(svc, neuron_id, src)
+    return svc.damaged_sections(neuron_id, src)
 
 
 @router.get("/neurons/{source}/{neuron_id}/registration-quality", response_model=RegistrationQualityDTO)
