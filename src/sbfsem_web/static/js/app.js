@@ -822,6 +822,9 @@ async function boot() {
     // The render panel's note on settings that will not build says what Apply will do.
     onExpertChange: () => updateMethodControls(),
     onIplMethodChange: () => iplMethodChanged(),
+    // The Volumes card: the list this page has, and the IPL measured once between it and Stratification.
+    volumes: () => state.volumes,
+    iplThickness: (source, { ask = true } = {}) => (ask || iplThickness.has(source) ? askIplThickness(source) : null),
   });
 
   try {

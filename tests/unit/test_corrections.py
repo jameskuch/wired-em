@@ -684,6 +684,36 @@ def test_the_damaged_sections_a_cell_crosses_with_or_without_its_correction(web)
     assert none.note == "No damaged sections listed for InferiorMonkey"
 
 
+def test_a_volumes_facts_carry_the_scale_a_load_uses_and_its_damaged_sections(web, tmp_path):
+    """The Settings tab's Volumes card, with no cell loaded: the scale and where it
+    came from, and the damaged sections the set a correction would use lists."""
+    from sbfsem.io.odata import ODataClient
+
+    fake, svc = web
+    fake.damaged = [396, *range(915, 936)]
+    facts = svc.volume_facts("i")
+    assert (facts.name, facts.scale_nm, facts.scale_from) == (
+        "NeitzInferiorMonkey", list(svc.client("i").get_scale()), "viking")
+    assert (facts.volume_name, facts.stos_group, facts.damaged_listed) == ("InferiorMonkey", "Grid16", True)
+    assert facts.damaged_z == fake.damaged and facts.damaged_note == ""
+
+    fake.damaged = []
+    svc.corrections()._sets.clear()
+    none = svc.volume_facts("i")
+    assert (none.damaged_listed, none.damaged_z) == (False, [])
+    assert none.damaged_note == "No damaged sections listed for InferiorMonkey"
+
+    # Viking not answering: the stored scale stands in, and says so.
+    svc._clients["NeitzInferiorMonkey"] = ODataClient("i", cache=DiskCache(tmp_path / "empty"), offline=True)
+    assert svc.volume_facts("i").scale_from == "fallback"
+    assert svc.volume_facts("i").scale_nm == [7.5, 7.5, 90.0]
+    # Nasal's is the stored one by its override; the demo is no Viking volume.
+    assert svc.client("n").scale_answer() == ((5.0, 5.0, 50.0), "stored")
+    demo = svc.volume_facts("demo")
+    assert (demo.scale_from, demo.volume_name, demo.damaged_listed) == ("stored", None, False)
+    assert demo.damaged_note == "Demo Volume is not a Viking volume: no damaged sections listed"
+
+
 def test_an_unreachable_service_leaves_the_cell_as_viking_stores_it(tmp_path):
     pytest.importorskip("grpc")
     from pathlib import Path

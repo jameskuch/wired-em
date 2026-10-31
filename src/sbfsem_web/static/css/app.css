@@ -458,7 +458,9 @@ fieldset.groupbox legend {
   font: inherit; color: #fff; background: rgba(0, 0, 0, 0.7);
   border: 1px solid var(--accent); border-radius: 3px; padding: 0 4px; width: 24ch;
 }
-.hint { background: rgba(0,0,0,0.35); padding: 4px 8px; border-radius: 6px; }
+/* Its own height, at the top: stretched to the row, its ground ran down beside
+   the marker table and the move panel however tall they grew (2026-10-30). */
+.hint { background: rgba(0,0,0,0.35); padding: 4px 8px; border-radius: 6px; align-self: flex-start; }
 /* The hint is 814px on one line (worded to sit beside a one-line RPC1
    readout, 681 to 761px, in the 1590px a 1920px window leaves; it was 1037px)
    and the readout's widest field reaches about 400px ("Cone pedicles (cped)
@@ -608,6 +610,15 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 10%, transparent);
 .settings-log-table button.settings-viking { font-weight: 700; }
 .settings-log-table button.settings-id:hover,
 .settings-log-table button.settings-viking:hover { background: var(--hover); }
+/* The Volumes card: one line per volume, scrolling inside the card when the row is
+   wider than it (a long damaged list is cut; the whole of it is in its title). */
+.settings-volume-table th { cursor: help; }
+.settings-volume-table th, .settings-volume-table td { white-space: nowrap; }
+.settings-volume-table td[title]:not(:has(button)) { cursor: help; }
+.settings-volume-table th.num { text-align: right; }
+.settings-volume-table button.settings-measure {
+  font: inherit; font-size: 11px; padding: 0 6px; line-height: 1.2;
+}
 /* The outlines table's heading, and its "Show all" under a cell's first rows. */
 .settings-subhead { margin: 14px 0 4px; font-size: 13px; font-weight: 600; }
 .settings-log-table button.settings-more {

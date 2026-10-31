@@ -1,6 +1,6 @@
 // The Settings tab's rules (static/js/settings.js): what the browser holds and
-// what a reset removes, which build the page is, the server card's rows, and
-// where a restart stands.  Run it with
+// what a reset removes, which build the page is, the server card's rows, where a
+// restart stands, and the Volumes card's rows.  Run it with
 //
 //     node tests/js/test_settings.mjs
 //
@@ -23,6 +23,7 @@ const {
   EXPERT_RENDER_KEY, EXPERT_RENDER_HELP, expertRender, setExpertRender,
   STALE_RELOAD_KEY, fromBrowserCache, staleStart,
   IPL_METHOD_KEY, IPL_METHOD_CHOICES, IPL_METHOD_DEFAULT, IPL_METHOD_HELP, iplMethod, setIplMethod,
+  VOLUME_COLUMNS, volumeRows, damagedCell, iplCell,
 } = await load('settings.js');
 
 const cases = [];
@@ -372,6 +373,101 @@ test('a cell panel shows its outlines moved off after its pulls, the first few, 
   assert.equal(only.outlines.ids.length, OUTLINE_IDS_SHOWN);
   assert.equal(only.outlines.more, 3);
   assert.equal(cellPullsView({ ...answer, checked: false }), null, 'nothing from an unchecked copy');
+});
+
+// -- the Volumes card ----------------------------------------------------------
+
+/** /api/volumes rows as the server answers them (2026-10-30), Inferior, Nasal, RC1 and the demo. */
+const VOLUMES = [
+  { name: 'NeitzInferiorMonkey', display_name: 'Inferior Monkey', viking_name: 'InferiorMonkey', abbrev: 'i',
+    lab: 'Neitz', animal: 'monkey', is_odata: true, has_boundary: true, has_cones: true, has_custom_transform: true,
+    n_sections: 1893, volume_scale: [7.5, 7.5, 90], service_root: 'https://websvc.codepharm.net/NeitzInferiorMonkey/OData/',
+    has_transforms: true, default_correction: 'neighbor', default_registration: true },
+  { name: 'NeitzNasalMonkey', display_name: 'Nasal Monkey', viking_name: 'NM', abbrev: 'n', lab: 'Neitz', animal: 'monkey',
+    is_odata: true, has_boundary: true, has_cones: false, has_custom_transform: true, n_sections: 2354,
+    volume_scale: [5, 5, 50], has_transforms: false, default_correction: 'neighbor', default_registration: true },
+  { name: 'RC1', display_name: 'RC1', viking_name: 'RC1', abbrev: 'r', lab: 'Marc', animal: 'rabbit', is_odata: true,
+    has_boundary: false, has_cones: false, has_custom_transform: false, n_sections: null, volume_scale: [2.176, 2.176, 70],
+    has_transforms: false, default_correction: 'off', default_registration: true },
+  { name: 'DemoVolume', display_name: 'Demo Volume', viking_name: null, is_odata: false, volume_scale: [7.5, 7.5, 90] },
+];
+const INFERIOR_FACTS = {
+  name: 'NeitzInferiorMonkey', scale_nm: [7.5, 7.5, 90], scale_from: 'viking', volume_name: 'InferiorMonkey',
+  stos_group: 'SliceToVolume1', built_utc: '2026-10-28T02:13:52.298591Z', damaged_listed: true,
+  damaged_z: [396, ...Array.from({ length: 21 }, (_, i) => 915 + i)], damaged_note: '',
+};
+
+test('the Volumes card has a row per volume the page can open, a cell per column', () => {
+  const rows = volumeRows(VOLUMES);
+  assert.deepEqual(rows.map((r) => r.name), ['NeitzInferiorMonkey', 'NeitzNasalMonkey', 'RC1'], 'the demo is not offered');
+  for (const row of rows) assert.equal(row.cells.length, VOLUME_COLUMNS.length);
+  const col = (name) => VOLUME_COLUMNS.findIndex(([n]) => n === name);
+  const [inf, nasal, rc1] = rows.map((r) => Object.fromEntries(VOLUME_COLUMNS.map(([n], i) => [n, r.cells[i]])));
+  assert.ok(col('Damaged sections') > 0 && col('IPL') > 0);
+  assert.equal(inf.Volume.text, 'Inferior Monkey');
+  assert.match(inf.Volume.title, /^NeitzInferiorMonkey in the API and saved files; “i” for short\nhttps:/);
+  assert.equal(nasal.Viking.text, 'NM');
+  assert.equal(rc1.Lab.text, 'Marc · rabbit');
+  // Before Viking answers, the stored scale, and the title says so.
+  assert.deepEqual([inf['Pixel nm'].text, inf['Section nm'].text], ['7.5', '90']);
+  assert.equal(rc1['Pixel nm'].text, '2.176');
+  assert.match(inf['Pixel nm'].title, /stored scale, while Viking is asked/);
+  assert.equal(inf.Sections.text, '1,893');
+  assert.equal(rc1.Sections.text, '—');
+  assert.deepEqual([inf.Transforms.text, nasal.Transforms.text], ['Read, on', 'Not read']);
+  assert.deepEqual([inf.Correction.text, rc1.Correction.text], ['Residual field', 'None']);
+  assert.deepEqual([inf['Damaged sections'].text, inf.IPL.text, rc1.IPL.text], ['…', 'Measure', 'No markers']);
+  assert.ok(inf.IPL.measure && !rc1.IPL.measure);
+  assert.deepEqual([inf.Cones.text, nasal.Cones.text, nasal['Custom XY'].text, rc1['Custom XY'].text], ['Yes', '—', 'Yes', '—']);
+});
+
+test('a volume\'s facts give its scale, where it came from, and its damaged sections', () => {
+  const facts = {
+    NeitzInferiorMonkey: INFERIOR_FACTS,
+    NeitzNasalMonkey: { scale_nm: [5, 5, 50], scale_from: 'stored', damaged_listed: false, damaged_note: 'x' },
+    RC1: { scale_nm: [2.2, 2.176, 70], scale_from: 'fallback', damaged_listed: false,
+      damaged_note: 'No damaged sections listed for RC1' },
+  };
+  const [inf, nasal, rc1] = volumeRows(VOLUMES, { facts });
+  assert.equal(inf.cells[3].title, 'Viking’s Scale, as a load reads it');
+  assert.match(nasal.cells[3].title, /not asked of Viking/);
+  assert.deepEqual([rc1.cells[3].text, rc1.cells[3].class], ['2.2 × 2.176', 'num muted'], 'a fallback is muted');
+  assert.match(rc1.cells[3].title, /did not answer/);
+  assert.deepEqual(inf.cells[8], {
+    text: '22 · 396, 915–935', class: 'settings-damaged',
+    title: '22 damaged sections: 396, 915–935\nFrom Viking’s correction set SliceToVolume1 for InferiorMonkey, '
+      + 'built 2026-10-28 02:13 UTC',
+  });
+  assert.deepEqual(rc1.cells[8], { text: '—', title: 'No damaged sections listed for RC1' });
+  // A server that did not answer: the stored scale, muted, and why.
+  const [failed] = volumeRows(VOLUMES, { facts: { NeitzInferiorMonkey: { error: 'HTTP 502' } } });
+  assert.equal(failed.cells[3].text, '7.5');
+  assert.equal(failed.cells[3].class, 'num muted');
+  assert.deepEqual(failed.cells[8], { text: '—', title: 'No answer: HTTP 502' });
+});
+
+test('a long damaged list is cut between runs, the whole of it in the title', () => {
+  const zs = Array.from({ length: 40 }, (_, i) => 10 + i * 7);
+  const cell = damagedCell({ damaged_listed: true, damaged_z: zs, stos_group: null });
+  assert.ok(cell.text.startsWith('40 · 10, 17, 24, '));
+  assert.ok(cell.text.endsWith(', …'));
+  assert.ok(cell.text.length <= '40 · '.length + 30 + 3);
+  assert.equal(cell.title, `40 damaged sections: ${zs.join(', ')}`);
+  assert.deepEqual(damagedCell(null), { text: '…', title: 'Asking Viking' });
+});
+
+test('the IPL cell: a button to measure it, then its median along the normals', () => {
+  const inf = VOLUMES[0];
+  assert.deepEqual(iplCell(inf, { asking: true }), { text: '…', title: 'Measuring' });
+  const failed = iplCell(inf, { error: new Error('HTTP 500') });
+  assert.deepEqual([failed.text, failed.measure, failed.title], ['Try again', true, 'Not measured: HTTP 500']);
+  const answer = { normal_um: { median: 33.04, p5: 28.1, p95: 37.66 }, column_over_normal: { median: 1.0412, max: 1.2 } };
+  assert.deepEqual(iplCell(inf, { answer }), {
+    text: '33.0 µm', class: 'num',
+    title: '33.0 µm along the layers’ normals (median); 28.1 to 37.7 µm for 90 % of it; '
+      + 'along Z it reads 4.1 % thicker at the median',
+  });
+  assert.equal(iplCell(inf, { answer: { normal_um: { median: null } } }).text, '—');
 });
 
 let failed = 0;

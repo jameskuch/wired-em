@@ -186,6 +186,7 @@ from .dto import (
     StratificationDTO,
     SynapsePointDTO,
     SynapseTypeCountDTO,
+    VolumeFactsDTO,
     VolumeInfoDTO,
 )
 from .estimate import CURVE_RASTER_META, CostEstimator, FieldPlanner, OneField, raster_record
@@ -4305,29 +4306,11 @@ class SbfsemService:
             out.built_utc = status.get("built_utc")
             damaged = [int(z) for z in status["damaged_z"]]
         else:
-            volume_name = neuron.volume.viking_name
-            if not volume_name:
-                out.note = f"{neuron.volume.display_name} is not a Viking volume: no damaged sections listed"
+            out.volume_name, out.stos_group, out.built_utc, listed, out.note = (
+                self._volume_damaged(neuron.volume))
+            if listed is None:
                 return out
-            provider = self.corrections()
-            try:
-                sets, _fresh = provider.sets(volume_name)
-            except CorrectionsError as exc:
-                out.volume_name = volume_name
-                out.note = f"Viking's section-correction service is not answering: {exc}"
-                return out
-            cset = choose_set(sets, provider.stos_group)
-            if cset is None:
-                out.volume_name = volume_name
-                out.note = f"No section correction is published for {volume_name}: no damaged sections listed"
-                return out
-            out.volume_name, out.stos_group, out.built_utc = (
-                cset.volume_name, cset.stos_group, cset.built_utc)
-            if cset.damaged is None:
-                out.note = ("Viking's section-correction service is not answering, and the sets "
-                            "remembered from it do not list damaged sections")
-                return out
-            damaged = list(cset.damaged)
+            damaged = listed
         out.damaged_z = sorted(set(damaged))
         out.listed = bool(out.damaged_z)
         if not out.listed:
@@ -4338,6 +4321,52 @@ class SbfsemService:
         out.marks = [DamagedMarkDTO(**m.as_dict()) for m in marks]
         out.n_annotations = sum(c.n_annotations for c in found)
         out.n_links_over = sum(c.n_links_over for c in found)
+        return out
+
+    def _volume_damaged(self, volume: Volumes) -> tuple[
+            str | None, str | None, datetime | None, list[int] | None, str]:
+        """``(volume_name, stos_group, built_utc, damaged, note)``: the damaged
+        sections the set a correction of ``volume`` would use lists, asked of the
+        provider (which remembers a volume's sets for ten minutes and on disk);
+        ``damaged`` is None, and ``note`` says why, when there is no list."""
+        volume_name = volume.viking_name
+        if not volume_name:
+            return None, None, None, None, (
+                f"{volume.display_name} is not a Viking volume: no damaged sections listed")
+        provider = self.corrections()
+        try:
+            sets, _fresh = provider.sets(volume_name)
+        except CorrectionsError as exc:
+            return volume_name, None, None, None, (
+                f"Viking's section-correction service is not answering: {exc}")
+        cset = choose_set(sets, provider.stos_group)
+        if cset is None:
+            return volume_name, None, None, None, (
+                f"No section correction is published for {volume_name}: no damaged sections listed")
+        if cset.damaged is None:
+            return cset.volume_name, cset.stos_group, cset.built_utc, None, (
+                "Viking's section-correction service is not answering, and the sets "
+                "remembered from it do not list damaged sections")
+        return cset.volume_name, cset.stos_group, cset.built_utc, [int(z) for z in cset.damaged], ""
+
+    def volume_facts(self, source) -> VolumeFactsDTO:
+        """What Viking says about a volume beyond :meth:`volume_info`: the scale a
+        load uses and where it came from, and the damaged sections its section
+        correction's set lists (the Settings tab's Volumes card)."""
+        volume = Volumes.from_str(source)
+        if volume.is_odata:
+            scale, scale_from = self.client(volume.source).scale_answer()
+        else:
+            scale, scale_from = volume.cached_scale, "stored"
+        volume_name, stos_group, built_utc, damaged, note = self._volume_damaged(volume)
+        out = VolumeFactsDTO(
+            name=volume.source, scale_nm=[float(v) for v in scale], scale_from=scale_from,
+            volume_name=volume_name, stos_group=stos_group, built_utc=built_utc, damaged_note=note)
+        if damaged is not None:
+            out.damaged_z = sorted(set(damaged))
+            out.damaged_listed = bool(out.damaged_z)
+            if not out.damaged_listed:
+                out.damaged_note = f"No damaged sections listed for {volume_name or volume.display_name}"
         return out
 
     def registration_quality(self, neuron_id: int, source) -> RegistrationQualityDTO:

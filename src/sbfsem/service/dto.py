@@ -51,6 +51,31 @@ class VolumeInfoDTO(BaseModel):
     default_registration: bool = False
 
 
+class VolumeFactsDTO(BaseModel):
+    """``GET /api/volumes/{source}/facts``: what Viking says about a volume that
+    ``GET /volumes`` does not carry, for the Settings tab's Volumes card.
+
+    The scale is the one a load of the volume uses; the damaged sections are the
+    ones its section correction's set lists (the per-cell
+    ``/damaged-sections`` reads the same list).  ``damaged_listed`` false says
+    why in ``damaged_note``.
+    """
+
+    name: str
+    #: (nm/pixel X, nm/pixel Y, nm/section Z).
+    scale_nm: list[float]
+    #: ``viking`` (its OData ``Scale``), ``stored`` (the volume's override) or
+    #: ``fallback`` (Viking did not answer).
+    scale_from: str = "viking"
+    volume_name: str | None = None
+    stos_group: str | None = None
+    built_utc: datetime | None = None
+    damaged_listed: bool = False
+    #: Every damaged section of the volume, ascending.
+    damaged_z: list[int] = Field(default_factory=list)
+    damaged_note: str = ""
+
+
 class SynapseTypeCountDTO(BaseModel):
     local_name: str
     viking_name: str

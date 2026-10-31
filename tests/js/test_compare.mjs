@@ -289,8 +289,8 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sbfsem-compare-test-'));
 for (const name of ['compare.js', 'comparelayers.js', 'api.js', 'jobcard.js', 'loadprogress.js', 'state.js',
   'shifts.js', 'shiftlayer.js', 'shiftpanel.js', 'shiftlegend.js', 'fatlines.js', 'renderoptions.js',
   'render-schema.js', 'compareoptions.js', 'renderform.js', 'renderestimate.js', 'regstatus.js',
-  'renderconflicts.js', 'renderfallback.js', 'conflictpanel.js', 'viewcube.js', 'settings.js', 'registrations.js',
-  'pivot.js']) {
+  'renderconflicts.js', 'renderfallback.js', 'conflictpanel.js', 'viewcube.js', 'settings.js', 'damaged.js',
+  'registrations.js', 'pivot.js']) {
   let text = fs.readFileSync(path.join(jsDir, name), 'utf8');
   text = text.replace("'./render3d.js'", "'./render3d_stub.js'");
   fs.writeFileSync(path.join(tmp, name), text);

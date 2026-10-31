@@ -437,21 +437,28 @@ class ODataClient:
         Ports ``util/import/getODataScale.m``.  Falls back to the cached scale
         when the server is unreachable, as ``viking2micron`` did.
         """
+        return self.scale_answer()[0]
+
+    def scale_answer(self) -> tuple[tuple[float, float, float], str]:
+        """The volume scale in nm and where it came from: ``"viking"`` (its OData
+        ``Scale``, or that answer as cached), ``"stored"`` (the cached scale, by the
+        volume's override) or ``"fallback"`` (the cached scale, because Viking did
+        not answer or answered something unreadable)."""
         if self.volume.info.force_cached_scale:
-            return self.volume.cached_scale
+            return self.volume.cached_scale, "stored"
         try:
             data = self.get(odata_url(None, self.volume, "scale"))
         except ODataError:
             log.info("Volume scale query failed for %s; using cached scale", self.source)
-            return self.volume.cached_scale
+            return self.volume.cached_scale, "fallback"
         try:
             return (
                 float(data["X"]["Value"]),
                 float(data["Y"]["Value"]),
                 float(data["Z"]["Value"]),
-            )
+            ), "viking"
         except (KeyError, TypeError, ValueError):
-            return self.volume.cached_scale
+            return self.volume.cached_scale, "fallback"
 
     def count_cells_in_volume(self) -> int:
         return self.count(f"{self.base_url}Structures?$filter=TypeID eq 1")

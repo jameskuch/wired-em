@@ -1048,6 +1048,8 @@ export const api = {
 
   /** How thick a volume's IPL is, along the layers' normals and along Z, and where it thins. */
   iplThickness: (source) => getJSON(`/api/volumes/${source}/ipl-thickness`, 'IPL thickness…'),
+  /** What Viking says of a volume beyond /api/volumes: the scale a load uses, its damaged sections. */
+  volumeFacts: (source) => getJSON(`/api/volumes/${source}/facts`),
   stratification: (source, id, opts = {}) =>
     getJSON(`/api/neurons/${source}/${id}/stratification${q(opts)}`, 'stratification…'),
   synapseStratification: (source, id, type, opts = {}) =>

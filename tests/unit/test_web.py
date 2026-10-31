@@ -287,6 +287,11 @@ def test_volumes(client):
     assert has["RC1"] is False and has["RC2"] is False
     assert client.get("/api/volumes/i").json()["volume_scale"] == [7.5, 7.5, 90.0]
     assert client.get("/api/volumes/not-a-volume").status_code == 404
+    # The Settings tab's Volumes card asks each volume for what Viking says of it.
+    facts = client.get("/api/volumes/demo/facts").json()
+    assert (facts["name"], facts["scale_nm"], facts["scale_from"]) == ("DemoVolume", [7.5, 7.5, 90.0], "stored")
+    assert facts["damaged_listed"] is False and "not a Viking volume" in facts["damaged_note"]
+    assert client.get("/api/volumes/not-a-volume/facts").status_code == 404
 
 
 def test_neuron_endpoints(client):

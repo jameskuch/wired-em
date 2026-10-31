@@ -2,7 +2,8 @@
 //
 // Expert render mode (whether a failed render is rebuilt with settings that work,
 // or left failed with its settings marked), how IPL depth is measured (along the
-// layers' normals, or straight along Z as MATLAB did), three cards for this browser (which build the page is, clearing its cached
+// layers' normals, or straight along Z as MATLAB did), the Volumes card (each volume's
+// scale, sections, transforms, correction, damaged sections and IPL), three cards for this browser (which build the page is, clearing its cached
 // files, resetting what it saved), the Correction log (annotations Viking's
 // curve fit pulled toward a much wider linked one, in every loaded cell this
 // account may see: /api/correction-log; since Viking's service stopped running the
@@ -14,7 +15,8 @@
 // The rules are pure and exported, so node can test them (tests/js/test_settings.mjs);
 // SettingsPanel is the view, and touches the page only when it is shown.
 
-import { MODE_LABELS } from './regstatus.js';
+import { sectionRanges } from './damaged.js';
+import { MODE_LABELS, correctionSetting } from './regstatus.js';
 import { FIELD_BY_KEY } from './renderoptions.js';
 
 /**
@@ -562,6 +564,146 @@ export function cellPullsView(answer) {
   };
 }
 
+// -- the Volumes card ----------------------------------------------------------
+// One row per volume this account may open: what /api/volumes says of it, the scale
+// and damaged sections its /facts adds (asked each time the tab is shown; the server
+// keeps both), and its IPL thickness, measured on a button (each fits the volume's
+// INL and GCL surfaces on the server, about a second) or shown at once when this page
+// has measured it already.
+
+/** The card's columns: `[header, help]`. */
+export const VOLUME_COLUMNS = Object.freeze([
+  ['Volume', 'What the page calls it; hover a name for the name the API and saved files use, and its OData address'],
+  ['Viking', 'What Viking and its Identity Server call it: Open in Viking and /open links use this name'],
+  ['Lab', 'Whose volume it is, and the animal'],
+  ['Pixel nm', 'Nanometers per pixel in X and Y, as a load reads them'],
+  ['Section nm', 'Section thickness in nanometers: Z in µm is the section number times this, over 1000'],
+  ['Sections', 'How many sections the volume has, where this server’s volume table knows it'],
+  ['Transforms', 'Whether the volume’s current section transforms (the stos files its VikingXML lists) are read here, '
+    + 'and whether a load draws its cells through them'],
+  ['Correction', 'The section correction a load gets when it names none; each cell’s Registration section switches it'],
+  ['Damaged sections', 'The sections Viking’s slice-to-volume registration was built without, from the set its '
+    + 'section-correction service uses; Display → Mark damaged sections marks the ones a cell crosses'],
+  ['IPL', 'How thick the IPL is between the INL and GCL boundary markers, along the layers’ normals (median); '
+    + 'a volume without markers has no IPL depth, stratification or Flatten IPL'],
+  ['Cones', 'Whether the volume has traced cone outlines (lmTRACE, sTRACE, uTRACE)'],
+  ['Custom XY', 'Whether MATLAB’s Custom transform (stored per-section XY offsets) can be applied'],
+]);
+
+const SCALE_FROM = Object.freeze({
+  viking: 'Viking’s Scale, as a load reads it',
+  stored: 'The stored scale: this volume’s Scale is not asked of Viking, which once answered another volume’s for it',
+  fallback: 'The stored scale: Viking’s Scale did not answer, so a load uses this one',
+});
+
+/** A scale value without trailing zeros: 7.5, 5.315, 70. */
+const nm = (v) => String(Number(Number(v).toFixed(4)));
+
+/** "2026-10-28T02:13:52.298591Z" as "2026-10-28 02:13 UTC". */
+function utcMinute(stamp) {
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(String(stamp || ''));
+  return m ? `${m[1]} ${m[2]} UTC` : String(stamp || '');
+}
+
+/**
+ * The card's damaged-sections cell from a volume's facts (`null` while asked, `{ error }`
+ * when the server did not answer): how
+ * many and their runs, cut at about `max` characters, the whole list and the set it
+ * came from in the title.
+ */
+export function damagedCell(facts, { max = 30 } = {}) {
+  if (!facts) return { text: '…', title: 'Asking Viking' };
+  if (facts.error) return { text: '—', title: `No answer: ${facts.error}` };
+  if (!facts.damaged_listed) return { text: '—', title: facts.damaged_note || 'No damaged sections listed' };
+  const zs = facts.damaged_z || [];
+  const runs = sectionRanges(zs);
+  let shown = runs;
+  if (runs.length > max) {
+    const cut = runs.lastIndexOf(', ', max);
+    shown = `${cut > 0 ? runs.slice(0, cut) : runs.slice(0, max)}, …`;
+  }
+  const set = facts.stos_group
+    ? `\nFrom Viking’s correction set ${facts.stos_group} for ${facts.volume_name}`
+      + `${facts.built_utc ? `, built ${utcMinute(facts.built_utc)}` : ''}` : '';
+  const n = zs.length;
+  return {
+    text: `${n} · ${shown}`, class: 'settings-damaged',
+    title: `${n} damaged section${n === 1 ? '' : 's'}: ${runs}${set}`,
+  };
+}
+
+/**
+ * The card's IPL cell: `state` is undefined (not measured), `{ asking: true }`,
+ * `{ answer }` (the /ipl-thickness reply) or `{ error }`.  `measure` asks for the
+ * button that measures it.
+ */
+export function iplCell(volume, state) {
+  if (!volume.has_boundary) {
+    return { text: 'No markers', title: 'No INL or GCL boundary markers: no IPL depth, stratification or Flatten IPL' };
+  }
+  if (!state) return { text: 'Measure', measure: true, title: 'Measure the IPL’s thickness (about a second on the server)' };
+  if (state.asking) return { text: '…', title: 'Measuring' };
+  if (state.error) {
+    return { text: 'Try again', measure: true, title: `Not measured: ${state.error.message || state.error}` };
+  }
+  const t = state.answer || {};
+  const n = t.normal_um;
+  if (n?.median == null) return { text: '—', title: 'No column has a marker of each layer nearby' };
+  const over = t.column_over_normal?.median;
+  const z = Number.isFinite(over) ? `; along Z it reads ${((over - 1) * 100).toFixed(1)} % thicker at the median` : '';
+  return {
+    text: `${n.median.toFixed(1)} µm`,
+    class: 'num',
+    title: `${n.median.toFixed(1)} µm along the layers’ normals (median); ${n.p5.toFixed(1)} to ${n.p95.toFixed(1)} µm `
+      + `for 90 % of it${z}`,
+  };
+}
+
+/**
+ * The card's rows, one per volume the page can open (`/api/volumes`, the OData ones):
+ * `[{ name, cells: [{ text, title, class, measure }] }]`, a cell per VOLUME_COLUMNS
+ * entry.  `facts` and `ipl` are keyed by the volume's wire name.
+ */
+export function volumeRows(volumes, { facts = {}, ipl = {} } = {}) {
+  return (volumes || []).filter((v) => v.is_odata).map((v) => {
+    const f = facts[v.name] || null;
+    const scale = f?.scale_nm || v.volume_scale || [];
+    let scaleTitle = f ? SCALE_FROM[f.scale_from] || f.scale_from : 'The stored scale, while Viking is asked';
+    if (f?.error) scaleTitle = `The stored scale: this server did not answer (${f.error})`;
+    const scaleClass = f?.scale_from === 'fallback' || f?.error ? 'num muted' : 'num';
+    const pixel = scale.length >= 2 ? (scale[0] === scale[1] ? nm(scale[0]) : `${nm(scale[0])} × ${nm(scale[1])}`) : '—';
+    const correction = correctionSetting(v.default_correction);
+    const correctionLabel = correction === 'off' ? 'None' : MODE_LABELS[correction] || correction;
+    let transforms = { text: 'Not read', title: 'Not read here: its cells are always at the positions Viking stores' };
+    if (v.has_transforms) {
+      transforms = v.default_registration
+        ? { text: 'Read, on', title: 'Read here; a load draws its cells where Viking draws them now' }
+        : { text: 'Read, off', title: 'Read here; a load draws its cells at their stored positions unless asked' };
+    }
+    return {
+      name: v.name,
+      cells: [
+        { text: v.display_name,
+          title: `${v.name} in the API and saved files${v.abbrev ? `; “${v.abbrev}” for short` : ''}`
+            + `${v.service_root ? `\n${v.service_root}` : ''}` },
+        { text: v.viking_name || '—', title: v.viking_name ? null : 'Not a volume Viking’s Identity Server knows' },
+        { text: [v.lab, v.animal].filter(Boolean).join(' · ') || '—' },
+        { text: pixel, class: scaleClass, title: scaleTitle },
+        { text: scale.length >= 3 ? nm(scale[2]) : '—', class: scaleClass, title: scaleTitle },
+        Number.isFinite(v.n_sections)
+          ? { text: v.n_sections.toLocaleString('en-US'), class: 'num' }
+          : { text: '—', title: 'Not in this server’s volume table' },
+        transforms,
+        { text: correctionLabel, title: `A load that names no correction gets ${correctionLabel === 'None' ? 'none' : `the ${correctionLabel.toLowerCase()}`}` },
+        damagedCell(f),
+        iplCell(v, ipl[v.name]),
+        { text: v.has_cones ? 'Yes' : '—' },
+        { text: v.has_custom_transform ? 'Yes' : '—' },
+      ],
+    };
+  });
+}
+
 // -- the view ----------------------------------------------------------------
 
 function el(tag, props = {}, children = []) {
@@ -605,10 +747,13 @@ export class SettingsPanel {
    * viking(source), openInViking(source, cellId, locationId), volumeName(source) }`.
    * `onRatioChange(ratio)`: the log's ratio was changed (the cell panels list by it too).
    * `onIplMethodChange(method)`: the IPL depth method was switched (the page measures again).
+   * `volumes()`: the volume list the page has (`/api/volumes`); `iplThickness(source, { ask })`:
+   * the page's own measure of a volume's IPL, so the Volumes card and the Stratification tab
+   * ask once between them (`ask` false: only one already asked for, else null).
    */
   constructor({
     root, api, assets, beforeReload = () => {}, stopSaving = () => {}, annotations = null, onRatioChange = null,
-    onExpertChange = null, onIplMethodChange = null,
+    onExpertChange = null, onIplMethodChange = null, volumes = () => [], iplThickness = null,
   }) {
     this.root = root;
     this.api = api;
@@ -619,13 +764,17 @@ export class SettingsPanel {
     this.onRatioChange = onRatioChange;
     this.onExpertChange = onExpertChange;
     this.onIplMethodChange = onIplMethodChange;
+    this.volumes = volumes;
+    this.iplThickness = iplThickness || ((source, { ask = true } = {}) => (ask ? api.iplThickness(source) : null));
+    this.facts = {};
+    this.ipl = {};
     this.built = false;
   }
 
   /** Called when the tab is shown: every card is read again. */
   async show() {
     if (!this.built) this._build();
-    await Promise.all([this._refreshBuild(), this._refreshStorage(), this._refreshLog(),
+    await Promise.all([this._refreshBuild(), this._refreshStorage(), this._refreshVolumes(), this._refreshLog(),
       this._refreshServer()]);
   }
 
@@ -636,6 +785,7 @@ export class SettingsPanel {
     if (note) this.root.append(el('div', { class: 'card settings-note', role: 'status', text: note }));
 
     this._buildRendering();
+    this._buildVolumes();
 
     this.buildText = el('p', { class: 'settings-text' });
     this.root.append(el('section', { class: 'card' }, [
@@ -698,6 +848,77 @@ export class SettingsPanel {
       ]),
       this.iplStatus,
     ]));
+  }
+
+  _buildVolumes() {
+    this.volumeBody = el('tbody');
+    this.volumeStatus = el('p', { class: 'settings-text muted', role: 'status' });
+    const numeric = new Set(['Pixel nm', 'Section nm', 'Sections']);
+    const head = el('thead', {}, el('tr', {}, VOLUME_COLUMNS.map(([name, help]) => el('th', {
+      text: name, title: help, class: numeric.has(name) ? 'num' : null }))));
+    this.root.append(el('section', { class: 'card settings-wide' }, [
+      el('h3', { text: 'Volumes' }),
+      el('p', { class: 'settings-text', text: 'Each volume you may open, as this server reads it. Hover a value for '
+        + 'where it comes from; the scale and damaged sections are Viking’s, asked each time this tab is shown.' }),
+      el('div', { class: 'settings-scroll' }, el('table', { class: 'settings-table settings-volume-table' }, [head, this.volumeBody])),
+      this.volumeStatus,
+      el('div', { class: 'row settings-actions' }, [
+        el('button', { type: 'button', text: 'Check again', onclick: () => this._refreshVolumes() }),
+      ]),
+    ]));
+  }
+
+  _drawVolumes() {
+    const rows = volumeRows(this.volumes(), { facts: this.facts, ipl: this.ipl });
+    if (!rows.length) {
+      this.volumeBody.replaceChildren(el('tr', {}, el('td', {
+        class: 'muted', colspan: VOLUME_COLUMNS.length, text: 'The volume list has not arrived yet.' })));
+      return;
+    }
+    this.volumeBody.replaceChildren(...rows.map((row) => el('tr', { 'data-volume': row.name }, row.cells.map((cell) => (
+      cell.measure
+        ? el('td', {}, el('button', { type: 'button', class: 'settings-measure', text: cell.text, title: cell.title,
+          onclick: () => this._measureIpl(row.name) }))
+        : el('td', { class: cell.class, text: cell.text, title: cell.title })
+    )))));
+  }
+
+  async _refreshVolumes() {
+    if (!this.volumeBody) return;
+    const volumes = (this.volumes() || []).filter((v) => v.is_odata);
+    this._drawVolumes();
+    // What this page has measured already (the Stratification tab), without asking.
+    for (const v of volumes) {
+      if (!v.has_boundary || this.ipl[v.name]?.answer) continue;
+      this.iplThickness(v.name, { ask: false })?.then((answer) => {
+        this.ipl[v.name] = { answer };
+        this._drawVolumes();
+      }, () => {});
+    }
+    const asked = await Promise.allSettled(volumes.map((v) => this.api.volumeFacts(v.name)));
+    const failed = [];
+    asked.forEach((result, i) => {
+      if (result.status === 'fulfilled') this.facts[volumes[i].name] = result.value;
+      else {
+        const error = String(result.reason?.message || result.reason);
+        // A volume answered before keeps that answer; one never answered says why.
+        if (!this.facts[volumes[i].name]?.scale_nm) this.facts[volumes[i].name] = { error };
+        failed.push(`${volumes[i].display_name} (${error})`);
+      }
+    });
+    this.volumeStatus.textContent = failed.length ? `No answer for ${failed.join(', ')}.` : '';
+    this._drawVolumes();
+  }
+
+  async _measureIpl(source) {
+    this.ipl[source] = { asking: true };
+    this._drawVolumes();
+    try {
+      this.ipl[source] = { answer: await this.iplThickness(source, { ask: true }) };
+    } catch (error) {
+      this.ipl[source] = { error };
+    }
+    this._drawVolumes();
   }
 
   _iplMethodChanged() {

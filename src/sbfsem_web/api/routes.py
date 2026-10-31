@@ -69,6 +69,7 @@ from sbfsem.service.dto import (
     SkeletonDTO,
     StratificationDTO,
     SynapsePointDTO,
+    VolumeFactsDTO,
     VolumeInfoDTO,
 )
 from sbfsem.service.estimate import FINEST_UM as ESTIMATE_FINEST_UM
@@ -442,6 +443,16 @@ def viking_session(request: Request):
 @router.get("/volumes/{source}", response_model=VolumeInfoDTO)
 def volume_info(request: Request, source: str):
     return service(request).volume_info(_source(source))
+
+
+@router.get("/volumes/{source}/facts", response_model=VolumeFactsDTO)
+def volume_facts(request: Request, source: str):
+    """What Viking says about a volume beyond ``GET /volumes/{source}``: the scale
+    a load uses and where it came from, and the damaged sections its section
+    correction's set lists.  For the Settings tab's Volumes card; the scale is
+    cached on disk once read and the sets for ten minutes, so it is cheap after
+    the first ask."""
+    return service(request).volume_facts(_source(source))
 
 
 @router.get("/volumes/{source}/boundary/{layer}/mesh", response_model=MeshDTO)

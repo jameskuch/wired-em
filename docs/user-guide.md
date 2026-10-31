@@ -3844,6 +3844,16 @@ looks wrong rather than for the work itself.
   Stratification tab and its files, Color by IPL depth, Clip IPL and a clipped export
   (*Stratification*). Switching it measures again at once: the chart, and every cell
   colored or clipped by depth. Kept in this browser.
+- **Volumes** (since 2.45.0) has a row for each volume you may open: what Viking calls it,
+  the lab and animal, the pixel size and section thickness in nm (Viking's *Scale*, as a
+  load reads it; hover says when the stored one stands in), the section count where it is
+  known, whether its current section transforms are read here and on by default, the
+  section correction a load gets, its damaged sections (how many and the first runs; hover
+  for all of them and the correction set they come from), its IPL thickness (*Measure*
+  asks the server, about a second; a volume this page measured already shows it at once;
+  *No markers* where the volume has no INL or GCL boundary markers), and whether it has
+  traced cones or MATLAB's Custom transform. The scale and damaged sections are asked of
+  Viking each time the tab is shown; *Check again* asks once more.
 - **Cached files**: *Clear cached files and reload* has the browser drop what it cached of
   the site (the page, its scripts and styles) and reloads. Your sessions, saved settings
   and sign-in stay, and the page comes back to this tab saying it was done.
