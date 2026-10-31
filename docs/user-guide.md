@@ -227,7 +227,7 @@ panels opened from its left edge:
   technique can be dialled in alongside its parameters before anything
   rebuilds. A hand-tuned method/pathway pair the list does not name shows as
   *Custom…*.
-- **Display & context** — the MATLAB `RenderApp` "Plot" tab: Invert, Flip Z,
+- **Display & context** — the MATLAB `RenderApp` "Plot" tab: Light background (MATLAB's Invert), Flip Z,
   2D (it unticks itself when you orbit away from the straight-down view or
   switch to perspective), In-page dropdowns (see [Dropdown lists in a virtual machine](#dropdown-lists-in-a-virtual-machine)),
   Material, the colormap and its colorbar, the scale bar, the volume
@@ -303,7 +303,11 @@ moved in between, keep the same pivot. With a pivot point set (see
 turns and the viewpoint buttons swing about that point instead, and it stays
 where it is on the screen. Every turn and every drag is one
 undo step. Under **Flip Z** the face on top is the volume's −Z and the
-tripod's Z runs down, as the Axes helper's does. The cube is drawn over the
+tripod's Z runs down, as the Axes helper's does. Flip Z draws the cells upside down
+where they are: the camera keeps its direction and moves with the mirror, so the
+level of the pivot point (or of the middle of the view, with none) stays where it
+was on the screen (before 2.44.0 the cell was mirrored about the volume's section 0
+and left the picture). The cube is drawn over the
 render, not in it: it is never in a snapshot or a video. **Render compare** has
 the same cube in its top-right corner, turning every pane (see *Render compare*).
 
@@ -334,8 +338,8 @@ azimuth, elevation or distance.
 ### Materials and colormaps
 
 **Material** is chosen per cell, in the cell's Surface section, and survives
-the rebuild a settings change triggers. The ten finishes are physically
-based and each explains itself on hover: *Standard* (the default), *Matte*
+the rebuild a settings change triggers. The eleven finishes each explain
+themselves on hover; ten are physically based: *Standard* (the default), *Matte*
 (no highlights; MATLAB's "dull"), *Plastic*, *Glossy* (tight wet highlights;
 MATLAB's "shiny"), *Metal* (reflects the surroundings rather than showing
 its own color in the highlights), *Velvet* (felt or fuzzy: a soft rim of
@@ -343,6 +347,9 @@ light where the surface turns away and no hard highlight), *Clay*, *Glass*
 (transparent and refracting; slow with many cells), *Glow* (self-lit in the
 cell color, for picking one cell out of a crowd) and *Faceted* (flat
 shading, so every triangle shows — the way to judge a mesh's resolution).
+The eleventh, *Unlit*, draws the cell in its own color with no light or shade
+at all, a flat silhouette (the *Golgi* look below); the editor's *Unlit* box
+gives any material that.
 `→ selected` and `→ all` beside the menu hand the finish to other cells, and
 *Edit…* opens it in the editor.
 
@@ -352,7 +359,7 @@ every cell when none is selected, and *Apply to selected / all cells* beside
 it hands the current choice on. **The material editor** sits below it, under
 *Edit materials…*. Pick a material, drag its properties — roughness, metalness,
 highlight strength, clearcoat, sheen, glow, reflections, transmission,
-refraction, iridescence, the sheen and highlight colors, flat shading — and
+refraction, iridescence, the sheen and highlight colors, flat shading, unlit — and
 the selected cells (or every cell, when none is selected) preview it as you
 go. *Save to library* stores it on the server under the name you give it;
 the library is shared, so it appears on every user's Material menu (starred)
@@ -1975,7 +1982,7 @@ view** re-frames; nothing in this section does.
 
 **Color.** **Magnitude** runs a green, teal and violet ramp up to **Full color
 at** (Auto is the 95th percentile of the moves), chosen to stay legible on the
-dark and the light (Invert) viewport and apart from the highlight, error and
+dark and the light (Light background) viewport and apart from the highlight, error and
 difference colors; **Direction** gives each angle a hue, so a section shifted
 as a whole is one color; **Cell color** is the cell's own. **Through the
 surface** and **Opacity** are as for the annotations.
@@ -2155,7 +2162,7 @@ line used to say -- the volume, the technique, the label -- is the hover of the
 line and of the volume tag.
 
 The list starts with the lab's own looks, read from the workspaces saved on the
-server, and three that put one thing forward:
+server, three that put one thing forward, and MATLAB's Golgi render:
 
 | Visualization | What it is |
 |---|---|
@@ -2168,6 +2175,7 @@ server, and three that put one thing forward:
 | Emphasis · Skeleton | 0.15 µm skeleton tubes over a faint matte ghost of the surface |
 | Emphasis · Annotations | every ring at full strength through a faint surface |
 | Emphasis · Annotation error service | what Viking's section correction did: Position shift on with each annotation's ring where it was, the rings where they are, a translucent surface, and manual move arrows |
+| Golgi · Flat silhouette from above | MATLAB's `golgi.m`: the surface alone, solid and *Unlit*, seen straight down Z in 2D on a light background, like a Golgi-stained flatmount. It is the one look that also sets the page's view: it ticks Display's *Light background* and *2D*. Each cell keeps its color; make it black for MATLAB's black on white, or untick *Light background* and make it white |
 
 **Your own.** *Save this cell's look as…* keeps the open cell's look under a name,
 in this browser; it is then in every cell's list under *Saved in this browser*, and
@@ -2291,6 +2299,7 @@ The MATLAB `RenderApp` keyboard navigation is preserved alongside it:
 | `p` | turn about the point under the pointer from now on, or about the middle of the view again (see below; also wherever the focus is) |
 | `f` | full screen on or off (see below) |
 | `c` | copy the picked point as “X Y Z downsample” for Viking's Goto Location |
+| `i` | copy the Location ID the readout names (the annotation under the pointer) for Viking's Goto Location ID |
 
 ### Where a turn pivots, and choosing the point
 
@@ -2459,7 +2468,7 @@ off the view leaves the readout as it was.
 Left-click the Viking field to copy the four numbers for Viking's *Commands →
 Goto Location*, or the Location ID field to copy the ID for *Annotation →
 Goto Location ID*; `c`, with the pointer on the view, copies the Viking field of
-the annotation under it. The numbers are
+the annotation under it, and `i` its Location ID. The numbers are
 space-separated (`5120 3810 371 2`): Viking's paste parser treats a comma as
 a digit-group separator, so a comma-separated string arrived as `5120,` and
 was refused. Right-click either field
@@ -2600,12 +2609,23 @@ orbit.
 
 **The right-click menu.** Right-click a cell in the render, or its row in the
 Loaded list, for that cell's menu: Update, Remove, colors, *Hide above / below*,
-the annotators, *Open in Viking*, *Open GraphApp*, the analyses and the exports.
+the annotators, *Copy Location ID* and *Copy X Y Z*, *Open in Viking*, *Open GraphApp*,
+the analyses and the exports.
 In the render it opens **when you let go of the button**, and only if the pointer
 has not moved more than 8 pixels since you pressed: a right-drag is the pan, and
 it starts from a cell as well as from empty space. (macOS asks for the menu as the
 button goes down; opening it there put it under the pointer of every pan that began
 on a cell, and the pan stalled.)
+
+*Which annotation.* A right click, a click and a triple click in the 3D render pick
+the annotation the readout names under the pointer (since 2.44.0): on a surface, the
+one nearest the point of the surface drawn there; on a ring in front of it, that
+ring. Rings are drawn through the surfaces, so one behind the cell could lie a pixel
+nearer the pointer than the ring under it; a ring that begins more than 2 µm behind
+the surface drawn under the pointer is not offered. With the rings hidden, the menu is
+still about that annotation (its title names it), so *Copy Location ID*, *Copy X Y Z*
+(Viking's numbers with the downsample, as the Markers table copies them: the section
+correction and any manual move taken back) and *Open in Viking* go to it.
 
 *What counts as being on a cell.* The pointer does not have to be on the surface
 exactly. A thin process is a pixel or two wide, so when nothing is under the pointer

@@ -72,6 +72,10 @@ export const PRESETS = {
     description: 'Flat shading: every triangle shows, for judging mesh resolution.',
     roughness: 0.6, specularIntensity: 0.5, flatShading: true,
   },
+  Unlit: {
+    description: 'One flat color with no light or shade: the cell as a silhouette, as MATLAB\'s golgi.m drew it.',
+    roughness: 1, specularIntensity: 0, envMapIntensity: 0, unlit: true,
+  },
 };
 
 export const DEFAULT_MATERIAL = 'Standard';
@@ -129,6 +133,7 @@ export function completeSpec(partial) {
     spec[key] = /^#[0-9a-fA-F]{6}$/.test(String(partial?.[key] || '')) ? String(partial[key]).toLowerCase() : dflt;
   }
   spec.flatShading = !!partial?.flatShading;
+  spec.unlit = !!partial?.unlit;
   return spec;
 }
 
@@ -138,6 +143,7 @@ export function specForLibrary(spec) {
   for (const key of Object.keys(MATERIAL_FIELDS)) out[key] = spec[key];
   for (const key of Object.keys(MATERIAL_COLORS)) out[key] = spec[key];
   out.flatShading = !!spec.flatShading;
+  out.unlit = !!spec.unlit;
   if (spec.based_on) out.based_on = spec.based_on;
   return out;
 }
@@ -177,8 +183,38 @@ export function applyMaterialSpec(material, spec, { color, vertexColors } = {}) 
     material.flatShading = full.flatShading;
     material.needsUpdate = true;
   }
+  setUnlit(material, full.unlit);
   material.userData.materialSpec = full;
   return material;
+}
+
+/**
+ * Unlit: the fragment's color is the surface's own (the cell color, or the colormap's
+ * per-vertex colors), with every light, highlight, reflection and glow left out -- one
+ * flat ink, as MATLAB's golgi.m drew a cell with its lights deleted.  A shader switch,
+ * as flat shading is.
+ */
+const UNLIT = (shader) => {
+  shader.fragmentShader = shader.fragmentShader.replace(
+    '#include <opaque_fragment>', 'outgoingLight = diffuseColor.rgb;\n#include <opaque_fragment>');
+};
+
+/** Whether `material` is drawn unlit (`setUnlit`). */
+export function isUnlit(material) {
+  return material?.onBeforeCompile === UNLIT;
+}
+
+/** Draw `material` unlit or lit again; a clone does not keep it (three copies no patch). */
+export function setUnlit(material, on) {
+  if (isUnlit(material) === !!on) return;
+  if (on) {
+    material.onBeforeCompile = UNLIT;
+    material.customProgramCacheKey = () => 'sbfsem-unlit';
+  } else {
+    delete material.onBeforeCompile;
+    delete material.customProgramCacheKey;
+  }
+  material.needsUpdate = true;
 }
 
 /**

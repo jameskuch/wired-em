@@ -108,6 +108,17 @@ export function bindMaterialsPanel({
     fields.append(row);
     controls.set('flatShading', input);
   }
+  {
+    const row = document.createElement('label');
+    row.className = 'check';
+    row.title = 'One flat color with no light or shade: every other field is then left out';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.addEventListener('change', () => { spec.unlit = input.checked; paint(); });
+    row.append(input, document.createTextNode(' Unlit (one flat color)'));
+    fields.append(row);
+    controls.set('unlit', input);
+  }
 
   // -- picking, saving, deleting, applying -------------------------------------
   // Like the Map menu: choosing applies at once, to the selected cells (or

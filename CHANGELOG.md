@@ -18,6 +18,42 @@
 - README (Wired, how to deploy without naming the server, contributing), LICENSE.txt (the port's notice beside the original), CONTRIBUTING.md and CITATION.cff (GitHub's *Cite this repository*). CI (`.github/workflows/ci.yml`) now runs on the public copy: Ubuntu with Python 3.11 to 3.13 and macOS with 3.13; Windows joins once the suite has been run there. Tests: `tests/unit/test_publish_public.py` (new, 6: what is left out and replaced, every refusal, and a publish from a real repository and clone that carries only the committed tree).
 - **The first public CI run found that skimage on Apple Silicon draws knife-edge pixels differently.** Its arm64 build fuses `x0*y1 - x1*y0` into one multiply-add (rounding `x1*y0` alone), so on GitHub's macOS runner two of the random-polygon cases came out 11 and 1 pixels away from the fill; `math.fma` reproduces exactly those pixels, and the x86_64 builds (this Mac's Python, the Ubuntu runners, production) match the fill bit for bit. The fill is numpy, which never fuses, so it gives one answer everywhere; where skimage fuses, `tests/unit/test_rasterize.py` now holds it to skimage's rule with each product rounded on its own (`unfused_mask`), and checks that rule against skimage itself wherever skimage does not fuse (+12 tests, all 3,600 random polygons). Rings the library hands to skimage itself (small, not finite, or too large) are still compared with skimage on every platform.
 
+## 2.44.0 — 2026-10-30
+
+Four requests from #ai-requests (Crystal and James Anderson, 2026-10-30), built together.
+
+### A click picks the annotation the readout names, and a ring behind the surface is no longer offered
+
+- **The right-click menu, a click and a triple click in the 3D render now pick the annotation the pick readout names under the pointer (2.32.0's rule), instead of the ring whose rim passes nearest on the screen.** Rings are drawn through the surfaces, and since 2.40.0 every ring is at least a pixel tall edge-on, so a ring on the far side of a cell could lie a pixel nearer the pointer than the one under it. The menu put that ring first, and its *Open in Viking* (which opens the exact Location ID) went there. Now:
+  - a ring that begins more than 2 µm behind the surface drawn under the pointer is not offered (a surface swells up to 2 µm past its discs);
+  - the readout's annotation comes first, and the menu's title names it even with the rings hidden, so *Open in Viking* and the new Copy row act on it;
+  - a drawn ring the pointer is plainly on (the only ring within a pixel of it, not behind the surface) is what the readout names, and so what a click picks. Close in, seen from the side, rings stand a section (2 px) apart, and the surface rule alone named one two sections off the ring under the pointer (c943, 31471 for 31428): a triple click could not choose that ring.
+- Measured on Inferior Monkey c943 with its rings shown. At a whole cell's zoom, the click's first annotation disagreed with the readout at 59 of 125 points on the surface before, 0 after. Over three views (509 points), the first ring offered began more than 2 µm behind the visible surface at 16 points before, 0 after. On c1178's soma seen down Z, a triple click on section 1241's ring also offered section 1104's, 9 µm behind the surface; now it selects 1241. Close in from the side, all three rings of the Markers check can again be triple-clicked alone.
+- The rule is one function for the hover and the clicks (`hoverpick.js` `ringUnder`, `behindSurface`; `Renderer3D._readout`, `_readoutCandidates`). GraphApp and Render compare's panes keep their own rules.
+
+### Copy Location ID and Copy X Y Z in the right-click menu, and the i key
+
+- **When the menu is about an annotation, a Copy row offers its *Location ID* and its *X Y Z*:** Viking's pixels and section with the downsample, the section correction and any manual move taken back, the same text the Markers table copies. Paste them into Viking's *Annotation → Goto Location ID* and *Commands → Goto Location*. Both are frozen at the right click, and the status line names the volume to paste in. One row of two buttons: two rows put the menu's foot 35 px past a 620 px window, and the *Under the pointer* list now shrinks to one row there, not two.
+- **`i`, with the pointer on the view, copies the Location ID the readout names**, as `c` copies its Viking X Y Z.
+
+### Flip Z keeps the cell where it is
+
+- **Flip Z mirrored the scene through the volume's section 0 with the camera left where it was**, so a cell at section 1,578 (c943, near +110 µm) moved twice that along Z, out of the picture and to another distance. The camera now moves with the mirror, about the level of the pivot point or, with none, of the orbit target. The cell is drawn upside down where it was and the camera keeps its direction, as MATLAB's flip within the axes does. c943: the middle of its box stays on the same pixel at the same 31.5 µm, where it used to move 279 µm. Render compare's panes have no Flip Z of their own.
+
+### Invert is now Light background
+
+- Display's *Invert* swaps the background, not anything inverted, and sat beside *Flip Z* and the colormap's *Invert map*. It is now **Light background**. The saved setting is still `invert`, so saved sessions and looks keep working.
+
+### Golgi: MATLAB's golgi.m as a look, and an Unlit material
+
+- **A built-in visualization, *Golgi · Flat silhouette from above*:** the surface alone, solid and in one flat color with no light or shade, seen straight down Z in 2D on a light background, as MATLAB's `util/renders/golgi.m` drew a cell. It is the one look that also sets the page's view: it ticks *Light background* and *2D* (a look's new `scene`, which travels in a shared file and is not part of telling which look a cell shows). Each cell keeps its own color; make it black for MATLAB's black on white.
+- **A new material, *Unlit*, and an *Unlit* box in the material editor:** the fragment is the surface's own color (or the colormap's), with every light, highlight and reflection left out. The shared material library keeps the flag (`library.py`), and a slice's faded copy keeps it too.
+
+### Tests and checks
+
+- node: `test_hoverpick` 23 (4 new: the ring under the pointer, the whole-cell tie, none, behind the surface), `test_contextmenu` 29 (the readout's annotation first, a surface that carries it), `test_visualizations` 10 (Golgi, the scene, every built-in material is a preset). `tests/unit/test_library_and_cache.py`: the material flags are the browser's.
+- `tools/check_contextmenu.py`: the menu on a surface is about the readout's annotation; the Copy row and what it copies; the readout and the menu agree at 12 points; the ring searches wait for the readout and click whole pixels (rings a pixel apart decide by less than one); the triple click's Select menu is checked where two visible rings meet. 132 of 133 pass. The one left, `markerthird`'s count at a whole cell's zoom (three rings offered), fails the same way on 2.43.0.
+
 ## 2.43.0 — 2026-10-28
 
 ### Damaged sections: read from Viking's correction service, and marked on request (2026-10-28)

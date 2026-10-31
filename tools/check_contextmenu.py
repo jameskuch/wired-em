@@ -158,6 +158,7 @@ def menu(c: Chrome):
                  heading: m.querySelector('.ctx-heading')?.textContent ?? null,
                  rows: rows.map((e) => e.textContent), ticked: rows.map((e) => e.textContent.startsWith('\\u2713')),
                  items: top.map((e) => e.textContent.trim()),
+                 copy: [...m.querySelectorAll(':scope > .ctx-row > .ctx-item')].map((e) => e.getAttribute('aria-label')),
                  parents: [...m.querySelectorAll(':scope > .ctx-parent')].map((e) => e.firstChild.textContent.trim()),
                  box: [box.left, box.top, box.width, box.height] }; })()""")
 
@@ -182,6 +183,16 @@ def row_xy(c: Chrome, index: int):
 
 def sample(items, n: int, seed: int = 3):
     return random.Random(seed).sample(items, min(n, len(items)))
+
+
+def readout_ready(c: Chrome) -> None:
+    """The pointer over the render until the readout has the cells' annotations: a click follows
+    the readout's pick from then on (2.44.0), and a search for where to click must see the same."""
+    left, top, width, height = js(c, """(() => { const b = window.sbfsem.renderer.webgl.domElement
+        .getBoundingClientRect(); return [b.left, b.top, b.width, b.height]; })()""")
+    c.move(left + width / 2, top + height / 2)
+    c.wait_for('window.sbfsem.renderer.pickCells().length > 0', 30)
+    c.settle(2)
 
 
 def set_show(c: Chrome, label: str, on: bool, seconds: float = 1.0) -> bool:
@@ -499,16 +510,45 @@ def candidates(c: Chrome, r: Report, ctx):
         window.open = () => ({ location: { set href(v) { window.__opened.push(v); } }, close() {} });
         return true; })()""")
     prepare(c)
-    # One thing under the pointer: the menu as it was, with the title of what it is about.
+    # One thing under the pointer: the menu as it was, with the title of what it is about --
+    # the annotation the readout names there, its rings hidden (2.44.0).
     pixels = drawn(c)
     x, y, _ = sample(pixels, 1)[0]
+    c.move(x, y)
+    c.settle(3)
+    # The cell's annotations come with the first look at it: the readout names one then.
+    c.wait_for("/Location ID \\d/.test(document.getElementById('pick-location').textContent)", 30)
+    readout = js(c, "document.getElementById('pick-location').textContent")
     right_click(c, x, y)
     m = menu(c)
     plain = m
-    r.check('one thing under the pointer (the surface): no list, the title is the cell, the menu as it was',
-            m is not None and m['heading'] is None and m['title'] == cell and not m['rows']
+    named = m and m['title'].startswith(f'{cell} · annotation ') and m['title'].split()[3]
+    r.check('one thing under the pointer (the surface): no list, the title is the cell and the readout\'s annotation',
+            m is not None and m['heading'] is None and bool(named) and not m['rows']
             and 'Open in Viking' in m['items'], m and (m['title'], m['heading'], m['rows']))
+    r.check('the menu is about the annotation the readout names there', bool(named) and f'Location ID {named} ' in readout,
+            (readout, m and m['title']))
+    r.check('a Copy row copies its Location ID and its Viking X Y Z',
+            m is not None and m['copy'] == [f'Copy Location ID {named}', 'Copy X Y Z'], m and m['copy'])
+    js(c, "document.querySelector('#ctx-menu .ctx-row .ctx-item').click(); true")
+    c.settle(2)
+    said = js(c, "document.getElementById('status').textContent")
+    r.check('Copy Location ID says what it copied, and the volume to paste it in',
+            said.startswith(f'Copied “{named}”') and 'open Inferior Monkey' in said, said)
     close_menu(c)
+    # The readout and a right click name one annotation wherever the pointer is on the cell.
+    disagree = []
+    for x2, y2, _ in sample(pixels, 12, seed=11):
+        c.move(x2, y2)
+        c.settle(3)
+        said = js(c, "document.getElementById('pick-location').textContent")
+        right_click(c, x2, y2)
+        m2 = menu(c)
+        close_menu(c)
+        title = m2['title'] if m2 else ''
+        if not (title.startswith(f'{cell} · annotation ') and f"Location ID {title.split()[3]} " in said):
+            disagree.append((round(x2), round(y2), said, title))
+    r.check('the readout and the right-click menu name the same annotation (12 points)', not disagree, disagree[:3])
 
     # Rings on, seen down Z: the soma's rim has a stack of them under one pixel.
     set_show(c, 'Show annotations', True, 3)
@@ -639,14 +679,36 @@ def candidates(c: Chrome, r: Report, ctx):
     r.check('the next Esc takes the marker', js(c, f"!{marked} && window.sbfsem.renderer.selection !== null"))
     c.key('Escape')
     r.check('and the next the selection', js(c, "window.sbfsem.renderer.selection === null"))
-    # The triple click's own chooser is what it was: items to select, never the surface.
-    triple_click(c, x, y)
-    chooser = menu(c)
-    r.check('a triple click still opens the Select menu, with the items and not the surface',
-            chooser is not None and chooser['title'].startswith('Select') and chooser['items']
-            and all('Surface' not in t for t in chooser['items']) and any(t.startswith('Annotation') for t in chooser['items']),
-            chooser and (chooser['title'], chooser['items'][:3]))
-    close_menu(c)
+    # The triple click's own chooser is what it was: items to select, never the surface -- where
+    # two rings are as near the pointer.  (On the soma's rim it was one ring and section 1104's,
+    # 9 um behind the surface there, which a click no longer offers: 2.44.0.)
+    spot = js(c, """(async () => { const M = await import('/static/js/markers.js'); const r = window.sbfsem.renderer;
+        const V = r.bounds.min.constructor; const rect = r.webgl.domElement.getBoundingClientRect();
+        r.camera.updateMatrixWorld(); r.group.updateMatrixWorld(true);
+        const d = r.discs.values().next().value; const n = d.userData.rings.find((q) => q.id === %d);
+        const at = (x, y, z) => { const v = new V(x, y, z).applyMatrix4(d.matrixWorld).project(r.camera);
+          return [rect.left + (v.x + 1) / 2 * rect.width, rect.top + (1 - v.y) / 2 * rect.height]; };
+        const mid = at(...n.xyz_um);
+        // The soma's rim and a few pixels inside it, where the rings of the sections about it lie.
+        for (let k = 0; k < 72; k += 1) {
+          const a = (k / 72) * Math.PI * 2;
+          const rim = at(n.xyz_um[0] + n.radius_um * Math.cos(a), n.xyz_um[1] + n.radius_um * Math.sin(a), n.xyz_um[2]);
+          const ux = rim[0] - mid[0]; const uy = rim[1] - mid[1]; const len = Math.hypot(ux, uy) || 1;
+          for (let o = -6; o <= 2; o += 1) {
+            const x = Math.round(rim[0] + (ux / len) * o); const y = Math.round(rim[1] + (uy / len) * o);
+            if (x < rect.left + 20 || x > rect.right - 20 || y < rect.top + 150 || y > rect.bottom - 60) continue;
+            const offered = M.choosable(r.candidatesAt(x, y));
+            if (offered.filter((q) => q.kind === 'annotation').length >= 2) return [x, y]; } }
+        return null; })()""" % soma['id'], wait=True)
+    r.check('a spot where a triple click offers two rings was found', bool(spot), spot)
+    if spot:
+        triple_click(c, *spot)
+        chooser = menu(c)
+        r.check('a triple click still opens the Select menu, with the items and not the surface',
+                chooser is not None and chooser['title'].startswith('Select') and chooser['items']
+                and all('Surface' not in t for t in chooser['items']) and any(t.startswith('Annotation') for t in chooser['items']),
+                chooser and (chooser['title'], chooser['items'][:3]) or js(c, PICKED % tuple(spot), wait=True))
+        close_menu(c)
     # A row of the list that is not an annotation makes the menu about the cell only.
     right_click(c, x, y)
     m5 = menu(c)
@@ -737,7 +799,7 @@ def cells(c: Chrome, r: Report, ctx):
     right_click(c, x, y)
     m = menu(c)
     r.check('opaque: only the cell in front is under the pointer, and no list is offered',
-            m is not None and m['heading'] is None and m['title'] in both, m and (m['title'], m['heading']))
+            m is not None and m['heading'] is None and cell_of(m['title']) in both, m and (m['title'], m['heading']))
     close_menu(c)
     # Translucent: both are seen, so both are listed.
     for key in (a, b):
@@ -980,7 +1042,8 @@ def compare(c: Chrome, r: Report, ctx):
 
 # -- markers ------------------------------------------------------------------------------------
 
-#: Where on a ring's rim a triple click picks that ring alone: tries the rim at 24 angles.
+#: Where on a ring's rim a triple click picks that ring alone: tries the rim at 24 angles, each at
+#: the whole pixel a mouse would be on (rings a pixel apart decide by less than one, 2.44.0).
 RIM_OF = """(id) => { const r = window.sbfsem.renderer; const V = r.bounds.min.constructor;
     const rect = r.webgl.domElement.getBoundingClientRect(); r.camera.updateMatrixWorld(); r.group.updateMatrixWorld(true);
     const d = r.discs.values().next().value; const n = d.userData.rings.find((q) => q.id === id);
@@ -988,12 +1051,20 @@ RIM_OF = """(id) => { const r = window.sbfsem.renderer; const V = r.bounds.min.c
       const a = (k / 24) * Math.PI * 2;
       const v = new V(n.xyz_um[0] + n.radius_um * Math.cos(a), n.xyz_um[1] + n.radius_um * Math.sin(a), n.xyz_um[2])
         .applyMatrix4(d.matrixWorld).project(r.camera);
-      const x = rect.left + (v.x + 1) / 2 * rect.width; const y = rect.top + (1 - v.y) / 2 * rect.height;
+      const x = Math.round(rect.left + (v.x + 1) / 2 * rect.width); const y = Math.round(rect.top + (1 - v.y) / 2 * rect.height);
       if (x < rect.left + 20 || x > rect.right - 20 || y < rect.top + 140 || y > rect.bottom - 60) continue;
       const found = r.candidatesAt(x, y);
       if (found.length === 1 && found[0].locationId === id) return [x, y];
     }
     return null; }"""
+
+#: What a click at (x, y) is offered now, and what is selected (for a failure's detail).
+PICKED = """(async () => { const M = await import('/static/js/markers.js'); const r = window.sbfsem.renderer;
+    const all = r.candidatesAt(%f, %f);
+    return { offered: M.choosable(all).map((q) => `${q.kind} ${q.section ?? ''}${q.named ? '*' : ''} ${q.px.toFixed(1)}`),
+             selected: r.selection && r.selection.section, above: r.markers.above && r.markers.above.section,
+             below: r.markers.below && r.markers.below.section,
+             menu: [...document.querySelectorAll('#ctx-menu .ctx-item')].map((e) => e.textContent).slice(0, 3) }; })()"""
 
 TABLE = """(() => { const t = document.getElementById('marker-table'); if (!t || t.hidden) return null;
     const rows = [...t.querySelectorAll('tbody tr')];
@@ -1031,6 +1102,7 @@ def markers(c: Chrome, r: Report, ctx):
        % json.dumps(plan['xyz']))
     time.sleep(1.5)
     c.settle(4)
+    readout_ready(c)
     rim = {k: js(c, f"({RIM_OF})({plan[k]})") for k in ('y', 'up', 'down')}
     r.check('each of the three rings can be clicked alone', all(rim.values()), rim)
     if not all(rim.values()):
@@ -1048,7 +1120,8 @@ def markers(c: Chrome, r: Report, ctx):
     r.check('a ring above it becomes red and one below it blue; the rows run red, yellow, blue',
             slots == ['above', 'primary', 'below']
             and js(c, 'window.sbfsem.renderer.markers.above.locationId') == plan['up']
-            and js(c, 'window.sbfsem.renderer.markers.below.locationId') == plan['down'], t)
+            and js(c, 'window.sbfsem.renderer.markers.below?.locationId') == plan['down'],
+            (t, js(c, PICKED % tuple(rim['down']), wait=True)))
     colors = js(c, "['above', 'primary', 'below'].map((s) => window.sbfsem.renderer.markerColor(s))")
     r.check('each row is in its marker\'s color', [row['color'] for row in t] == colors, (colors, [row['color'] for row in t]))
     if slots == ['above', 'primary', 'below']:
@@ -1184,6 +1257,7 @@ def zslice(c: Chrome, r: Report, ctx):
         return true; })()""" % (json.dumps(key), first, json.dumps(key)))
     time.sleep(1.5)
     c.settle(4)
+    readout_ready(c)
     rim = js(c, f"({RIM_OF})({first})")
     r.check('the selected ring can be right-clicked alone', bool(rim), rim)
     if not rim:
@@ -1332,6 +1406,7 @@ def markerthird(c: Chrome, r: Report, ctx):
        % json.dumps(plan['xyz']))
     time.sleep(1.5)
     c.settle(4)
+    readout_ready(c)
     rim = js(c, f"({RIM_OF})({plan['y']})")
     r.check('the yellow ring can be clicked alone', bool(rim), rim)
     if not rim:

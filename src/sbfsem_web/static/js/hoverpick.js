@@ -29,6 +29,15 @@
 //   each, so the readout steps section by section as the pointer moves.
 // - On nothing, the annotation nearest the pointer on the screen.
 //
+// With annotation rings drawn, a ring the pointer is plainly on comes before all of
+// that (`ringUnder`, 2026-10-30): the one ring within ON_RING_PX of the pointer, not
+// behind the surface drawn there.  Close in, seen from the side, rings stand a section
+// (2 px) apart, and the surface rule named one two sections from the ring the pointer
+// was on (Inferior Monkey c943, 31471 for 31428), so a triple click could not choose
+// that ring; at a whole cell's zoom, one five sections off (c1178, section 1092 with
+// the pointer on 1097's ring).  Where two rings are within a pixel of the pointer, the
+// surface rule decides between them as before.
+//
 // GraphApp names the dot nearest the pointer, as its click does (markers.js
 // `dotChoices`): there is no surface, and what is drawn at an annotation is its
 // dot.  Dots within half a pixel of the nearest are equally near; the one nearer
@@ -61,6 +70,17 @@ export const HOVER_REACH_UM = 0.5;
 export const HOVER_REACH_Z_UM = 0.1;
 /** Two annotations this close on the screen, or in depth, are equally near. */
 export const HOVER_TIE_PX = 0.5;
+
+/** A ring this near the pointer, in screen pixels, is under it (`ringUnder`): its drawn line is a pixel wide. */
+export const ON_RING_PX = 1;
+/**
+ * How far behind the surface drawn under the pointer, in microns, an annotation's disc
+ * may begin and still be under the pointer.  A surface swells up to 2 um past the discs
+ * it is drawn around (above), so a disc that begins nearer is one of those; one that
+ * begins farther is behind the surface, out of sight, though a ring drawn through the
+ * surface shows it.
+ */
+export const HIDDEN_BEHIND_UM = 2;
 
 const EPS = 1e-12;
 
@@ -147,6 +167,31 @@ class Least {
     }
     return out;
   }
+}
+
+/** Whether a ring (`{ front }`, its disc's least depth along the view) lies behind a surface `surface` deep. */
+export function behindSurface(ring, surface) {
+  return surface !== null && surface !== undefined && ring.front > surface + HIDDEN_BEHIND_UM;
+}
+
+/**
+ * The drawn ring the pointer is plainly on, or null: of `rings` (`{ px, front, locationId,
+ * key }`, the renderer's candidates, any order), the one within ON_RING_PX of the pointer
+ * when no other is.  Rings behind the surface drawn under the pointer (`surface`, its depth
+ * along the view, or null) are not there to be on.
+ */
+export function ringUnder(rings, surface = null) {
+  let first = null;
+  let second = null;
+  for (const ring of rings || []) {
+    if (behindSurface(ring, surface)) continue;
+    if (!first || ring.px < first.px) {
+      second = first;
+      first = ring;
+    } else if (!second || ring.px < second.px) second = ring;
+  }
+  if (!first || first.px > ON_RING_PX) return null;
+  return second && second.px <= ON_RING_PX ? null : first;
 }
 
 /**

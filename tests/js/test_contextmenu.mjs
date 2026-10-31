@@ -214,6 +214,19 @@ test('on its own pixel an annotation is picked before the surface it is drawn on
   assert.equal(pickOf([on, ring(1001, 1.6, 12)]), on);
 });
 
+test('the annotation the readout names comes first, before a ring a pixel nearer and the camera (2.44.0)', () => {
+  // A ring drawn through the surface, behind the cell, its rim nearer the pointer than
+  // the readout's: it used to come first, and Open in Viking went to it.
+  const behind = ring(1328723, 0.2, 40);
+  const named = { ...ring(1328721, 0, 12), named: true };
+  const rows = listCandidates([behind, surface('NeitzInferiorMonkey/1178', 0, 11), named]);
+  assert.equal(rows[0], named);
+  assert.equal(pickOf([behind, named]), named, 'a left click picks it too: both buttons read one list');
+  // Two of one annotation (a ring found and its named copy): the named one stands for it.
+  assert.equal(listCandidates([ring(7, 0, 5), { ...ring(7, 0, 9), named: true }])[0].named, true);
+  assert.equal(listCandidates([ring(7, 0, 5), { ...ring(7, 0, 9), named: true }]).length, 1);
+});
+
 // -- what they are called -----------------------------------------------------------
 
 const naming = { cell: 'c1178', volume: 'Inferior Monkey' };
@@ -256,6 +269,10 @@ test('the title is the cell, and says which thing on it when it is one', () => {
   assert.equal(contextTitle(ring(77, 0), naming), 'c1178 · annotation 77 (Inferior Monkey)');
   assert.equal(contextTitle(branch(2, 0), naming), 'c1178 · skeleton branch');
   assert.equal(contextTitle({ kind: 'synapse', type: 'Ribbon' }, naming), 'c1178 · Ribbon synapses');
+  // A surface that carries the readout's annotation (its rings hidden) is about that annotation.
+  const carried = { ...surface('a/1'), annotation: { kind: 'annotation', locationId: 49506, section: 900 } };
+  assert.equal(contextTitle(carried, naming), 'c1178 · annotation 49506 (Inferior Monkey)');
+  assert.equal(describeCandidate(carried, naming), 'Surface of c1178 (Inferior Monkey)', 'its row is still the surface');
 });
 
 // -- where it goes ------------------------------------------------------------------

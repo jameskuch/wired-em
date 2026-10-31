@@ -33,7 +33,8 @@ MATERIAL_FIELDS: dict[str, tuple[float, float, float]] = {
 #: from ``emissiveIntensity`` by the browser, which never sends or reads a color
 #: for it (``MATERIAL_COLORS`` in ``static/js/materials.js``).
 _MATERIAL_COLORS = {"sheenColor", "specularColor"}
-_MATERIAL_FLAGS = {"flatShading"}
+#: Booleans; mirror the checkboxes ``static/js/materialpanel.js`` builds.
+_MATERIAL_FLAGS = {"flatShading", "unlit"}
 
 MAX_STOPS = 32
 

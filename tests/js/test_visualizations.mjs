@@ -167,6 +167,54 @@ test('a file to share: only what differs from the defaults, read back the same; 
   assert.ok(wild.render.voxel2_faces >= 0);
 });
 
+test('Golgi: MATLAB\'s golgi.m as a look -- the surface alone, solid and unlit, and the view it is seen in', () => {
+  const golgi = V.BUILT_IN.find((v) => v.id === 'golgi');
+  assert.ok(golgi);
+  const n = V.normalizeVisualization(golgi);
+  assert.equal(n.display.material, 'Unlit');
+  assert.equal(n.display.showSurface, true);
+  assert.ok(!n.display.showDiscs && !n.display.showSkeleton && !n.display.showWireframe && !n.display.showSynapses);
+  assert.equal(n.opacity, 1);
+  assert.deepEqual(n.scene, { invert: true, two_d: true }, 'a light background, straight down Z');
+  // The cell keeps its own color: a look never carries one.
+  assert.ok(!('color' in n) && !('color' in n.display));
+});
+
+test('a look\'s scene: only Display\'s Light background and 2D, as booleans; none is none', () => {
+  assert.equal(V.normalizeScene(null), null);
+  assert.equal(V.normalizeScene({}), null);
+  assert.equal(V.normalizeScene({ flip_z: true, invert: 'yes' }), null, 'nothing else, and no strings');
+  assert.deepEqual(V.normalizeScene({ invert: false, two_d: true, extra: 1 }), { invert: false, two_d: true });
+  assert.ok(!('scene' in V.normalizeVisualization({ name: 'Plain' })), 'a look without one has none');
+  assert.ok(!('scene' in V.fromCell(cell(), 'Mine')), 'saving a cell keeps no scene: the cell has none');
+});
+
+test('a scene travels in a file, and is not part of telling which look a cell shows', () => {
+  const golgi = V.BUILT_IN.find((v) => v.id === 'golgi');
+  const back = V.fromFile(V.toFile([golgi])).items[0];
+  assert.deepEqual(back.scene, { invert: true, two_d: true });
+  const record = cell();
+  const look = V.applied(golgi, record);
+  assert.ok(!('scene' in look), 'applying sets the cell; the app sets the page\'s view');
+  const shown = { ...record, ...look };
+  assert.equal(V.matching(shown, V.BUILT_IN)?.id, 'golgi');
+  const { scene, ...cellOnly } = golgi;
+  assert.ok(scene);
+  assert.equal(V.lookSignature(V.applied(cellOnly, record)), V.lookSignature(look));
+});
+
+test('every material a built-in look names is a built-in finish (materials.js)', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(path.join(jsDir, 'materials.js'), 'utf8');
+  const presets = source.match(/export const PRESETS = \{\n([\s\S]*?)\n\};/)[1];
+  const names = new Set([...presets.matchAll(/^ {2}(\w+): \{/gm)].map((m) => m[1]));
+  assert.ok(names.has('Standard') && names.has('Unlit'), [...names].join(' '));
+  assert.match(presets, /Unlit: \{[\s\S]*?unlit: true,/);
+  for (const vis of V.BUILT_IN) {
+    if (vis.display.material) assert.ok(names.has(vis.display.material), `${vis.id}: ${vis.display.material}`);
+  }
+});
+
 let failed = 0;
 for (const [name, fn] of cases) {
   try {

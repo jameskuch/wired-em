@@ -11,9 +11,11 @@
 // and its opacity.  Not in it: the cell's own color (each cell keeps its color,
 // so a look applied to many cells still tells them apart), its Z range (a cut of
 // that cell), its registration and its manual moves (where its annotations are,
-// not how they are drawn).
+// not how they are drawn).  A look may also set the view it is meant to be seen
+// in (`scene`, Display's Light background and 2D boxes): Golgi's light flatmount.
+// That is the whole page's, not the cell's, so a look is matched without it.
 //
-//   { id, name, by, note, render: {...}, display: {...}, opacity }
+//   { id, name, by, note, render: {...}, display: {...}, opacity, scene?: {...} }
 //
 // Applied, `render` is completed from the render defaults and `display` from the
 // display defaults: a visualization sets the whole look, so what it leaves out is
@@ -29,6 +31,8 @@ export const FILE_KIND = 'sbfsem-visualizations';
 export const FILE_VERSION = 1;
 /** The display keys that are the cell's own, never a look's. */
 export const CELL_ONLY_DISPLAY = Object.freeze(['zMin', 'zMax']);
+/** The page's view settings a look may set too, as a saved session names Display's boxes. */
+export const SCENE_KEYS = Object.freeze(['invert', 'two_d']);
 
 const clamp01 = (v, fallback) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : fallback);
 
@@ -36,8 +40,9 @@ const clamp01 = (v, fallback) => (typeof v === 'number' && Number.isFinite(v) ? 
  * The visualizations offered to everyone, before any is saved.  The first five
  * are what the lab uses, read from the workspaces saved on sbfsem-tools.com
  * (2026-10-19): James's (`jk`), Crystal's (and the shared ALLofUS folder) and,
- * for Becca, who has saved none, from her skeleton work; the last three put one
- * thing forward over the rest.
+ * for Becca, who has saved none, from her skeleton work; the next three put one
+ * thing forward over the rest; Golgi is MATLAB's `util/renders/golgi.m`, asked
+ * for by Crystal (2026-10-30).
  */
 export const BUILT_IN = Object.freeze([
   {
@@ -163,6 +168,19 @@ export const BUILT_IN = Object.freeze([
     },
     opacity: 0.25,
   },
+  {
+    id: 'golgi',
+    name: 'Golgi · Flat silhouette from above',
+    by: '',
+    note: 'MATLAB\'s golgi.m: the surface alone, solid, in one flat color with no light or shade (the Unlit '
+      + 'material), seen straight down Z in 2D on a light background, as a Golgi-stained flatmount. Each cell '
+      + 'keeps its own color: make it black for MATLAB\'s black on white, or untick Display → Light background '
+      + 'and make it white.',
+    render: {},
+    display: { material: 'Unlit', showSurface: true },
+    opacity: 1,
+    scene: { invert: true, two_d: true },
+  },
 ]);
 
 // -- one visualization ------------------------------------------------------------------------
@@ -186,6 +204,7 @@ export function normalizeVisualization(raw, { id = null } = {}) {
   if (!name) return null;
   const render = raw.render && typeof raw.render === 'object' && !Array.isArray(raw.render) ? raw.render : {};
   const display = raw.display && typeof raw.display === 'object' && !Array.isArray(raw.display) ? raw.display : {};
+  const scene = normalizeScene(raw.scene);
   return {
     id: typeof raw.id === 'string' && raw.id ? raw.id.slice(0, 80) : (id ?? slug(name)),
     name,
@@ -194,7 +213,16 @@ export function normalizeVisualization(raw, { id = null } = {}) {
     render: normalizeRender(render),
     display: lookDisplay(display),
     opacity: clamp01(raw.opacity, 0.92),
+    ...(scene ? { scene } : {}),
   };
+}
+
+/** A look's view settings: the SCENE_KEYS it sets, each true or false, or null when it sets none. */
+export function normalizeScene(raw) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out = {};
+  for (const key of SCENE_KEYS) if (typeof raw[key] === 'boolean') out[key] = raw[key];
+  return Object.keys(out).length ? out : null;
 }
 
 /** A name as an id: "Crystal · Skeleton" -> "crystal-skeleton". */
@@ -313,6 +341,7 @@ export function toFile(list, now = new Date()) {
       render: diff(clean.render, normalizeRender({})),
       display: diff(clean.display, lookDisplay(DEFAULT_DISPLAY)),
       opacity: clean.opacity,
+      ...(clean.scene ? { scene: clean.scene } : {}),
     };
   });
   return `${JSON.stringify({

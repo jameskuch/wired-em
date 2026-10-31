@@ -2032,6 +2032,10 @@ table.rep-matrix tbody tr:hover { background: none; }
 .ctx-item:hover { background: var(--hover); }
 .ctx-item:disabled { opacity: 0.45; cursor: default; }
 .ctx-item:disabled:hover { background: none; }
+/* Several items on one row after a word (the Copy row: a Location ID, a place). */
+.ctx-row { display: flex; align-items: center; gap: 2px; padding-left: 10px; }
+.ctx-row > span { color: var(--muted); margin-right: 2px; }
+.ctx-row > .ctx-item { width: auto; flex: 0 1 auto; white-space: nowrap; }
 /* A line of small print at the foot of a small menu (the Viking client question). */
 .ctx-note {
   padding: 4px 10px 3px;

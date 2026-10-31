@@ -17,13 +17,13 @@ import {
   RING_SEGMENTS, discColorBuffer, resolveColors, segmentBuffers,
 } from './layerbuffers.js';
 import {
-  applyMaterialSpec, buildEnvironment, createSurfaceMaterial, materialSpec,
+  applyMaterialSpec, buildEnvironment, createSurfaceMaterial, isUnlit, materialSpec, setUnlit,
 } from './materials.js';
 import {
   BEHIND, nearestSegment, nearestTriangle, projectPositions,
 } from './pickgeom.js';
 import { ContextGesture, SURFACE_REACH_PX, listCandidates, pickOf } from './contextmenu.js';
-import { nearestAnnotation as nearestOnRay } from './hoverpick.js';
+import { behindSurface, nearestAnnotation as nearestOnRay, ringUnder } from './hoverpick.js';
 import { DAMAGED_COLOR, damagedRingSegments } from './damaged.js';
 import { pivotEnds, staleDepth } from './pivot.js';
 import {
@@ -242,6 +242,12 @@ function ringLift(material, half, stroke) {
 
 /** How near the pointer, in screen pixels, an item must pass to be selectable. */
 const SELECT_PX = 6;
+
+/** Whether `object` is drawn: it and every group above it visible. */
+function shown(object) {
+  for (let node = object; node; node = node.parent) if (node.visible === false) return false;
+  return true;
+}
 /** A surface at least this opaque is what the pick readout's pointer is on, not what is behind it. */
 const HOVER_SOLID_OPACITY = 0.5;
 /**
@@ -434,6 +440,8 @@ export class Renderer3D {
     // (it knows each cell's annotations) by `setPivot`.
     this.onPivotChange = null;
     this.onPivotRequest = null;
+    // `i` over the view: the app copies the Location ID its readout names (as `c` its Viking X Y Z).
+    this.onCopyLocation = null;
     this.bounds = new THREE.Box3();
     // Everything drawn, hidden or not, context included: what the far plane
     // has to reach.  Rebuilt lazily when something is added or removed.
@@ -635,6 +643,9 @@ export class Renderer3D {
     // pointer that stays (a wheel turn, a key, the end of a drag).  A drag moves
     // the view, not the pointer's place in it, so it waits for the drag's end.
     this.onHover = null;
+    // The app's cells as `nearestAnnotation` takes them, so a click's candidates can
+    // follow the readout's pick (`candidatesAt`); null, and they keep their own rule.
+    this.pickCells = null;
     let hoverAt = null;
     let hoverFrame = 0;
     const hoverSoon = () => {
@@ -891,6 +902,8 @@ export class Renderer3D {
     this.onContextMenu = null;
     this.onPivotChange = null;
     this.onPivotRequest = null;
+    this.onCopyLocation = null;
+    this.pickCells = null;
     this._pivot = null;
     this.selection = null;
     this.markers = { above: null, below: null };
@@ -2961,9 +2974,22 @@ export class Renderer3D {
     this.onInverted?.(this.inverted);
   }
 
-  /** Mirror the scene through the XY plane, as ``set(gca, 'ZDir', 'reverse')``. */
+  /**
+   * Mirror the scene through the XY plane, as ``set(gca, 'ZDir', 'reverse')``.
+   *
+   * The scene mirrors through z = 0, the volume's section 0, and every cell sits at
+   * its own section times the thickness (c943 near +110 um), so the flip used to
+   * carry the cell twice that far along Z while the camera stayed: out of the
+   * picture, and nearer or farther (2026-10-30).  The camera moves with it, so the
+   * flip is about the level of the pivot point, or of the orbit target with none:
+   * what is there stays where it is on the screen, the camera keeps its direction,
+   * and the cell is drawn upside down in place, as MATLAB's flip within the axes is.
+   */
   setFlipZ(on) {
     const flipped = this.flipZ !== !!on;
+    if (flipped) this._settleFlight();
+    // The level the flip keeps, in the scene's frame before it.
+    const level = flipped ? (this._pivotWorld()?.z ?? this.controls.target.z) : 0;
     this.flipZ = !!on;
     this.group.scale.z = on ? -1 : 1;
     // The context sheets and vasculature mirror with the cells they sit around.
@@ -2974,6 +3000,13 @@ export class Renderer3D {
     // A slice's red side and blue side trade places with the rest.
     for (const key of this._clippedKeys()) this._applyZHide(key);
     this._recomputeBounds();
+    if (flipped) {
+      // A point at `level` is drawn at -level now: the camera and what it orbits follow.
+      this.camera.position.z -= 2 * level;
+      this.controls.target.z -= 2 * level;
+      this.controls.update();
+      if (this._pivot) this._placePivotMark();
+    }
     // Red is the marker drawn above the yellow one and blue the one below: a
     // mirrored Z puts each on the other side, so they trade colors.
     if (flipped && (this.markers.above || this.markers.below)) {
@@ -3799,28 +3832,20 @@ export class Renderer3D {
    * it when no ray found one, and its annotation wireframe and position-shift
    * arrows (`'annowire'`, `'shifts'`).  None of those is something to select, so
    * the triple click never asks for them.
+   *
+   * In the 3D render the annotation the pick readout names there comes first
+   * (`named`, `_readoutCandidates`), and a ring wholly behind the surface drawn under
+   * the pointer is not offered: rings are drawn through the surfaces, and one behind
+   * the cell, its rim a pixel or two nearer the pointer, used to come first, so the
+   * menu's Open in Viking went to an annotation the readout did not name (2026-10-30).
    */
   candidatesAt(clientX, clientY, { context = false } = {}) {
-    const rect = this.webgl.domElement.getBoundingClientRect();
+    // The readout's answer first: it aims the ray itself, and draws its one pixel.
+    const readout = this.look === 'render' && this.pickCells
+      ? this._readout(clientX, clientY, this.pickCells()) : null;
     const back = this._aim(clientX, clientY);
     this.group.updateMatrixWorld(true);
-    const camera = this.camera;
-    const px = clientX - rect.left;
-    const py = clientY - rect.top;
-    const eye = camera.position;
-    const viewDir = camera.getWorldDirection(new THREE.Vector3());
-    const v = new THREE.Vector3();
-    // World point -> [x px, y px, depth along the view]; null behind the camera.
-    const project = (world) => {
-      const depth = v.copy(world).sub(eye).dot(viewDir);
-      if (camera.isPerspectiveCamera && depth <= camera.near) return null;
-      v.copy(world).project(camera);
-      return [(v.x + 1) * 0.5 * rect.width, (1 - v.y) * 0.5 * rect.height, depth];
-    };
-    const shown = (object) => {
-      for (let node = object; node; node = node.parent) if (node.visible === false) return false;
-      return true;
-    };
+    const { rect, px, py, project } = this._screenAt(clientX, clientY);
     const out = [];
 
     // Opaque surfaces hide what is behind them; the first face each visible
@@ -3922,70 +3947,7 @@ export class Renderer3D {
       });
     }
 
-    for (const [key, object] of [...this.discs, ...this._graphParts('discs')]) {
-      if (!shown(object)) continue;
-      const through = object.material.depthTest === false;
-      const range = this.zHide.get(key);
-      const inRange = (z) => !range
-        || ((range.min === null || z >= range.min - Z_HIDE_SLACK_UM)
-          && (range.max === null || z <= range.max + Z_HIDE_SLACK_UM));
-      const found = [];
-      const outline = (points, z, info) => {
-        let best = null;
-        let prev = null;
-        const visit = (p) => {
-          const here = project(world.set(p[0], p[1], z).applyMatrix4(object.matrixWorld));
-          if (prev && here) {
-            const { d, t } = segmentDistance(px, py, prev, here);
-            if (!best || d < best.px) best = { px: d, depth: prev[2] + (here[2] - prev[2]) * t };
-          }
-          prev = here;
-        };
-        points.forEach(visit);
-        if (points.length) visit(points[0]);
-        if (best && best.px <= SELECT_PX) found.push({ ...best, ...info, through });
-      };
-      // Skip what the pointer is nowhere near before walking its rim: a
-      // traced Muller cell carries 1.6 million outline points.
-      const near = (cx, cy, cz, reachUm) => {
-        const center = project(world.set(cx, cy, cz).applyMatrix4(object.matrixWorld));
-        if (!center) return false;
-        const reach = reachUm / this._umPerPixelAtDepth(center[2]) + SELECT_PX;
-        return Math.hypot(center[0] - px, center[1] - py) <= reach;
-      };
-      for (const node of object.userData.rings || []) {
-        const [cx, cy, cz] = node.xyz_um;
-        if (!inRange(cz) || !near(cx, cy, cz, node.radius_um)) continue;
-        const rim = [];
-        for (let k = 0; k < 32; k += 1) {
-          const a = (k / 32) * Math.PI * 2;
-          rim.push([cx + node.radius_um * Math.cos(a), cy + node.radius_um * Math.sin(a)]);
-        }
-        outline(rim, cz, { locationId: node.id, section: node.z_section, zUm: cz, center: [cx, cy, cz] });
-      }
-      for (const band of object.userData.bands || []) {
-        if (!inRange(band.z) || !near(band.cx, band.cy, band.z, band.reach)) continue;
-        outline(band.pts, band.z, {
-          locationId: band.id, section: band.section, zUm: band.z,
-          center: [band.cx, band.cy, band.z],
-        });
-      }
-      // A traced outline and its cut-outs are one annotation.
-      const byId = new Map();
-      for (const f of found) {
-        const held = byId.get(f.locationId);
-        if (!held || f.px < held.px) byId.set(f.locationId, f);
-      }
-      for (const f of byId.values()) {
-        // An annotation the crop has cut away is not there to be chosen.
-        if (!this._inCrop(this.toWorld(f.center, this._sourceOf(key)))) continue;
-        out.push({
-          kind: 'annotation', key, px: f.px, depth: f.depth, through: f.through,
-          locationId: f.locationId, section: f.section, zUm: f.zUm,
-          point: f.center,
-        });
-      }
-    }
+    out.push(...this._ringCandidates([...this.discs, ...this._graphParts('discs')], { px, py, project }));
 
     // GraphApp's dots: an annotation's (and a flagged one's) names the annotation, a
     // synapse's the synapse and the annotation it is drawn at.
@@ -4035,13 +3997,117 @@ export class Renderer3D {
     }
 
     if (context) this._cellCandidates(out, missed, { px, py, rect, shown });
+    if (readout) this._readoutCandidates(out, readout);
 
     const slack = (d) => Math.max(0.05, d * 0.002);
-    const seen = out.filter((c) => c.through === true || c.depth <= blockAt + slack(blockAt));
-    seen.sort((a, b) => (Math.round(a.px) - Math.round(b.px)) || (a.depth - b.depth));
+    const seen = out.filter((c) => c.named || c.through === true || c.depth <= blockAt + slack(blockAt));
+    seen.sort((a, b) => (Number(!!b.named) - Number(!!a.named))
+      || (Math.round(a.px) - Math.round(b.px)) || (a.depth - b.depth));
     // A stack of rings seen down Z can put dozens under one pixel.
     let annotations = 0;
     return seen.filter((c) => c.kind !== 'annotation' || (annotations += 1) <= 6);
+  }
+
+  /**
+   * The annotation rings and traced outlines of `entries` (`[key, discs layer]`) that pass
+   * within SELECT_PX of the pointer, as `candidatesAt` lists them, each with `front`, the
+   * least depth any of its disc can have; `screen` is `_screenAt`'s.
+   */
+  _ringCandidates(entries, { px, py, project }) {
+    const out = [];
+    const world = new THREE.Vector3();
+    for (const [key, object] of entries) {
+      if (!shown(object)) continue;
+      const through = object.material.depthTest === false;
+      const range = this.zHide.get(key);
+      const inRange = (z) => !range
+        || ((range.min === null || z >= range.min - Z_HIDE_SLACK_UM)
+          && (range.max === null || z <= range.max + Z_HIDE_SLACK_UM));
+      const found = [];
+      // `info.front`: the least depth any of the disc can have, to tell one behind the surface.
+      const outline = (points, z, info) => {
+        let best = null;
+        let prev = null;
+        const visit = (p) => {
+          const here = project(world.set(p[0], p[1], z).applyMatrix4(object.matrixWorld));
+          if (prev && here) {
+            const { d, t } = segmentDistance(px, py, prev, here);
+            if (!best || d < best.px) best = { px: d, depth: prev[2] + (here[2] - prev[2]) * t };
+          }
+          prev = here;
+        };
+        points.forEach(visit);
+        if (points.length) visit(points[0]);
+        if (best && best.px <= SELECT_PX) found.push({ ...best, ...info, through });
+      };
+      // Skip what the pointer is nowhere near before walking its rim: a
+      // traced Muller cell carries 1.6 million outline points.  The center's
+      // depth, or null.
+      const near = (cx, cy, cz, reachUm) => {
+        const center = project(world.set(cx, cy, cz).applyMatrix4(object.matrixWorld));
+        if (!center) return null;
+        const reach = reachUm / this._umPerPixelAtDepth(center[2]) + SELECT_PX;
+        return Math.hypot(center[0] - px, center[1] - py) <= reach ? center[2] : null;
+      };
+      for (const node of object.userData.rings || []) {
+        const [cx, cy, cz] = node.xyz_um;
+        const depth = inRange(cz) ? near(cx, cy, cz, node.radius_um) : null;
+        if (depth === null) continue;
+        const rim = [];
+        for (let k = 0; k < 32; k += 1) {
+          const a = (k / 32) * Math.PI * 2;
+          rim.push([cx + node.radius_um * Math.cos(a), cy + node.radius_um * Math.sin(a)]);
+        }
+        outline(rim, cz, {
+          locationId: node.id, section: node.z_section, zUm: cz, center: [cx, cy, cz],
+          front: depth - node.radius_um,
+        });
+      }
+      for (const band of object.userData.bands || []) {
+        const depth = inRange(band.z) ? near(band.cx, band.cy, band.z, band.reach) : null;
+        if (depth === null) continue;
+        outline(band.pts, band.z, {
+          locationId: band.id, section: band.section, zUm: band.z,
+          center: [band.cx, band.cy, band.z], front: depth - band.reach,
+        });
+      }
+      // A traced outline and its cut-outs are one annotation.
+      const byId = new Map();
+      for (const f of found) {
+        const held = byId.get(f.locationId);
+        if (!held || f.px < held.px) byId.set(f.locationId, f);
+      }
+      for (const f of byId.values()) {
+        // An annotation the crop has cut away is not there to be chosen.
+        if (!this._inCrop(this.toWorld(f.center, this._sourceOf(key)))) continue;
+        out.push({
+          kind: 'annotation', key, px: f.px, depth: f.depth, through: f.through,
+          locationId: f.locationId, section: f.section, zUm: f.zUm,
+          point: f.center, front: f.front,
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Where a pointer is in the view's pixels, and the projection picking measures with:
+   * `{ rect, px, py, project }`, `project(world)` -> [x px, y px, depth along the view],
+   * or null behind the camera.
+   */
+  _screenAt(clientX, clientY) {
+    const rect = this.webgl.domElement.getBoundingClientRect();
+    const camera = this.camera;
+    const eye = camera.position;
+    const viewDir = camera.getWorldDirection(new THREE.Vector3());
+    const v = new THREE.Vector3();
+    const project = (world) => {
+      const depth = v.copy(world).sub(eye).dot(viewDir);
+      if (camera.isPerspectiveCamera && depth <= camera.near) return null;
+      v.copy(world).project(camera);
+      return [(v.x + 1) * 0.5 * rect.width, (1 - v.y) * 0.5 * rect.height, depth];
+    };
+    return { rect, px: clientX - rect.left, py: clientY - rect.top, project };
   }
 
   _umPerPixelAtDepth(depth) {
@@ -4064,9 +4130,23 @@ export class Renderer3D {
    * chosen is shown by selecting it.
    */
   nearestAnnotation(clientX, clientY, cells) {
+    const found = this._readout(clientX, clientY, cells)?.found;
+    return found && { key: found.cell.key, node: found.node, hit: found.hit, px: found.px };
+  }
+
+  /**
+   * The pick readout's answer at a screen point, with what a click's candidates take
+   * from it (`_readoutCandidates`): `{ found, surface }`, `found` hoverpick.js's (or
+   * null) with its `depth` along the view, and `surface` the depth along the view of
+   * the surface drawn under the pointer, or null where none is.  Depths along the
+   * view, from the camera (its plane, orthographic), as `candidatesAt` measures them;
+   * null when the view has no size.  A drawn ring the pointer is plainly on is named
+   * before the surface's annotation (hoverpick.js `ringUnder`).
+   */
+  _readout(clientX, clientY, cells) {
     const h = this.container.clientHeight;
     if (!h || !this.container.clientWidth) return null;
-    this._aim(clientX, clientY);
+    const back = this._aim(clientX, clientY);
     const cam = this.camera;
     const { origin, direction } = this.raycaster.ray;
     const perspective = !cam.isOrthographicCamera;
@@ -4092,7 +4172,60 @@ export class Renderer3D {
     const surface = solids.size ? this._surfaceDepth(clientX, clientY, [...solids.values()]) : null;
     const found = nearestOnRay(drawn, { look: this.look, perspective, scale, near: cam.near, surface },
       (c, node) => this._shown(c.key, this.toWorld(node.xyz_um, c.source)));
-    return found && { key: found.cell.key, node: found.node, hit: found.hit, px: found.px };
+    // A distance along the ray from its start -> a depth along the view.
+    const cos = direction.dot(cam.getWorldDirection(new THREE.Vector3()));
+    const along = (t) => (t - back) * cos;
+    const deep = surface === null ? null : along(surface);
+    const ring = this.look === 'render' && this.discs.size
+      ? ringUnder(this._ringCandidates([...this.discs], this._screenAt(clientX, clientY)), deep) : null;
+    const cell = ring && drawn.find((c) => c.key === ring.key);
+    const node = cell?.nodes.find((n) => n.id === ring.locationId);
+    if (node) return { found: { cell, node, hit: true, px: 0, depth: ring.depth }, surface: deep };
+    return { found: found && { ...found, depth: along(found.depth) }, surface: deep };
+  }
+
+  /**
+   * The pick readout's rule in a click's candidates (`candidatesAt`): rings that begin
+   * more than HIDDEN_BEHIND_UM behind the surface drawn under the pointer go (hoverpick.js), and
+   * the annotation the readout names there, when the pointer is on it or on a
+   * surface, comes first (`named`).  Its ring when one is drawn -- the one found
+   * near the pointer, or added though its rim is far from the pointer, as a soma's
+   * is from the middle of it -- or else, for the right-click menu's Copy and Open in
+   * Viking, carried by its cell's surface as `annotation`, which selects nothing.
+   */
+  _readoutCandidates(out, { found, surface }) {
+    const hit = found?.hit && found.node?.id != null ? found : null;
+    const key = hit?.cell.key;
+    const id = hit?.node.id;
+    const same = (c) => c.kind === 'annotation' && c.key === key && c.locationId === id;
+    if (surface !== null) {
+      for (let i = out.length - 1; i >= 0; i -= 1) {
+        const c = out[i];
+        if (c.kind === 'annotation' && behindSurface(c, surface) && !(hit && same(c))) out.splice(i, 1);
+      }
+    }
+    if (!hit) return;
+    const held = out.find(same);
+    if (held) {
+      held.named = true;
+      held.px = 0;
+      return;
+    }
+    const { node } = hit;
+    const named = {
+      kind: 'annotation', key, px: 0, depth: hit.depth, locationId: id,
+      section: node.z_section, zUm: node.xyz_um[2], point: [...node.xyz_um],
+    };
+    const discs = this.discs.get(key);
+    const drawn = discs && shown(discs)
+      && ((discs.userData.rings || []).some((n) => n.id === id)
+        || (discs.userData.bands || []).some((b) => b.id === id));
+    if (drawn) {
+      out.push({ ...named, through: discs.material.depthTest === false, named: true });
+      return;
+    }
+    const cell = out.find((c) => c.kind === 'surface' && c.key === key);
+    if (cell) cell.annotation = named;
   }
 
   /**
@@ -4928,6 +5061,7 @@ export class Renderer3D {
       case 'E': this.roll(-Math.PI / 2); break;
       case 'm': this.resetView(); break;
       case 'c': this._copyPicked(); break;
+      case 'i': this.onCopyLocation?.(); break;
       case 'f': this.onToggleFullscreen?.(); break;
       case 'p': case 'P': if (!event.repeat) this.togglePivot(); break;
       default: handled = false;
@@ -4936,7 +5070,7 @@ export class Renderer3D {
       event.preventDefault();
       // Key-driven camera moves emit the same end signal as a drag, so the
       // undo history records them.  Copying, full screen and the pivot move nothing.
-      if (!['c', 'f', 'p', 'P'].includes(event.key)) this.controls.dispatchEvent({ type: 'end' });
+      if (!['c', 'i', 'f', 'p', 'P'].includes(event.key)) this.controls.dispatchEvent({ type: 'end' });
     }
   }
 
@@ -5633,6 +5767,7 @@ function sliceGhosts(child, slice, zPlanes) {
       faint.transparent = true;
       faint.depthWrite = false;
       if ('transmission' in faint) faint.transmission = 0;
+      if (isUnlit(material)) setUnlit(faint, true);
       faint.needsUpdate = true;
       // An annotation layer's least height on the screen (a clone drops the patch).
       // Its copy is one color and writes no depth, so one pass draws what two

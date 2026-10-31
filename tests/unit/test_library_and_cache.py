@@ -72,11 +72,11 @@ def test_library_store_refuses_escapes_and_oversize(tmp_path):
 def test_validate_material_clamps_and_checks_colors():
     doc = validate_library_doc("materials", {
         "roughness": 7, "metalness": -1, "sheen": 0.5, "sheenColor": "#FFAA00",
-        "flatShading": 1, "description": "fuzzy", "ignored": "x",
+        "flatShading": 1, "unlit": 0, "description": "fuzzy", "ignored": "x",
     })
     assert doc == {
         "kind": "material", "roughness": 1.0, "metalness": 0.0, "sheen": 0.5,
-        "sheenColor": "#ffaa00", "flatShading": True, "description": "fuzzy",
+        "sheenColor": "#ffaa00", "flatShading": True, "unlit": False, "description": "fuzzy",
     }
     with pytest.raises(ValueError):
         validate_library_doc("materials", {"sheenColor": "red"})
@@ -112,6 +112,10 @@ def test_material_fields_are_the_browsers_fields():
     assert fields == library.MATERIAL_FIELDS
     colors = set(re.findall(r"^\s+(\w+): \['", table("MATERIAL_COLORS"), re.M))
     assert colors == library._MATERIAL_COLORS
+    # The on/off switches completeSpec keeps (flat shading, unlit): one the server drops
+    # is a box that saves to the library and comes back unticked.
+    flags = set(re.findall(r"^\s+spec\.(\w+) = !!partial\?\.\1;", source, re.M))
+    assert flags == library._MATERIAL_FLAGS
 
 
 def test_validate_gradient_orders_and_pins_the_ends():

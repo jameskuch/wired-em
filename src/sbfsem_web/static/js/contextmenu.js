@@ -117,17 +117,19 @@ export function sameCandidate(a, b) {
 }
 
 /**
- * Everything under the pointer, in the order the menu lists it: nearest the
- * pointer first, to the pixel; then the specific before the general (an
- * annotation, a skeleton branch, a synapse type, then the cell); then nearest
- * the camera.  Each thing once, and a cell once.
+ * Everything under the pointer, in the order the menu lists it: the annotation the
+ * pick readout names there (`named`, render3d.js `candidatesAt`) first; then nearest
+ * the pointer, to the pixel; then the specific before the general (an annotation, a
+ * skeleton branch, a synapse type, then the cell); then nearest the camera.  Each
+ * thing once, and a cell once.
  *
  * `items` are the renderer's candidates: `{ kind, key, px, depth, ... }`.
  */
 export function listCandidates(items, { limit = MAX_ROWS } = {}) {
   const ordered = (items || [])
     .filter((c) => c && c.kind && c.key != null)
-    .sort((a, b) => (Math.round(a.px || 0) - Math.round(b.px || 0))
+    .sort((a, b) => (Number(!!b.named) - Number(!!a.named))
+      || (Math.round(a.px || 0) - Math.round(b.px || 0))
       || (rankOf(a) - rankOf(b))
       || ((a.depth || 0) - (b.depth || 0)));
   const seen = new Set();
@@ -180,10 +182,14 @@ export function describeCandidate(c, { cell, volume = '' }) {
 /**
  * The menu's title: the cell, and when what it is about is one thing on the
  * cell, which.  A cell alone (its surface, or a click that found no more) keeps
- * the title the menu always had.
+ * the title the menu always had, unless its surface carries the annotation the
+ * readout names there (`annotation`, when no ring of it is drawn).
  */
 export function contextTitle(c, { cell, volume = '' }) {
-  if (!c || CELL_KINDS.has(c.kind)) return cell;
+  if (!c) return cell;
+  if (CELL_KINDS.has(c.kind)) {
+    return c.annotation ? `${cell} · annotation ${c.annotation.locationId} (${volume})` : cell;
+  }
   if (c.kind === 'annotation') return `${cell} · annotation ${c.locationId} (${volume})`;
   if (c.kind === 'skeleton') return `${cell} · skeleton branch`;
   if (c.kind === 'synapse') return c.synapseId ? `${cell} · synapse ${c.synapseId} (${c.type})` : `${cell} · ${c.type} synapses`;

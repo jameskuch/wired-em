@@ -16,6 +16,7 @@ const jsDir = process.env.SBFSEM_JS_DIR
     'src', 'sbfsem_web', 'static', 'js');
 const {
   HOVER_REACH_UM, HOVER_REACH_Z_UM, discEntry, discGap, nearestAnnotation,
+  ON_RING_PX, HIDDEN_BEHIND_UM, behindSurface, ringUnder,
 } = await import(pathToFileURL(path.join(jsDir, 'hoverpick.js')).href);
 
 const cases = [];
@@ -209,6 +210,40 @@ test('nothing loaded, or nothing with a place, names nothing', () => {
 });
 
 // -- run ----------------------------------------------------------------------------
+// -- a drawn ring the pointer is plainly on (2026-10-30) ---------------------------
+
+const r = (locationId, px, front = 10) => ({ kind: 'annotation', key: 'k', locationId, px, front });
+
+test('a ring the pointer is on, with no other near it, is the one: close in, seen from the side', () => {
+  // Inferior Monkey c943, 4 um away, side on: rings a section (1.9 px) apart.
+  const on = r(31428, 0);
+  assert.equal(ringUnder([r(31429, 1.9), on, r(31477, 1.9), r(31471, 3.9)]), on);
+  assert.equal(ringUnder([r(1, ON_RING_PX)]).locationId, 1, 'at ON_RING_PX still on it');
+});
+
+test('at a whole cell\'s zoom, the ring the pointer is on though another is a pixel and a half off', () => {
+  // c1178: the pointer on section 1097's ring, 1096's 1.5 px away; the surface rule named 1092.
+  const on = r(1097, 0);
+  assert.equal(ringUnder([r(1092, 4), on, r(1096, 1.5), r(1093, 1.6)]), on);
+});
+
+test('no ring is plainly under the pointer: a pixel off every one, or two within a pixel of it', () => {
+  assert.equal(ringUnder([]), null);
+  assert.equal(ringUnder([r(1, ON_RING_PX + 0.1)]), null);
+  assert.equal(ringUnder([r(1, 0.3), r(2, ON_RING_PX)]), null, 'the pixel is inclusive');
+  assert.equal(ringUnder([r(1, 0), r(2, 0)]), null, 'two rings crossing under the pointer');
+});
+
+test('a ring behind the surface drawn under the pointer is not there to be on, nor to tie', () => {
+  const front = r(5, 0.2, 10);
+  const back = r(6, 0, 10 + HIDDEN_BEHIND_UM + 0.5);
+  assert.ok(behindSurface(back, 10) && !behindSurface(front, 10));
+  assert.ok(!behindSurface(r(7, 0, 12), 10), 'one that begins within HIDDEN_BEHIND_UM is one the surface is drawn around');
+  assert.ok(!behindSurface(back, null), 'with no surface there, nothing is behind it');
+  assert.equal(ringUnder([back, front], 10), front);
+  assert.equal(ringUnder([back, front], null), null, 'without the surface the two tie');
+});
+
 let failed = 0;
 for (const [name, fn] of cases) {
   try {

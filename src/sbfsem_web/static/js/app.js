@@ -82,7 +82,7 @@ import { pickShiftText } from './shiftlayer.js';
 import { normalizeShiftDisplay, stagePositions } from './shifts.js';
 import { MoveController } from './movecontrol.js';
 import { movesBody } from './manualmoves.js';
-import { applied as visualizationLook } from './visualizations.js';
+import { applied as visualizationLook, normalizeScene } from './visualizations.js';
 import { dismissApplyAll, visualizationItems, visualizationSelect } from './vismenu.js';
 import { buildFigure } from './helpfigures.js';
 import { ENDED as PIVOT_ENDED, pivotAtPointer } from './pivot.js';
@@ -665,6 +665,9 @@ async function boot() {
   });
   renderer.onContextMenu = contextMenuFor;
   renderer.onHover = hoverReadout;
+  // A click picks what the readout names under the pointer (render3d.js `candidatesAt`).
+  renderer.pickCells = hoverCells;
+  renderer.onCopyLocation = () => copyPickField('location');   // the i key
   renderer.onPivotRequest = pivotAt;
   renderer.onPivotChange = pivotChanged;
   renderer.onSelectRequest = onSelectRequest;
@@ -4890,10 +4893,27 @@ function setLook(record, vis) {
   return live;
 }
 
+/**
+ * A visualization's view settings (Golgi's light background and 2D), set by ticking
+ * Display's boxes as a person would, so each does what its box does (2D turns the
+ * camera to look straight down Z).
+ */
+function applyScene(vis) {
+  const scene = normalizeScene(vis?.scene);
+  if (!scene) return;
+  for (const [key, id] of [['invert', 'opt-invert'], ['two_d', 'opt-2d']]) {
+    const box = $(id);
+    if (scene[key] === undefined || !box || box.checked === scene[key]) continue;
+    box.checked = scene[key];
+    box.dispatchEvent(new Event('change'));
+  }
+}
+
 /** Give one cell a visualization's look, and draw it so. */
 async function applyVisualization(record, vis) {
   dismissApplyAll();
   const live = setLook(record, vis);
+  applyScene(vis);
   renderNeuronList();
   persist();
   statusEl.textContent = `Drawing c${live.id} as "${vis.name}"…`;
@@ -4906,6 +4926,7 @@ async function applyVisualization(record, vis) {
 async function applyVisualizationToAll(vis) {
   const records = [...state.neurons.values()];
   for (const record of records) setLook(record, vis);
+  applyScene(vis);
   renderNeuronList();
   persist();
   statusEl.textContent = `Drawing ${records.length} cells as "${vis.name}"…`;
@@ -5825,12 +5846,44 @@ function contextMenuFor({
     who.title = 'Who annotated this cell and its synapses, with each one’s share — '
       + 'and what Viking’s one-username-per-annotation record cannot say';
   }
+  // The annotation the menu is about -- a row of the list, the ring under the pointer,
+  // or the one the readout names on the surface there -- frozen at the right click.
+  const exact = context?.kind === 'annotation' ? context : context?.annotation ?? null;
+  // Copied as the Markers table copies it (asked for 2026-10-30): the Location ID, and
+  // Viking's X Y Z with the downsample (the correction and any manual move taken back).
+  // One row of two buttons: two rows put the menu's foot past a 620 px window.
+  if (exact) {
+    const where = volumeLongName(record.source);
+    const row = document.createElement('div');
+    row.className = 'ctx-row';
+    const label = document.createElement('span');
+    label.textContent = 'Copy';
+    row.append(label);
+    const copy = (text, aria, title, run) => {
+      const el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'ctx-item';
+      el.textContent = text;
+      el.title = title;
+      el.setAttribute('aria-label', aria);
+      el.addEventListener('click', () => {
+        hideContextMenu();
+        run();
+      });
+      row.append(el);
+    };
+    copy(`Location ID ${exact.locationId}`, `Copy Location ID ${exact.locationId}`,
+      `Copy ${exact.locationId}, a Location ID of ${where}, for Viking → Annotation → Goto Location ID (also i)`,
+      () => copyForViking(String(exact.locationId), `annotation ${exact.locationId}'s Location ID`, 'location',
+        record.source));
+    copy('X Y Z', 'Copy X Y Z', `Copy annotation ${exact.locationId}'s place in ${where} as Viking's X Y Z and `
+      + 'downsample, for Viking → Commands → Goto Location (also c)', () => copyVikingPlace(record, exact));
+    menu.append(row);
+  }
   // Only for volumes the identity server knows; the bundled demo is not one.
   if (state.volumes.find((v) => v.name === record.source)?.viking_name) {
-    // An annotation that is the menu's own (a row of the list, or the one under
-    // the pointer) is where Viking goes, exactly; else the annotation nearest
-    // the point.
-    const exact = context?.kind === 'annotation' ? context : null;
+    // An annotation that is the menu's own is where Viking goes, exactly; else the
+    // annotation nearest the point.
     const go = (options = {}) => (exact
       ? openLocationInViking(record, exact.locationId, options)
       : openInViking(record, point, null, options));
@@ -5957,13 +6010,14 @@ function underThePointer(rows, context, onPick, { light = true } = {}) {
 function placeContextMenu(menu, clientX, clientY) {
   document.body.append(menu);
   // The list of what is under the pointer gives way before the menu's own items
-  // do: on a short window it shrinks (and scrolls) to what is left, down to two
-  // rows (it stopped at four, 96 px, and the menu's own items then ran 6 px past
-  // the bottom of a 620 px window once they had Rotate about this point, 2.34.0).
+  // do: on a short window it shrinks (and scrolls) to what is left, down to one
+  // row (it stopped at four, 96 px, and the menu's own items then ran 6 px past
+  // the bottom of a 620 px window once they had Rotate about this point, 2.34.0;
+  // at two, 48 px, 35 px past it once they had the Copy items, 2.44.0).
   const list = menu.querySelector('.ctx-candidates');
   if (list) {
     const over = menu.getBoundingClientRect().height - (window.innerHeight - 16);
-    if (over > 0) list.style.maxHeight = `${Math.max(48, list.getBoundingClientRect().height - over)}px`;
+    if (over > 0) list.style.maxHeight = `${Math.max(28, list.getBoundingClientRect().height - over)}px`;
   }
   // Keep the menu on screen -- a tall one starts at the top, where its first
   // items are, rather than above the window where they cannot be reached.
@@ -6311,7 +6365,11 @@ const MARKER_COLUMNS = [
 async function markerFacts(item) {
   const record = state.neurons.get(item.key);
   if (!record) return null;
-  const nodes = await nodesFor(record);
+  return placeFacts(record, await nodesFor(record), item);
+}
+
+/** `markerFacts` from the cell's annotations in hand. */
+function placeFacts(record, nodes, item) {
   let node = item.locationId != null ? nodes.find((n) => n.id === item.locationId) : null;
   const point = Array.isArray(item.point) ? { x: item.point[0], y: item.point[1], z: item.point[2] } : null;
   // A branch, a wireframe or a synapse type names the annotation nearest its point.
@@ -6490,13 +6548,39 @@ async function renderMarkerTable() {
 
 /** Put a marker's Location ID or Viking place on the clipboard, and say so with its volume. */
 function copyMarkerField(button, text, what, kind, source) {
-  // Clipboard access is denied in some contexts; the text is on screen either way.
-  try { navigator.clipboard?.writeText(text).catch(() => {}); } catch { /* shown anyway */ }
   button.classList.add('copied');
   setTimeout(() => button.classList.remove('copied'), 1200);
+  copyForViking(text, what, kind, source);
+}
+
+/** Put a Location ID (`kind` 'location') or a Viking place ('viking') on the clipboard, and say so with its volume. */
+function copyForViking(text, what, kind, source) {
+  // Clipboard access is denied in some contexts; the text is on screen either way.
+  try { navigator.clipboard?.writeText(text).catch(() => {}); } catch { /* shown anyway */ }
   statusEl.textContent = `Copied “${text}”, ${what} — in Viking, open ${volumeLongName(source)} and paste via `
     + (kind === 'viking' ? 'Commands → Goto Location' : 'Annotation → Goto Location ID');
   statusEl.className = 'status';
+}
+
+/**
+ * Copy an annotation's place (`item`: `{ key, locationId, point }`) as the Markers
+ * table does: Viking's X Y Z, the correction and any manual move taken back, and the
+ * downsample.  From the cell's annotations when the page has them, so the copy is
+ * made in the click itself (Safari allows the clipboard no later); else once they come.
+ */
+function copyVikingPlace(record, item) {
+  const copy = (facts) => {
+    if (!facts?.viking) {
+      statusEl.textContent = `No place found for annotation ${item.locationId}`;
+      statusEl.className = 'status error';
+      return;
+    }
+    const ds = formatDownsample(downsampleAt(facts.at, pickScale(record), record.source));
+    copyForViking(`${facts.viking.join(' ')} ${ds}`, `annotation ${item.locationId}'s place`, 'viking', record.source);
+  };
+  const nodes = nodesCache.get(record.key);
+  if (nodes) copy(placeFacts(record, nodes, item));
+  else markerFacts({ ...item, key: record.key }).then(copy).catch(fail);
 }
 
 /**
