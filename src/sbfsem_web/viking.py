@@ -602,6 +602,47 @@ def _by_database(metadata: Any) -> str | None:
     return None
 
 
+def placement_note(record: dict[str, Any]) -> str:
+    """What a record names that :func:`_by_database` reads, for the log.
+
+    The session keeps only the names of the records it could not place; this
+    says why each one missed: its database and its server, each against our
+    volumes and their OData roots, and the OData root the record gives.
+    """
+    name = str(record.get("name") or "").strip()
+    metadata = record.get("metadata")
+    if not isinstance(metadata, dict):
+        return f"{name!r}: no metadata"
+    parts = []
+    for label, key in (("database", "AnnotationDatabaseName"), ("server", "AnnotationServerName")):
+        value = metadata.get(key)
+        canonical = from_viking_name(value) if isinstance(value, str) else None
+        if canonical is None:
+            parts.append(f"{label} {value!r} is none of ours")
+        else:
+            parts.append(f"{label} {value!r} is {canonical} at {_service_root(canonical)!r}")
+    parts.append(f"OData {metadata.get('ODataEndpoint')!r}")
+    return f"{name!r}: " + "; ".join(parts)
+
+
+#: Notes already logged by :func:`log_unplaced`, so a refresh every five
+#: minutes per session says each once per process.
+_NOTED: set[str] = set()
+
+
+def log_unplaced(records: list[dict[str, Any]], unsupported: list[str]) -> None:
+    """Log, once each, why the records listed as unsupported were not placed."""
+    missed = set(unsupported)
+    for record in records:
+        if str(record.get("name") or "").strip() not in missed:
+            continue
+        note = placement_note(record)
+        if note in _NOTED or len(_NOTED) >= 500:
+            continue
+        _NOTED.add(note)
+        log.info("viking volume not placed: %s", note)
+
+
 def _service_root(canonical: str) -> str | None:
     try:
         return Volumes(canonical).service_root
@@ -865,6 +906,7 @@ class VikingAuth:
         """Ask the Permissions API which volumes this user may open."""
         records = self.permissions.accessible_volumes(session.access_token)
         volumes, unsupported = sort_volumes(records)
+        log_unplaced(records, unsupported)
         if not volumes and session.volumes:
             # A user who could open volumes five minutes ago and now has none
             # is far likelier a changed answer than revoked rights; ride it out

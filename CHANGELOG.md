@@ -18,6 +18,12 @@
 - README (Wired, how to deploy without naming the server, contributing), LICENSE.txt (the port's notice beside the original), CONTRIBUTING.md and CITATION.cff (GitHub's *Cite this repository*). CI (`.github/workflows/ci.yml`) now runs on the public copy: Ubuntu with Python 3.11 to 3.13 and macOS with 3.13; Windows joins once the suite has been run there. Tests: `tests/unit/test_publish_public.py` (new, 6: what is left out and replaced, every refusal, and a publish from a real repository and clone that carries only the committed tree).
 - **The first public CI run found that skimage on Apple Silicon draws knife-edge pixels differently.** Its arm64 build fuses `x0*y1 - x1*y0` into one multiply-add (rounding `x1*y0` alone), so on GitHub's macOS runner two of the random-polygon cases came out 11 and 1 pixels away from the fill; `math.fma` reproduces exactly those pixels, and the x86_64 builds (this Mac's Python, the Ubuntu runners, production) match the fill bit for bit. The fill is numpy, which never fuses, so it gives one answer everywhere; where skimage fuses, `tests/unit/test_rasterize.py` now holds it to skimage's rule with each product rounded on its own (`unfused_mask`), and checks that rule against skimage itself wherever skimage does not fuse (+12 tests, all 3,600 random polygons). Rings the library hands to skimage itself (small, not finite, or too large) are still compared with skimage on every platform.
 
+## 2.45.2 — 2026-11-12
+
+### The server log says why a Viking volume was not placed
+
+- **A sign-in that lists a volume as one we cannot open now logs why, once per kind of record**: the record's annotation database and server, each against our volumes and their OData roots, and the OData root the record gives. 2.45.1 was meant to open RC2 through its `RC2-Cleaned` context, but the first session refreshed on it (20:43 UTC) still listed `RC2-Cleaned`, along with `RC1-Pitt`, `RC2-Pitt` and `RC1 v2`. The session keeps only the names, so the cause could not be read; this line gives it at the next refresh, without touching any token.
+
 ## 2.45.1 — 2026-11-12
 
 ### A Viking sign-in finds a volume by its annotation database

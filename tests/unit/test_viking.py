@@ -9,12 +9,14 @@ token -- captured while reading its source and probing it directly.
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import sbfsem_web.viking as viking_module
 from sbfsem.core.volumes import Volumes, from_viking_name, viking_names
 from sbfsem_web.app import create_app
 from sbfsem_web.viking import (
@@ -31,6 +33,8 @@ from sbfsem_web.viking import (
     VikingSession,
     VikingSessionStore,
     _volume_url_name,
+    log_unplaced,
+    placement_note,
     sort_volumes,
 )
 
@@ -262,6 +266,34 @@ def test_the_database_name_wins_over_the_server_name():
                       "ODataEndpoint": "https://websvc.codepharm.net/RC2/OData/"}},
     ])
     assert mine == {"RC2": ["Read"]}
+
+
+def test_the_note_says_which_name_missed():
+    record = {**RC2_CLEANED, "metadata": {**RC2_CLEANED["metadata"],
+                                          "AnnotationDatabaseName": "RC2-Cleaned"}}
+    assert placement_note(record) == (
+        "'RC2-Cleaned': database 'RC2-Cleaned' is none of ours; "
+        "server 'RC2-Cleaned' is none of ours; "
+        "OData 'https://websvc.codepharm.net/RC2/OData/'"
+    )
+
+
+def test_the_note_shows_both_odata_roots_when_the_name_is_ours():
+    note = placement_note({"name": "RC1-Pitt", "metadata": {
+        "AnnotationDatabaseName": "RC1", "ODataEndpoint": "https://pitt.example/RC1/OData/"}})
+    assert "database 'RC1' is RC1 at 'https://websvc.codepharm.net/RC1/OData/'" in note
+    assert "OData 'https://pitt.example/RC1/OData/'" in note
+    assert placement_note({"name": "Zia", "permissions": ["Read"]}) == "'Zia': no metadata"
+
+
+def test_an_unplaced_record_is_logged_once(caplog, monkeypatch):
+    monkeypatch.setattr(viking_module, "_NOTED", set())
+    record = {"name": "Zia", "permissions": ["Read"]}
+    with caplog.at_level(logging.INFO, logger="sbfsem_web.viking"):
+        for _ in range(3):
+            log_unplaced([record, {"name": "RC1", "permissions": ["Read"]}], ["Zia"])
+    lines = [r.getMessage() for r in caplog.records]
+    assert lines == ["viking volume not placed: 'Zia': no metadata"]
 
 
 def test_a_401_is_an_expired_token_not_a_failure(api):
