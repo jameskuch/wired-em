@@ -18,6 +18,13 @@
 - README (Wired, how to deploy without naming the server, contributing), LICENSE.txt (the port's notice beside the original), CONTRIBUTING.md and CITATION.cff (GitHub's *Cite this repository*). CI (`.github/workflows/ci.yml`) now runs on the public copy: Ubuntu with Python 3.11 to 3.13 and macOS with 3.13; Windows joins once the suite has been run there. Tests: `tests/unit/test_publish_public.py` (new, 6: what is left out and replaced, every refusal, and a publish from a real repository and clone that carries only the committed tree).
 - **The first public CI run found that skimage on Apple Silicon draws knife-edge pixels differently.** Its arm64 build fuses `x0*y1 - x1*y0` into one multiply-add (rounding `x1*y0` alone), so on GitHub's macOS runner two of the random-polygon cases came out 11 and 1 pixels away from the fill; `math.fma` reproduces exactly those pixels, and the x86_64 builds (this Mac's Python, the Ubuntu runners, production) match the fill bit for bit. The fill is numpy, which never fuses, so it gives one answer everywhere; where skimage fuses, `tests/unit/test_rasterize.py` now holds it to skimage's rule with each product rounded on its own (`unfused_mask`), and checks that rule against skimage itself wherever skimage does not fuse (+12 tests, all 3,600 random polygons). Rings the library hands to skimage itself (small, not finite, or too large) are still compared with skimage on every platform.
 
+## 2.45.1 — 2026-11-12
+
+### A Viking sign-in finds a volume by its annotation database
+
+- **A volume record from the identity server is now matched by the annotation database behind it, `AnnotationDatabaseName`, when its own name is not one of ours.** Viking now names each record after its annotation context, a set of images and transforms, and several contexts share one database: RC2's new context is `RC2-Cleaned`, and its database is `RC2`. Until now the sign-in tried the record's name and then its annotation server's name, which Viking takes from the first context (`RC2-Cleaned` again). So every session that received the new context, ten since 2026-11-06, listed it as a volume we cannot open. Nobody lost RC2, because each of them still had the old `RC2` record. Once that record is gone, the new one alone now opens RC2.
+- **A matching name is not enough when the record also says where its OData is.** A grant opens the whole volume here, so a test or mirror database that happens to be called RC1 counts only when its `ODataEndpoint` is the root we read RC1 from (scheme, case and a trailing slash don't matter). Otherwise it stays in the unsupported list.
+
 ## 2.45.0 — 2026-10-30
 
 ### The help beside the readout keeps its own height

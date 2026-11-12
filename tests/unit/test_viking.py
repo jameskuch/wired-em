@@ -216,6 +216,54 @@ def test_two_volumes_on_one_server_merge_their_permissions():
     assert mine == {"RC1": ["Read", "Annotate"]}
 
 
+#: The record ``AccessibleVolumes`` sends for RC2's new context (2026-11-06):
+#: the server is named after its first context, the database is RC2.  Every
+#: session that received it listed it as unsupported.
+RC2_CLEANED = {
+    "name": "RC2-Cleaned", "resourceType": "AnnotationContext", "permissions": ["Read"],
+    "metadata": {
+        "AnnotationServerName": "RC2-Cleaned",
+        "AnnotationDatabaseName": "RC2",
+        "ODataEndpoint": "https://websvc.codepharm.net/RC2/OData/",
+    },
+}
+
+
+def test_a_context_is_known_by_its_annotation_database():
+    mine, unsupported = sort_volumes([RC2_CLEANED])
+    assert mine == {"RC2": ["Read"]}
+    assert unsupported == []
+
+
+@pytest.mark.parametrize("root", [
+    "http://websvc.codepharm.net/rc2/odata",
+    "https://WEBSVC.codepharm.net/RC2/OData/ ",
+])
+def test_the_odata_root_is_compared_without_scheme_case_or_slash(root):
+    record = {**RC2_CLEANED, "metadata": {**RC2_CLEANED["metadata"], "ODataEndpoint": root}}
+    assert sort_volumes([record])[0] == {"RC2": ["Read"]}
+
+
+def test_a_database_of_our_name_elsewhere_is_not_ours():
+    """Access opens a whole volume here: a test database named RC1 must not."""
+    mine, unsupported = sort_volumes([
+        {"name": "gRPC-RC1-Test", "permissions": ["Read", "Annotate"],
+         "metadata": {"AnnotationServerName": "RC1", "AnnotationDatabaseName": "RC1",
+                      "ODataEndpoint": "https://test.example.org/RC1/OData/"}},
+    ])
+    assert mine == {}
+    assert unsupported == ["gRPC-RC1-Test"]
+
+
+def test_the_database_name_wins_over_the_server_name():
+    mine, _ = sort_volumes([
+        {"name": "RC2-Pitt", "permissions": ["Read"],
+         "metadata": {"AnnotationServerName": "RC1", "AnnotationDatabaseName": "RC2",
+                      "ODataEndpoint": "https://websvc.codepharm.net/RC2/OData/"}},
+    ])
+    assert mine == {"RC2": ["Read"]}
+
+
 def test_a_401_is_an_expired_token_not_a_failure(api):
     """The caller's response to this one is to refresh and retry."""
     client, routes = api

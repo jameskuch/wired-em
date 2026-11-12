@@ -114,9 +114,14 @@ reads `GET /Permissions/UserAccessibleVolumeTree` and flattens its
 organizational units. A recheck that suddenly finds nothing we can open keeps
 the last good list, as an unreachable server does.
 
-A volume whose Viking name is not in the table below is matched by its
-`metadata.AnnotationServerName` instead (Identity 1.1.0): `RC1-Internal`, an
-image set on the RC1 annotation server, opens as RC1.
+A record whose Viking name is not in the table below is an annotation
+context, named for its images, and is matched by the annotation database
+behind it: `metadata.AnnotationDatabaseName`, or `metadata.AnnotationServerName`
+from an identity server that predates that field. `RC2-Cleaned` opens as RC2,
+and `RC1-Internal` as RC1. A grant opens the whole volume, so when the record
+also gives `metadata.ODataEndpoint`, it must be the OData root this tool reads
+that volume from (scheme, case and a trailing slash aside); a test database
+that happens to be called RC1 stays unsupported.
 
 Viking's names for the volumes are not ours. The mapping lives in one place,
 `VolumeInfo.viking_name` in `src/sbfsem/core/volumes.py`:

@@ -52,7 +52,7 @@ from typing import Any
 
 import httpx
 
-from sbfsem.core.volumes import from_viking_name
+from sbfsem.core.volumes import Volumes, from_viking_name
 
 log = logging.getLogger(__name__)
 
@@ -564,17 +564,58 @@ def sort_volumes(records: list[dict[str, Any]]) -> tuple[dict[str, list[str]], l
             continue
         canonical = from_viking_name(name)
         if canonical is None:
-            # Identity 1.1.0 lets several volumes (RC1, RC1-Internal, ...)
-            # share one annotation server; that name is the one we know.
-            metadata = record.get("metadata")
-            server = metadata.get("AnnotationServerName") if isinstance(metadata, dict) else None
-            canonical = from_viking_name(server) if server else None
+            canonical = _by_database(record.get("metadata"))
         if canonical is None:
             unsupported.append(name)
         else:
             held = mine.setdefault(canonical, [])
             held.extend(p for p in permissions if p not in held)
     return mine, sorted(unsupported)
+
+
+def _by_database(metadata: Any) -> str | None:
+    """The volume behind a record whose own name is not one of ours.
+
+    Identity names a record for its annotation context (``RC2-Cleaned``,
+    ``RC1-Internal``), and several contexts share one annotation database.
+    The database is ``metadata.AnnotationDatabaseName`` (``RC2``); Identity
+    1.1.0 answers before that field carried only ``AnnotationServerName``,
+    which names the server after its first context, so it is the fallback.
+
+    Access here opens a whole volume, so a matching name is not enough when
+    the record also says where its OData is: a test or mirror database may
+    share the name, and it counts only when its ``ODataEndpoint`` is the root
+    this tool reads that volume from.
+    """
+    if not isinstance(metadata, dict):
+        return None
+    odata = metadata.get("ODataEndpoint")
+    for key in ("AnnotationDatabaseName", "AnnotationServerName"):
+        value = metadata.get(key)
+        canonical = from_viking_name(value) if isinstance(value, str) else None
+        if canonical is None:
+            continue
+        ours = _service_root(canonical)
+        if isinstance(odata, str) and odata.strip() and ours and not _same_root(odata, ours):
+            continue
+        return canonical
+    return None
+
+
+def _service_root(canonical: str) -> str | None:
+    try:
+        return Volumes(canonical).service_root
+    except ValueError:
+        return None
+
+
+def _same_root(a: str, b: str) -> bool:
+    """Two OData roots alike but for scheme, case and a trailing slash."""
+
+    def bare(url: str) -> str:
+        return url.strip().lower().split("://", 1)[-1].rstrip("/")
+
+    return bare(a) == bare(b)
 
 
 # --- the piece the app talks to ----------------------------------------------
