@@ -272,18 +272,20 @@ def test_the_note_says_which_name_missed():
     record = {**RC2_CLEANED, "metadata": {**RC2_CLEANED["metadata"],
                                           "AnnotationDatabaseName": "RC2-Cleaned"}}
     assert placement_note(record) == (
-        "'RC2-Cleaned': database 'RC2-Cleaned' is none of ours; "
-        "server 'RC2-Cleaned' is none of ours; "
+        "context 'RC2-Cleaned': name 'RC2-Cleaned' is none of ours; "
+        "AnnotationDatabaseName 'RC2-Cleaned' is none of ours; "
+        "AnnotationServerName 'RC2-Cleaned' is none of ours; "
         "OData 'https://websvc.codepharm.net/RC2/OData/'"
     )
 
 
 def test_the_note_shows_both_odata_roots_when_the_name_is_ours():
-    note = placement_note({"name": "RC1-Pitt", "metadata": {
-        "AnnotationDatabaseName": "RC1", "ODataEndpoint": "https://pitt.example/RC1/OData/"}})
-    assert "database 'RC1' is RC1 at 'https://websvc.codepharm.net/RC1/OData/'" in note
+    note = placement_note({"name": "RC1-Pitt", "resourceType": "AnnotationServer",
+                           "annotationDatabaseName": "RC1",
+                           "ODataEndpoint": "https://pitt.example/RC1/OData/"})
+    assert note.startswith("database 'RC1-Pitt (RC1)': ")
+    assert "AnnotationDatabaseName 'RC1' is RC1 at 'https://websvc.codepharm.net/RC1/OData/'" in note
     assert "OData 'https://pitt.example/RC1/OData/'" in note
-    assert placement_note({"name": "Zia", "permissions": ["Read"]}) == "'Zia': no metadata"
 
 
 def test_an_unplaced_record_is_logged_once(caplog, monkeypatch):
@@ -293,7 +295,92 @@ def test_an_unplaced_record_is_logged_once(caplog, monkeypatch):
         for _ in range(3):
             log_unplaced([record, {"name": "RC1", "permissions": ["Read"]}], ["Zia"])
     lines = [r.getMessage() for r in caplog.records]
-    assert lines == ["viking volume not placed: 'Zia': no metadata"]
+    assert lines == [
+        "viking: volume not placed: context 'Zia': name 'Zia' is none of ours; "
+        "AnnotationDatabaseName None is none of ours; "
+        "AnnotationServerName None is none of ours; OData None"
+    ]
+
+
+def test_a_context_may_name_its_database_at_the_top_level():
+    """2.45.2 logged every unplaced context as carrying no ``metadata``."""
+    mine, _ = sort_volumes([{"name": "RC2-Cleaned", "permissions": ["Read"],
+                             "annotationDatabaseName": "RC2"}])
+    assert mine == {"RC2": ["Read"]}
+
+
+# --- the annotation databases a user may read ----------------------------------
+
+DATABASES_ROUTE = "Permissions/type/AnnotationServer?permission=Read"
+
+#: The list as Viking-Server described it (2026-11-11, Identity ``3d648529``):
+#: keyed by server id, RC2's server named after its first context.
+DATABASES = {
+    "3": {"id": 3, "name": "RC1", "resourceType": "AnnotationServer",
+          "permissions": ["Read"], "annotationDatabaseName": "RC1"},
+    "12": {"id": 12, "name": "RC2-Cleaned", "resourceType": "AnnotationServer",
+           "permissions": ["Read", "Annotate"], "annotationDatabaseName": "RC2"},
+    "20": {"id": 20, "name": "Zia", "resourceType": "AnnotationServer",
+           "permissions": ["Read"], "annotationDatabaseName": "Zia"},
+}
+DETAILS = {
+    "3": {"annotationDatabaseName": "RC1",
+          "oDataEndpoint": "https://websvc.codepharm.net/RC1/OData/"},
+    "12": {"annotationDatabaseName": "RC2",
+           "oDataEndpoint": "https://websvc.codepharm.net/RC2/OData/"},
+}
+
+
+def test_volumes_come_from_the_annotation_databases_the_user_may_read(api):
+    """RC2-Cleaned's context stayed unsupported under 2.45.1; its database is RC2."""
+    client, routes = api
+    routes[DATABASES_ROUTE] = httpx.Response(200, json=DATABASES)
+    routes["Permissions/AnnotationServers?id=3&id=12"] = httpx.Response(200, json=DETAILS)
+    routes["Permissions/AccessibleVolumes"] = httpx.Response(200, json={
+        "7": {"name": "RC2-Cleaned", "resourceType": "AnnotationContext",
+              "permissions": ["Read"]}})
+    mine, unsupported = sort_volumes(client.accessible_volumes("tok"))
+    assert mine == {"RC1": ["Read"], "RC2": ["Read", "Annotate"]}
+    assert unsupported == ["Zia"]
+
+
+def test_a_database_named_like_ours_on_another_server_opens_nothing(api):
+    client, routes = api
+    routes[DATABASES_ROUTE] = httpx.Response(200, json={
+        "40": {"id": 40, "name": "gRPC-RC1-Test", "permissions": ["Read"],
+               "annotationDatabaseName": "RC1"}})
+    routes["Permissions/AnnotationServers?id=40"] = httpx.Response(200, json={
+        "40": {"oDataEndpoint": "https://test.example.org/RC1/OData/"}})
+    assert sort_volumes(client.accessible_volumes("tok")) == ({}, ["gRPC-RC1-Test (RC1)"])
+
+
+def test_without_the_details_a_database_matches_by_name(api):
+    client, routes = api
+    routes[DATABASES_ROUTE] = httpx.Response(200, json=DATABASES)
+    routes["Permissions/AnnotationServers?id=3&id=12"] = httpx.Response(500)
+    mine, _ = sort_volumes(client.accessible_volumes("tok"))
+    assert mine == {"RC1": ["Read"], "RC2": ["Read", "Annotate"]}
+
+
+@pytest.mark.parametrize("answer", [
+    httpx.Response(500),
+    httpx.Response(200, json={}),
+    httpx.Response(200, text="<html>not json</html>"),
+])
+def test_an_unusable_database_list_falls_back_to_contexts(api, answer):
+    client, routes = api
+    routes[DATABASES_ROUTE] = answer
+    routes["Permissions/AccessibleVolumes"] = httpx.Response(200, json=ACCESSIBLE)
+    names = {r["name"] for r in client.accessible_volumes("tok")}
+    assert names == {"RC1", "InferiorMonkey", "Zia", "RC2"}
+
+
+def test_a_rejected_token_on_the_database_list_is_not_a_fallback(api):
+    client, routes = api
+    routes[DATABASES_ROUTE] = httpx.Response(401)
+    routes["Permissions/AccessibleVolumes"] = httpx.Response(200, json=ACCESSIBLE)
+    with pytest.raises(VikingAuthExpired):
+        client.accessible_volumes("tok")
 
 
 def test_a_401_is_an_expired_token_not_a_failure(api):
@@ -2258,3 +2345,19 @@ def test_the_volume_list_names_each_volume_for_viking(signed_in):
     listed = {v["name"]: v["viking_name"] for v in client.get("/api/volumes").json()}
     assert listed["RC1"] == "RC1"
     assert listed.get("DemoVolume") is None
+
+
+def test_a_refresh_logs_which_list_changed_the_volumes(auth, caplog):
+    records = [{**r} for r in DATABASES.values()]
+    auth.permissions = _StubPermissions(records)  # type: ignore[assignment]
+    session = _session(auth.store, volumes={"RC1": ["Read"]})
+    with caplog.at_level(logging.INFO, logger="sbfsem_web.viking"):
+        auth.refresh_permissions(session)
+        auth.refresh_permissions(session)  # unchanged: nothing more to say
+    changes = [r.getMessage() for r in caplog.records if "viking volumes for" in r.getMessage()]
+    assert changes == [
+        "viking volumes for 'jkuchen', from annotation databases: RC1, RC2 "
+        "(added RC2; removed none)"
+    ]
+    assert session.volumes == {"RC1": ["Read"], "RC2": ["Read", "Annotate"]}
+    assert session.unsupported == ["Zia"]

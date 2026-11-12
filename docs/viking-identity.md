@@ -106,22 +106,40 @@ with Viking" is a real sign-in rather than a silent round trip.
 
 ## Which volumes a user sees
 
-After sign-in the server asks `GET /Permissions/AccessibleVolumes` and keeps
-the answer on the session, refreshing it every five minutes — so a grant made
-in the Viking management site appears without anyone signing out.
-Identity 1.1.0 (2026-10-08) answers that endpoint with 404; the server then
-reads `GET /Permissions/UserAccessibleVolumeTree` and flattens its
-organizational units. A recheck that suddenly finds nothing we can open keeps
-the last good list, as an unreachable server does.
+After sign-in the server asks which **annotation databases** the user may
+read, and keeps the answer on the session, refreshing it every five minutes,
+so a grant made in the Viking management site appears without anyone signing
+out. A volume here is an annotation database: the grant that opens its data
+lives on the database, whichever annotation context (a set of images and
+transforms, such as `RC2-Cleaned` or `RC1-Internal`) shows it in Viking.
 
-A record whose Viking name is not in the table below is an annotation
-context, named for its images, and is matched by the annotation database
-behind it: `metadata.AnnotationDatabaseName`, or `metadata.AnnotationServerName`
-from an identity server that predates that field. `RC2-Cleaned` opens as RC2,
-and `RC1-Internal` as RC1. A grant opens the whole volume, so when the record
-also gives `metadata.ODataEndpoint`, it must be the OData root this tool reads
-that volume from (scheme, case and a trailing slash aside); a test database
-that happens to be called RC1 stays unsupported.
+1. `GET /Permissions/type/AnnotationServer?permission=Read` (Identity,
+   2026-11-11): an object keyed by server id, each entry its `name` (the
+   server's, named after its first context), `permissions` and
+   `AnnotationDatabaseName`, which is what our volumes go by (`RC2`).
+2. For the databases that are ours, one
+   `GET /Permissions/AnnotationServers?id=..&id=..` reads each one's
+   `ODataEndpoint`. A grant opens the whole volume, so a database must be at
+   the OData root this tool reads that volume from (scheme, case and a
+   trailing slash aside): a test database that happens to be called RC1 stays
+   unsupported. When this call cannot be read, the databases match by name
+   alone.
+
+An identity server without the first route (404), or one whose answer cannot
+be read or lists nothing, is asked the older way, by annotation context:
+`GET /Permissions/AccessibleVolumes`, or, where Identity 1.1.0 (2026-10-08)
+answers that with 404, `GET /Permissions/UserAccessibleVolumeTree` flattened
+over its organizational units. A context is matched by its own name, then by
+the database behind it (`AnnotationDatabaseName`, or `AnnotationServerName`
+from an identity server that predates it), read at the record's top level or
+under `metadata`, in any letter case. An unreachable identity server or a
+rejected token never falls back: the first is ridden out, the second
+refreshed. A recheck that suddenly finds nothing we can open keeps the last
+good list, as an unreachable server does.
+
+The service log says which list was read (once per process), each change in
+a user's volumes and where it came from, and, once per kind of record, why a
+record was not placed.
 
 Viking's names for the volumes are not ours. The mapping lives in one place,
 `VolumeInfo.viking_name` in `src/sbfsem/core/volumes.py`:

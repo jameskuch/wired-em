@@ -49,6 +49,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -477,7 +478,101 @@ class PermissionsClient:
         return _as_text(response)
 
     def accessible_volumes(self, token: str) -> list[dict[str, Any]]:
-        """Every volume this user may touch, as the API's own records.
+        """Every volume this user may open, as the identity server's records.
+
+        First the annotation databases the user may read
+        (:meth:`readable_databases`): a volume here is an annotation database,
+        and the grant that opens its data lives on the database, whichever
+        annotation context (``RC2-Cleaned``, ``RC1-Internal``) shows its
+        images.  An identity server without that route, or with an answer that
+        cannot be read or lists nothing, is asked by annotation context
+        (:meth:`accessible_contexts`), as before 2.46.0.  Only an answer falls
+        back: a rejected token is the caller's to refresh, and an unreachable
+        server is not asked a second time (an outage would cost two timeouts).
+        """
+        records = self.readable_databases(token)
+        if records:
+            note_once("volume list read from the annotation databases the user may read")
+            return records
+        note_once("volume list read from annotation contexts (no annotation database list)")
+        return self.accessible_contexts(token)
+
+    def readable_databases(self, token: str) -> list[dict[str, Any]] | None:
+        """The annotation databases this user may read; ``None`` when not answered.
+
+        ``Permissions/type/AnnotationServer?permission=Read`` (Identity,
+        2026-11-11) answers an object keyed by server id, each entry its
+        ``id``, ``name`` (the server's, named after its first context),
+        ``permissions`` and ``AnnotationDatabaseName``: the name our volumes
+        go by.  Those that name one of our volumes get their ``ODataEndpoint``
+        from ``Permissions/AnnotationServers`` (:meth:`_add_odata`), so a test
+        database that happens to share a name opens nothing here.  ``None``
+        when the route is missing (404) or its answer cannot be read.
+        """
+        response = self._get("Permissions/type/AnnotationServer?permission=Read", token)
+        if response.status_code != 200:
+            if response.status_code != 404:
+                note_once(f"annotation database list returned {response.status_code}")
+            return None
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            note_once(f"annotation database list was not JSON: {exc}")
+            return None
+        if isinstance(payload, dict):
+            entries = list(payload.items())
+        elif isinstance(payload, list):
+            entries = [(None, e) for e in payload]
+        else:
+            note_once("annotation database list was neither an object nor a list")
+            return None
+        records = []
+        for key, entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            record = {**entry, "resourceType": "AnnotationServer"}
+            if _field(record, "id") is None and key is not None:
+                record["id"] = key
+            records.append(record)
+        if records:
+            self._add_odata(token, records)
+        return records
+
+    def _add_odata(self, token: str, records: list[dict[str, Any]]) -> None:
+        """Put each database's ``ODataEndpoint`` on its record, where it can be read.
+
+        One ``Permissions/AnnotationServers?id=..`` call for the records whose
+        database is one of our volumes.  When it cannot be read, the records
+        are left as they are and match by name, as context records always did.
+        """
+        wanted = {
+            str(_field(r, "id")): r for r in records
+            if _field(r, "id") is not None and _by_database(r, DATABASE_NAMES) is not None
+        }
+        if not wanted:
+            return
+        query = urlencode([("id", i) for i in wanted])
+        try:
+            response = self._get(f"Permissions/AnnotationServers?{query}", token)
+            if response.status_code != 200:
+                raise VikingError(f"returned {response.status_code}")
+            payload = response.json()
+        except VikingAuthExpired:
+            raise
+        except (VikingError, ValueError) as exc:
+            note_once(f"annotation server details unreadable, matching by name alone: {exc}")
+            return
+        if not isinstance(payload, dict):
+            note_once("annotation server details were not an object keyed by id")
+            return
+        for key, detail in payload.items():
+            record = wanted.get(str(key))
+            odata = _field(detail, "ODataEndpoint") if isinstance(detail, dict) else None
+            if record is not None and isinstance(odata, str):
+                record["ODataEndpoint"] = odata
+
+    def accessible_contexts(self, token: str) -> list[dict[str, Any]]:
+        """Every annotation context this user may open, as the API's own records.
 
         The response is an object keyed by volume id; the ids are the identity
         server's, not ours, so only the values are of use here.
@@ -545,53 +640,96 @@ def _as_text(response: httpx.Response) -> str:
     return str(value)
 
 
-def sort_volumes(records: list[dict[str, Any]]) -> tuple[dict[str, list[str]], list[str]]:
-    """Split an ``AccessibleVolumes`` answer into what we can and cannot open.
+#: Which names a record is matched by, in order.  An annotation database
+#: (``resourceType`` AnnotationServer, from :meth:`PermissionsClient.readable_databases`)
+#: is its database name, then its server's name; a context, its own name, then
+#: the database behind it, then (Identity 1.1.0 answers) its server's name.
+DATABASE_NAMES = ("AnnotationDatabaseName", "name")
+CONTEXT_NAMES = ("name", "AnnotationDatabaseName", "AnnotationServerName")
 
-    Returns ``(canonical name -> permissions, identity-server names we have no
-    renderer for)``.  The second half is not an error: the identity server
-    governs two dozen volumes and this tool renders eight of them.
+
+def _field(record: dict[str, Any], key: str) -> Any:
+    """``key`` on the record or in its ``metadata``, in any letter case.
+
+    The identity server's own fields come camelCase (``name``,
+    ``resourceType``), the ones it was asked to add were described in
+    PascalCase, and a context's are kept under ``metadata``; one reader for
+    all three, so a change of case or place is not a change of answer.
+    """
+    want = key.lower()
+    for source in (record, record.get("metadata")):
+        if not isinstance(source, dict):
+            continue
+        for name, value in source.items():
+            if isinstance(name, str) and name.lower() == want and value not in (None, ""):
+                return value
+    return None
+
+
+def _is_database(record: dict[str, Any]) -> bool:
+    return str(_field(record, "resourceType") or "").lower() == "annotationserver"
+
+
+def _label(record: dict[str, Any]) -> str:
+    """What a record is called in the unsupported list.
+
+    A context by its name; a database by its database name, with its server's
+    name first when the two differ (``gRPC-RC1-Test (RC1)``), so a database
+    refused for its OData root is not listed as a bare ``RC1``.
+    """
+    name = _field(record, "name")
+    name = name.strip() if isinstance(name, str) else ""
+    if not _is_database(record):
+        return name
+    database = _field(record, "AnnotationDatabaseName")
+    database = database.strip() if isinstance(database, str) else ""
+    if database and name and database != name:
+        return f"{name} ({database})"
+    return database or name
+
+
+def sort_volumes(records: list[dict[str, Any]]) -> tuple[dict[str, list[str]], list[str]]:
+    """Split the identity server's records into what we can and cannot open.
+
+    The records are annotation databases (:meth:`PermissionsClient.readable_databases`)
+    or, from an identity server without that list, annotation contexts.
+    Returns ``(canonical name -> permissions, names we have no renderer for)``.
+    The second half is not an error: the identity server governs two dozen
+    volumes and this tool renders eight of them.
     """
     mine: dict[str, list[str]] = {}
     unsupported: list[str] = []
     for record in records:
-        name = str(record.get("name") or "").strip()
-        if not name:
+        label = _label(record)
+        if not label:
             continue
         permissions = [str(p) for p in (record.get("permissions") or [])]
         if not permissions:
             # Present but with nothing granted: the same as no access.
             continue
-        canonical = from_viking_name(name)
+        names = DATABASE_NAMES if _is_database(record) else CONTEXT_NAMES
+        canonical = _by_database(record, names)
         if canonical is None:
-            canonical = _by_database(record.get("metadata"))
-        if canonical is None:
-            unsupported.append(name)
+            unsupported.append(label)
         else:
             held = mine.setdefault(canonical, [])
             held.extend(p for p in permissions if p not in held)
-    return mine, sorted(unsupported)
+    return mine, sorted(set(unsupported))
 
 
-def _by_database(metadata: Any) -> str | None:
-    """The volume behind a record whose own name is not one of ours.
+def _by_database(record: dict[str, Any], names: tuple[str, ...]) -> str | None:
+    """The volume a record names, trying ``names`` in order.
 
-    Identity names a record for its annotation context (``RC2-Cleaned``,
-    ``RC1-Internal``), and several contexts share one annotation database.
-    The database is ``metadata.AnnotationDatabaseName`` (``RC2``); Identity
-    1.1.0 answers before that field carried only ``AnnotationServerName``,
-    which names the server after its first context, so it is the fallback.
-
-    Access here opens a whole volume, so a matching name is not enough when
-    the record also says where its OData is: a test or mirror database may
-    share the name, and it counts only when its ``ODataEndpoint`` is the root
-    this tool reads that volume from.
+    Several annotation contexts (``RC2-Cleaned``, ``RC1-Internal``) share one
+    annotation database, and the database is what a volume is here.  Access
+    opens a whole volume, so a matching name is not enough when the record
+    also says where its OData is: a test or mirror database may share the
+    name, and it counts only when its ``ODataEndpoint`` is the root this tool
+    reads that volume from.
     """
-    if not isinstance(metadata, dict):
-        return None
-    odata = metadata.get("ODataEndpoint")
-    for key in ("AnnotationDatabaseName", "AnnotationServerName"):
-        value = metadata.get(key)
+    odata = _field(record, "ODataEndpoint")
+    for key in names:
+        value = _field(record, key)
         canonical = from_viking_name(value) if isinstance(value, str) else None
         if canonical is None:
             continue
@@ -603,44 +741,45 @@ def _by_database(metadata: Any) -> str | None:
 
 
 def placement_note(record: dict[str, Any]) -> str:
-    """What a record names that :func:`_by_database` reads, for the log.
+    """Why a record was not placed, for the log.
 
     The session keeps only the names of the records it could not place; this
-    says why each one missed: its database and its server, each against our
-    volumes and their OData roots, and the OData root the record gives.
+    says which kind of record it was and what each of its names is, against
+    our volumes and their OData roots, and the OData root the record gives.
     """
-    name = str(record.get("name") or "").strip()
-    metadata = record.get("metadata")
-    if not isinstance(metadata, dict):
-        return f"{name!r}: no metadata"
+    kind = "database" if _is_database(record) else "context"
+    names = DATABASE_NAMES if _is_database(record) else CONTEXT_NAMES
     parts = []
-    for label, key in (("database", "AnnotationDatabaseName"), ("server", "AnnotationServerName")):
-        value = metadata.get(key)
+    for key in names:
+        value = _field(record, key)
         canonical = from_viking_name(value) if isinstance(value, str) else None
         if canonical is None:
-            parts.append(f"{label} {value!r} is none of ours")
+            parts.append(f"{key} {value!r} is none of ours")
         else:
-            parts.append(f"{label} {value!r} is {canonical} at {_service_root(canonical)!r}")
-    parts.append(f"OData {metadata.get('ODataEndpoint')!r}")
-    return f"{name!r}: " + "; ".join(parts)
+            parts.append(f"{key} {value!r} is {canonical} at {_service_root(canonical)!r}")
+    parts.append(f"OData {_field(record, 'ODataEndpoint')!r}")
+    return f"{kind} {_label(record)!r}: " + "; ".join(parts)
 
 
-#: Notes already logged by :func:`log_unplaced`, so a refresh every five
-#: minutes per session says each once per process.
+#: What :func:`note_once` has logged, so a refresh every five minutes per
+#: session says each thing once per process.
 _NOTED: set[str] = set()
+
+
+def note_once(note: str) -> None:
+    """Log ``note`` at INFO the first time this process sees it (up to 500 notes)."""
+    if note in _NOTED or len(_NOTED) >= 500:
+        return
+    _NOTED.add(note)
+    log.info("viking: %s", note)
 
 
 def log_unplaced(records: list[dict[str, Any]], unsupported: list[str]) -> None:
     """Log, once each, why the records listed as unsupported were not placed."""
     missed = set(unsupported)
     for record in records:
-        if str(record.get("name") or "").strip() not in missed:
-            continue
-        note = placement_note(record)
-        if note in _NOTED or len(_NOTED) >= 500:
-            continue
-        _NOTED.add(note)
-        log.info("viking volume not placed: %s", note)
+        if _label(record) in missed:
+            note_once(f"volume not placed: {placement_note(record)}")
 
 
 def _service_root(canonical: str) -> str | None:
@@ -915,6 +1054,14 @@ class VikingAuth:
                 "permissions answer has no volumes we can open"
                 + (f" (unsupported: {', '.join(unsupported)})" if unsupported else "")
             )
+        if set(volumes) != set(session.volumes):
+            added = sorted(set(volumes) - set(session.volumes))
+            removed = sorted(set(session.volumes) - set(volumes))
+            source = ("annotation databases" if any(_is_database(r) for r in records)
+                      else "annotation contexts")
+            log.info("viking volumes for %r, from %s: %s (added %s; removed %s)",
+                     session.user, source, ", ".join(sorted(volumes)) or "none",
+                     ", ".join(added) or "none", ", ".join(removed) or "none")
         session.volumes, session.unsupported = volumes, unsupported
         session.volumes_at = time.time()
         self.store.save(session)
