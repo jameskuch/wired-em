@@ -1832,8 +1832,9 @@ table.rep-matrix tbody tr:hover { background: none; }
    wrap it, and each wrapped line took 29 px from the grid and resized every render in it (c943 at a
    900 px window: the grid 678 px idle, 649 after a Compare, 620 while one ran, 598 after a failure, 546
    under a long server message).  They are one item now and one line high whatever they say: beside the
-   controls where 760 px are left for them (about 1650 px of window, with the cell list at its usual
-   width), in a row of their own under the controls where not.  The basis, not the words, decides where the
+   controls where 760 px are left for them (a run of three panes is a 519 px summary and a 219 px status;
+   about 1,850 px of window with c943 and the cell list at its usual width, 1,639 px before Report... and
+   Registrations... joined the controls), in a row of their own under the controls where not.  The basis, not the words, decides where the
    row breaks, so a window breaks at the same width idle and running.  What does not fit is cut with an
    ellipsis, and the whole of it is the text's tooltip (app.js). */
 .compare-tools { row-gap: 8px; }

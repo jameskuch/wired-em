@@ -96,8 +96,9 @@ own, and a slow build is held back by a gate on ``api.mesh`` rather than waited 
   status line) never resizes the grid or the renders in it: the grid is one height at 480 to 1920 px
   whether the toolbar is idle, running (the clock at 3 s, 41 s, 1 min 05 s and 12 min 05 s), done, noting
   something, or failing with a long message, in both themes; the text has a row of its own under the controls
-  on a window narrower than about 1650 px and sits beside them on a wider one; the controls do not move when
-  the text changes; and a text that is cut short has the whole of it on hover.
+  where less than 760 px are left beside them (a window narrower than about 1,850 px with c943) and sits beside
+  them where 760 are left, the switch to the pixel where the controls end; the controls do not move when the
+  text changes; and a text that is cut short has the whole of it on hover.
 * ``settings`` -- the Settings tab (settings.js) sits at the far end of the tab row; on a freshly started
   server the page is the build the server serves; an open local server offers its tools and refuses Restart
   (systemd did not start it); clearing surfaces in memory says what it cleared; "Clear cached files and
@@ -2700,6 +2701,14 @@ def comparestate(c: Chrome, r: Report, ctx):
 # where the controls themselves wrap, and 480 px is the phone layout (the cell list above the tabs).
 TOOLBAR_WIDTHS = (480, 700, 900, 1000, 1140, 1440, 1920)
 
+# The room the text gets beside the controls before it takes a row of its own under them (the user's choice in
+# 2.6.1, `.compare-texts`' flex-basis): a run of three panes is a 519 px summary at 12 min 05 s and a 219 px status
+# line, 750 px with the gap between them, so both read in full beside the controls.  The window that leaves this
+# much follows the controls: 1,639 px with the five of 2.6.1, 1,849 px since Report... (2.21.0) and
+# Registrations... (2.24.0) made them 210 px wider.  So the check holds the switch to where the controls end,
+# not to a window width.
+TOOLBAR_TEXT_ROOM = 760
+
 # The grid, the render in it and the toolbar under it at this moment: heights, where the controls end, where the
 # text is, whether it is cut short and whether the whole of it is on hover.  Written for either layout of the text
 # (a flex item of the controls' row, or a row of its own), so that it runs on both.
@@ -2726,6 +2735,8 @@ TOOLBAR_PROBE = r"""(() => {
     footer: tenth(bar.parentElement.getBoundingClientRect().height),
     controlsRight: tenth(last.right),
     controlsBottom: tenth(last.bottom),
+    gap: parseFloat(getComputedStyle(bar).columnGap),
+    padRight: parseFloat(getComputedStyle(bar).paddingRight),
     build: tenth(button.width),
     row: !!t,
     below: t ? t.top >= last.bottom - 1 : null,
@@ -2837,10 +2848,17 @@ def comparetoolbar(c: Chrome, r: Report, ctx):
 
     # -- where the text is --------------------------------------------------------------------------------
     plain = {w: samples[(w, 'idle, dark')] for w in widths}
-    r.check('the text is a row of its own, under the controls, on a window narrower than about 1650 px, and beside the '
-            'controls on a wider one, which pays nothing for it (the layouts change between 1500 and 1800 px)',
-            all(plain[w]['below'] is True for w in widths if w < edge) and plain[1920]['below'] is False
-            and 1500 <= edge <= 1800, {'beside from': edge, 'under the controls': {w: plain[w]['below'] for w in widths}})
+    # The narrowest window that leaves the text its room between the end of the controls (the Error box, which does
+    # not move with the window's width once the controls are one line) and the toolbar's inner right edge.
+    wide = plain[1920]
+    expected = math.ceil(wide['controlsRight'] + wide['gap'] + TOOLBAR_TEXT_ROOM + wide['padRight'] - 0.05)
+    r.check(f'the text is a row of its own, under the controls, where less than {TOOLBAR_TEXT_ROOM} px are left beside them '
+            '(a window narrower than about 1,850 px with c943), and beside the controls where that much is left, at 1920 px '
+            'among them, which pays nothing for it; the layouts change within a pixel of where the controls end plus '
+            f'{TOOLBAR_TEXT_ROOM} px',
+            all(plain[w]['below'] is (w < edge) for w in widths) and abs(edge - expected) <= 1,
+            {'beside from': edge, 'expected': expected, 'controls end at': wide['controlsRight'],
+             'under the controls': {w: plain[w]['below'] for w in widths}})
     r.check('the row is there when it is empty, as high as when it has words in it (the bar is one height in every state)',
             all(len({samples[(w, s)]['bar'] for s in states}) == 1 for w in widths),
             {w: sorted({samples[(w, s)]['bar'] for s in states}) for w in widths})

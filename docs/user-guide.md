@@ -3262,9 +3262,10 @@ it).
 
 That line and the status line after it are one line high however much they say, so
 a Compare starting, ending or failing never resizes the panes (a wrapped line used
-to take 29 px from the grid and rescale every render in it). On a window narrower
-than about 1650 px they have a row of their own under the controls, which stays,
-empty, when there is nothing to say; on a wider one they sit beside the controls.
+to take 29 px from the grid and rescale every render in it). Where less than
+760 px are left beside the controls (a window narrower than about 1,850 px) they
+have a row of their own under the controls, which stays, empty, when there is
+nothing to say; on a wider window they sit beside the controls.
 What does not fit is cut with an ellipsis and is in full when you rest the pointer
 on it; the summary keeps its words (the clock is at their end) and the status line
 gives way first.
