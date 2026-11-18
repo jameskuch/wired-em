@@ -96,6 +96,10 @@ import {
   SELECTABLE_KINDS, contextTitle, describeCandidate as nameCandidate, listCandidates, offersChoice,
   placeInside, sameCandidate,
 } from './contextmenu.js';
+import {
+  cameraUnderFlip, choiceAfterUndo, effectiveDisplay, readChoices, remember, seedFromSession, unsettledKeys,
+  writeChoices,
+} from './volumedisplay.js';
 
 const $ = (id) => document.getElementById(id);
 const statusEl = $('status');
@@ -440,6 +444,10 @@ async function applyHistory(snap) {
     // state.source, and a sheet fetched for the wrong volume is wrong.
     if (snap.source) switchVolume(snap.source, { quiet: true });
     applyUiFlags(snap.ui);
+    // An undone Flip Z stays undone when the volume is left and come back to.
+    const undone = choiceAfterUndo(state.volumes, readChoices(browserStore('localStorage')),
+      state.source, snap.ui?.display);
+    if (undone) rememberVolumeDisplay(state.source, undone);
 
     const want = new Map(snap.neurons.map((n) => [keyOf(n.source, n.id), n]));
     for (const record of [...state.neurons.values()]) {
@@ -870,8 +878,11 @@ async function boot() {
     // A saved session with no cells is a tab its user cleared: it comes back
     // empty, never filled with the cells other people have open (2026-10-09).
     applyUiFlags(saved.ui);
+    settleVolumeDisplay(saved);
     display?.syncTwoD();   // no cells, no camera restored: the box follows the default view
   } else {
+    // The volume the page opened on shows its own Flip Z.
+    settleVolumeDisplay(null);
     // No session at all (a first visit, or storage unavailable): the shared
     // list is offered, never pulled in unasked -- the redeploy reload included.
     await offerServerCells();
@@ -966,13 +977,17 @@ function applyUiFlags(ui) {
   if (ui.display && display) display.restore(ui.display);
 }
 
-/** A saved session's volume and panel flags: everything but its cells. */
-function applySessionShell(saved) {
+/**
+ * A saved session's volume and panel flags: everything but its cells.
+ * `seed`: it is this browser's own session, not a workspace someone sent.
+ */
+function applySessionShell(saved, { seed = true } = {}) {
   // Volume first: applyUiFlags fires the context-sheet fetches for
   // state.source without waiting, so with the old order the INL request
   // left for the default volume and only the GCL saw the saved one.
   if (saved.source) switchVolume(saved.source, { quiet: true });
   applyUiFlags(saved.ui);
+  settleVolumeDisplay(saved, { seed });
 }
 
 // -- what a page load would bring back ---------------------------------------
@@ -1086,11 +1101,15 @@ async function offerServerCells() {
  * redeploy: the annotations are still in the on-disk OData cache, so a load
  * that took ~14s from Viking takes ~0.1s now.
  */
-async function restoreSession(saved) {
+async function restoreSession(saved, { workspace = false } = {}) {
   restoring = true;
   const failures = [];
   try {
-    applySessionShell(saved);
+    // A workspace's Flip Z is the sender's, not a choice made in this browser.
+    applySessionShell(saved, { seed: !workspace });
+    // The saved view was saved in the scene as it was then: when the volume's
+    // Flip Z (settled just above) mirrors it now, the view moves with it.
+    const savedCamera = cameraUnderFlip(saved.camera, saved.ui?.display?.flip_z, renderer.flipZ);
     // The saved view goes up before the cells, so they come in where they will
     // be seen and a drag turns the view while they do.  A fresh page's camera
     // sits on its own target at the origin, where a turn has nothing to turn
@@ -1098,7 +1117,7 @@ async function restoreSession(saved) {
     // plane, the cells showed from there and zoomed and panned, but would not
     // rotate until the last one was in (2026-10-20).  With no saved view, the
     // first thing to land frames it, as a first load's does.
-    const placed = renderer.restoreCamera(saved.camera) ? renderer.cameraState() : null;
+    const placed = renderer.restoreCamera(savedCamera) ? renderer.cameraState() : null;
     const framing = placed || display?.holdLimits ? null : { done: false };
 
     // Side by side, as loadMany does: a restore of thirty cells is thirty
@@ -1202,7 +1221,7 @@ async function restoreSession(saved) {
     // them; falls back to framing the scene when there is no usable camera.
     // Not over a view the person moved while the cells came in.
     if (viewUntouched(placed ?? framing?.camera)) {
-      if (!renderer.restoreCamera(saved.camera)) renderer.resetView();
+      if (!renderer.restoreCamera(savedCamera)) renderer.resetView();
     }
     // A saved view near the cells can still look at none of them (one saved
     // while its only cell had failed to build): framed, unless Held.
@@ -1344,6 +1363,8 @@ async function checkBuild() {
 
 function bindEvents() {
   $('volume').addEventListener('change', (e) => switchVolume(e.target.value));
+  // Flip Z set by hand is kept for the volume the Volume menu names.
+  $('opt-flipz').addEventListener('change', (e) => rememberVolumeDisplay(state.source, { flip_z: e.target.checked }));
 
   $('load-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -9324,9 +9345,50 @@ function volumeName(source) {
  * had drifted, and a link or an undo left the old volume's sheets on screen.
  * Answers whether the volume changed.
  */
+// -- Display settings kept per volume (volumedisplay.js) --------------------------
+// Flip Z: the volume table's default (on for RC2) until it is set by hand on
+// the volume, then what was set, in this browser.  The Volume menu decides.
+
+/** Show `source`'s own Flip Z (only `keys` of what is kept per volume). */
+function applyVolumeDisplay(source, keys = null) {
+  if (!display || !source) return;
+  const want = effectiveDisplay(state.volumes, readChoices(browserStore('localStorage')), source);
+  if (keys) for (const key of Object.keys(want)) if (!keys.includes(key)) delete want[key];
+  display.applyPerVolume(want);
+}
+
+/** Flip Z set by hand (or by an undo) on `source`: kept for that volume. */
+function rememberVolumeDisplay(source, values) {
+  const store = browserStore('localStorage');
+  writeChoices(store, remember(readChoices(store), source, values));
+}
+
+/**
+ * After a page load put back its saved panels: the volume's Flip Z where the
+ * saved session was not kept per volume (saved by an older build, or none at
+ * all).  This browser's own older session keeps a Flip Z it had on, as the
+ * choice for the volume it was saved on; a workspace someone sent does not.
+ */
+function settleVolumeDisplay(saved, { seed = true } = {}) {
+  const shown = saved?.ui?.display;
+  const keys = unsettledKeys(shown);
+  if (!keys.length) return;
+  if (seed && saved?.source) {
+    const store = browserStore('localStorage');
+    const before = readChoices(store);
+    const after = seedFromSession(before, saved.source, shown);
+    if (JSON.stringify(after) !== JSON.stringify(before)) writeChoices(store, after);
+  }
+  applyVolumeDisplay(state.source, keys);
+}
+
 function switchVolume(source, { quiet = false } = {}) {
   if (!source || source === state.source) return false;
-  // `quiet`: a restore or an undo, which save what they end with themselves.
+  // Flip Z is kept per volume: the one switched to shows its own.  Before
+  // setSource, whose change event saves the session with the panel as it is
+  // then.  `quiet`: a restore or an undo, which save what they end with
+  // themselves, Flip Z included (the snapshot they put back says it).
+  if (!quiet) applyVolumeDisplay(source);
   if (quiet) state.source = source;
   else setSource(source);
   $('volume').value = source;
@@ -9784,7 +9846,7 @@ async function openWorkspace(doc, label) {
     if (!kept.has(record.key)) api.unload(record.source, record.id).catch(() => {});
   }
   // A document saved before 2.30.2 can carry Hold; this page's own stays as it is.
-  await restoreSession(session.withoutPageState(doc));
+  await restoreSession(session.withoutPageState(doc), { workspace: true });
   statusEl.textContent = `Opened ${label}`;
   statusEl.className = 'status';
 }

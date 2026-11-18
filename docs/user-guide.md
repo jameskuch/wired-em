@@ -232,6 +232,15 @@ panels opened from its left edge:
   switch to perspective), In-page dropdowns (see [Dropdown lists in a virtual machine](#dropdown-lists-in-a-virtual-machine)),
   Material, the colormap and its colorbar, the scale bar, the volume
   context (boundaries and vasculature), a typed viewpoint, and axis limits.
+  **Flip Z is kept per volume** (2.47.0). Each volume starts from its own default,
+  and RC2's is on: its GCL lies above its INL, so unflipped it draws the retina the
+  other way up from the monkey volumes. Once you set Flip Z by hand on a volume, this
+  browser keeps that setting for it, in every tab. The Volume menu says which
+  volume's setting applies, because the scene has one Flip Z whatever volumes its
+  cells come from. A session or workspace saved before 2.47.0 comes back with the
+  volume's own default; a Flip Z this browser had on is kept for the volume it was
+  saved on. The Settings tab's Volumes card has a Flip Z column, and **Flip Z per
+  volume** under its saved items clears what you set.
 
 ### Named viewpoints
 

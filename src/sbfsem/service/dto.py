@@ -49,6 +49,10 @@ class VolumeInfoDTO(BaseModel):
     #: Whether a load that does not say is drawn through the volume's current
     #: section transforms (where it has them: ``has_transforms``).
     default_registration: bool = False
+    #: The Display settings the web viewer starts this volume with until they
+    #: are set by hand on it (kept per volume in the browser): today only
+    #: ``flip_z``, on for RC2.  Every key the viewer keeps per volume is listed.
+    display_defaults: dict[str, bool] = Field(default_factory=dict)
 
 
 class VolumeFactsDTO(BaseModel):

@@ -304,6 +304,24 @@ test('snapshot: a map the gradient editor is previewing is stored as the map the
   assert.equal(display.snapshot().colormap.map, 'Jet', 'a real map is stored as it is');
 });
 
+test('Flip Z kept per volume: a snapshot says so, and the volume’s setting is shown without a change event', () => {
+  const { display, renderer } = panel();
+  assert.deepEqual(display.snapshot().per_volume, ['flip_z'], 'a restore takes this Flip Z as saved');
+  let changed = 0;
+  display.onChange = () => { changed += 1; };
+  renderer.calls.length = 0;
+  display.applyPerVolume({ flip_z: true });
+  assert.equal(byId('opt-flipz').checked, true);
+  assert.deepEqual(renderer.calls, [['flipz', true]]);
+  assert.equal(display.snapshot().flip_z, true);
+  display.applyPerVolume({});
+  display.applyPerVolume(null);
+  assert.equal(byId('opt-flipz').checked, true, 'nothing named, nothing changed');
+  display.applyPerVolume({ flip_z: false });
+  assert.equal(byId('opt-flipz').checked, false);
+  assert.equal(changed, 0, 'not set by hand: the app saves it, not the panel');
+});
+
 test('restore: a snapshot with the crop, Hold, volume shifts and sheets off reverts all four', async () => {
   const { display, renderer } = panel();
   const clear = display.snapshot();

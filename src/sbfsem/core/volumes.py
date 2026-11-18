@@ -81,6 +81,15 @@ class VolumeInfo:
     #: chained, Nasal's lists no stos, Temporal's answered 404, RC2's stos
     #: paths answered 404.
     vikingxml_url: str | None = None
+    #: Whether the web viewer starts this volume with Flip Z on, until someone
+    #: sets it by hand on the volume (a display default only: no geometry, file
+    #: or library result reads it).  Measured 2026-11-17 from the IPL boundary
+    #: markers' median Z: in the three Neitz monkey volumes the GCL lies below
+    #: the INL (Inferior 52.0 against 70.5 µm, Nasal 63.0 against 93.0, Temporal
+    #: 25.5 against 48.0), in RC1 and RC2 above it (RC1 22.3 against 7.2, RC2 88.2
+    #: against 44.5), so unflipped those two draw the retina the other way up.
+    #: On for RC2, which James Anderson asked for (#ai-requests, 2026-10-30).
+    flip_z: bool = False
 
 
 _INFO: dict[str, VolumeInfo] = {
@@ -175,6 +184,7 @@ _INFO: dict[str, VolumeInfo] = {
         lab="Marc",
         cached_scale=(2.176, 2.176, 70.0),
         aliases=("rc2", "marcrc2"),
+        flip_z=True,
     ),
     "RPC1": VolumeInfo(
         name="RPC1",
@@ -298,6 +308,11 @@ class Volumes(Enum):
     def vikingxml_url(self) -> str | None:
         """Where the volume's current section transforms are listed, if they are read here."""
         return self.info.vikingxml_url
+
+    @property
+    def flip_z(self) -> bool:
+        """Whether the web viewer starts this volume with Flip Z on."""
+        return self.info.flip_z
 
     @property
     def n_sections(self) -> int | None:

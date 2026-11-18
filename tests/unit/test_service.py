@@ -268,6 +268,16 @@ def test_volume_listing_says_which_volumes_have_current_transforms(service):
         assert service.volume_info(volume.source).has_transforms is (volume.vikingxml_url is not None)
 
 
+
+def test_volume_listing_says_which_volumes_start_flipped(service):
+    """`display_defaults` lists every key the viewer keeps per volume; Flip Z is on
+    for RC2 alone (James Anderson, 2026-10-30), whose GCL lies above its INL."""
+    listed = {v.name: v.display_defaults for v in service.list_volumes()}
+    assert all(set(d) == {"flip_z"} for d in listed.values()), listed
+    assert {name for name, d in listed.items() if d["flip_z"]} == {"RC2"}
+    for volume in Volumes:
+        assert service.volume_info(volume.source).display_defaults == {"flip_z": volume.flip_z}
+
 def test_node_and_edge_dtos(service):
     nodes = service.nodes(943, "i")
     assert len(nodes) == 190

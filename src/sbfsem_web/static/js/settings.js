@@ -73,6 +73,11 @@ export const STORAGE_GROUPS = [
     help: 'The Stratification tab’s gridline step and what its PDF includes, as last chosen',
     keys: ['sbfsem:strata-ticks', 'sbfsem:strata-pdf'],
   },
+  {
+    id: 'volume-display', label: 'Flip Z per volume',
+    help: 'Flip Z as you set it by hand on each volume; a volume you have not set starts from its own default (on for RC2)',
+    keys: ['sbfsem:volume-display'],
+  },
   { id: 'connectivity', label: 'Connectivity query', help: 'The last query on the Connectivity tab', keys: ['sbfsem.connectivity.query'] },
   {
     id: 'report', label: 'Report options',
@@ -586,6 +591,8 @@ export const VOLUME_COLUMNS = Object.freeze([
     + 'section-correction service uses; Display → Mark damaged sections marks the ones a cell crosses'],
   ['IPL', 'How thick the IPL is between the INL and GCL boundary markers, along the layers’ normals (median); '
     + 'a volume without markers has no IPL depth, stratification or Flatten IPL'],
+  ['Flip Z', 'Whether the 3D render starts the volume with Flip Z on.  Flip Z is kept per volume: once you set it '
+    + 'by hand on a volume, this browser keeps what you set for it'],
   ['Cones', 'Whether the volume has traced cone outlines (lmTRACE, sTRACE, uTRACE)'],
   ['Custom XY', 'Whether MATLAB’s Custom transform (stored per-section XY offsets) can be applied'],
 ]);
@@ -697,6 +704,9 @@ export function volumeRows(volumes, { facts = {}, ipl = {} } = {}) {
         { text: correctionLabel, title: `A load that names no correction gets ${correctionLabel === 'None' ? 'none' : `the ${correctionLabel.toLowerCase()}`}` },
         damagedCell(f),
         iplCell(v, ipl[v.name]),
+        v.display_defaults?.flip_z
+          ? { text: 'On', title: 'The 3D render starts this volume with Flip Z on, until you set it by hand on the volume' }
+          : { text: '—', title: 'The 3D render starts this volume with Flip Z off, until you set it by hand on the volume' },
         { text: v.has_cones ? 'Yes' : '—' },
         { text: v.has_custom_transform ? 'Yes' : '—' },
       ],

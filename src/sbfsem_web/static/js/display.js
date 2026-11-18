@@ -11,6 +11,7 @@ import {
   isPreviewGradient, resolveColormap,
 } from './colormaps.js';
 import { RENDER_FIELDS } from './render-schema.js';
+import { PER_VOLUME_KEYS } from './volumedisplay.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -718,7 +719,20 @@ export class DisplayPanel {
       clip_box: this.renderer.clipBox,
       hold_limits: this.holdLimits,
       volume_offsets: this.renderer.volumeOffsetMap(),
+      // Flip Z here was set under the per-volume rule (volumedisplay.js), so a
+      // restore takes it as it is; a snapshot without this mark is older.
+      per_volume: [...PER_VOLUME_KEYS],
     };
+  }
+
+  /**
+   * Show what is kept per volume (Flip Z) for the volume the Volume menu
+   * names, without counting as set by hand.  The caller saves the session.
+   */
+  applyPerVolume(values) {
+    if (typeof values?.flip_z !== 'boolean') return;
+    $('opt-flipz').checked = values.flip_z;
+    this.renderer.setFlipZ(values.flip_z);
   }
 
   /**

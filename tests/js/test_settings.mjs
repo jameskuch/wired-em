@@ -470,6 +470,22 @@ test('the IPL cell: a button to measure it, then its median along the normals', 
   assert.equal(iplCell(inf, { answer: { normal_um: { median: null } } }).text, '—');
 });
 
+test('the Volumes card says which volumes start with Flip Z on', () => {
+  const rc2 = { name: 'RC2', display_name: 'RC2', viking_name: 'RC2', lab: 'Marc', animal: 'rabbit', is_odata: true,
+    has_boundary: true, volume_scale: [2.176, 2.176, 70], has_transforms: false, default_correction: 'neighbor',
+    default_registration: true, display_defaults: { flip_z: true } };
+  const inferior = { ...VOLUMES[0], display_defaults: { flip_z: false } };
+  const col = VOLUME_COLUMNS.findIndex(([n]) => n === 'Flip Z');
+  assert.ok(col > 0, 'a Flip Z column');
+  assert.match(VOLUME_COLUMNS[col][1], /kept per volume/);
+  const [inf, r2, old] = volumeRows([inferior, rc2, VOLUMES[2]]).map((r) => r.cells[col]);
+  assert.equal(r2.text, 'On');
+  assert.match(r2.title, /starts this volume with Flip Z on, until you set it by hand/);
+  assert.equal(inf.text, '—');
+  assert.equal(old.text, '—', 'a server that lists no defaults: off');
+  for (const row of volumeRows([inferior, rc2])) assert.equal(row.cells.length, VOLUME_COLUMNS.length);
+});
+
 let failed = 0;
 for (const [name, fn] of cases) {
   try {

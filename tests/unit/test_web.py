@@ -1014,6 +1014,14 @@ def test_the_web_app_corrects_every_volume_by_the_field(client):
         assert volumes[name]["default_correction"] == "neighbor"
 
 
+def test_the_volume_list_says_which_volumes_start_flipped(client):
+    # The page starts RC2 with Flip Z on until it is set by hand there.
+    volumes = {v["name"]: v for v in client.get("/api/volumes").json()}
+    assert volumes["RC2"]["display_defaults"] == {"flip_z": True}
+    for name in ("NeitzInferiorMonkey", "RC1", "RPC1", "RPC2", "DemoVolume"):
+        assert volumes[name]["display_defaults"] == {"flip_z": False}, name
+
+
 def test_an_old_environment_naming_a_retired_mode_is_the_field(monkeypatch):
     """A server whose environment still names curvefit or all (the unit, secrets.env)
     corrects by the field: no request carries 2 or 3."""

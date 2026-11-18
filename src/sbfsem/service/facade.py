@@ -1206,6 +1206,7 @@ class SbfsemService:
             lab=volume.lab,
             default_correction=self.default_correction(volume),
             default_registration=self.live_registration,
+            display_defaults={"flip_z": volume.flip_z},
         )
 
     # -- loading -----------------------------------------------------------
