@@ -8,6 +8,7 @@ variables the unit sets, and what redeploy.sh runs before it ships.
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import shutil
 import subprocess
@@ -184,3 +185,44 @@ def test_redeploy_tests_in_parallel_when_xdist_is_there_and_asks_for_the_quick_p
     preflight = script[script.index("# --- 1. preflight"):script.index("# --- 2.")]
     assert 'import xdist' in preflight and '-n "${SBFSEM_TEST_WORKERS:-6}"' in preflight
     assert "bootstrap.sh --quick" in script and "--full) FULL=1" in script
+
+
+# A git worktree (``.claude/worktrees/<name>``) has no venv of its own: its ``.venv`` is a link to the main
+# checkout's, whose editable install imports the main checkout's ``src``.  Everything that runs or ships a tree
+# must therefore name the tree's own ``src`` and leave the link behind (2026-11-17).
+
+def test_redeploy_tests_this_trees_own_src():
+    script = (DEPLOY / "redeploy.sh").read_text(encoding="utf-8")
+    preflight = script[script.index("# --- 1. preflight"):script.index("# --- 2.")]
+    path = re.search(r'^\s*export PYTHONPATH="\$REPO_ROOT/src[^"]*"', preflight, re.M)
+    assert path, "the checks must import the tree they ship, not the main checkout's src"
+    assert path.start() < preflight.index("-m pytest") < preflight.index("-m mypy")
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="no rsync")
+def test_the_sync_leaves_out_a_venv_that_is_a_link(tmp_path):
+    script = (DEPLOY / "sync.sh").read_text(encoding="utf-8")
+    excludes = [arg for pattern in re.findall(r"--exclude '([^']+)'", script) for arg in ("--exclude", pattern)]
+    assert excludes
+    venv = tmp_path / "main-venv" / "bin"
+    venv.mkdir(parents=True)
+    tree = tmp_path / "tree"
+    (tree / "src").mkdir(parents=True)
+    (tree / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (tree / ".venv").symlink_to(venv.parent)  # as in a worktree
+    out = tmp_path / "out"
+    subprocess.run(["rsync", "-a", *excludes, f"{tree}/", f"{out}/"], check=True, capture_output=True)
+    assert (out / "src" / "app.py").is_file()
+    assert not (out / ".venv").is_symlink() and not (out / ".venv").exists()
+
+
+def test_the_dev_servers_serve_their_own_tree():
+    launch = ROOT / ".claude" / "launch.json"
+    if not launch.exists():
+        pytest.skip("no .claude/launch.json (the public copy leaves it out)")
+    configurations = json.loads(launch.read_text(encoding="utf-8"))["configurations"]
+    assert configurations
+    for config in configurations:
+        args = config["runtimeArgs"]
+        python = next(i for i, arg in enumerate(args) if arg.endswith("python"))
+        assert "PYTHONPATH=src" in args[:python], config["name"]

@@ -39,9 +39,11 @@ echo "==> Syncing $REPO_ROOT -> $TARGET:$REMOTE_DIR"
 ssh -i "$KEY" "$TARGET" \
     "sudo mkdir -p $REMOTE_DIR && sudo chown -R \$USER:\$USER $REMOTE_DIR"
 
+# '.venv' without a trailing slash: a git worktree's .venv is a symbolic link to the main
+# checkout's, and 'dir/' patterns match directories only, so '.venv/' shipped the link.
 rsync -az --delete "${REPORT[@]}" \
     -e "ssh -i $KEY" \
-    --exclude '.venv/' \
+    --exclude '.venv' \
     --exclude '__pycache__/' \
     --exclude '*.pyc' \
     --exclude '.pytest_cache/' \

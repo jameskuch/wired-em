@@ -94,6 +94,10 @@ if [[ $SKIP_TESTS -eq 0 ]]; then
         echo "No .venv at $VENV -- cannot test, so not deploying (--skip-tests ships anyway)." >&2
         exit 1
     fi
+    # This tree's own src first: a git worktree's .venv is a link to the main
+    # checkout's, whose editable install imports the MAIN checkout's src, so
+    # without this a deploy from a worktree tested main's code and shipped its own.
+    export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
     PYTEST=(-q "$REPO_ROOT/tests" -x --no-header)
     # In parallel when pytest-xdist is there (the dev extra): each worker has its
     # own cache and save directories (tests/conftest.py).  About 1.2 GB a worker.

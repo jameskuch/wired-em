@@ -476,9 +476,11 @@ From the repository root on your machine:
 Or, with the `~/.ssh/config` entry above, just `./deploy/sync.sh sbfsem`.
 
 The script uses `rsync`, so re-running it after an edit sends only what changed.
-It excludes `.venv/` deliberately — a virtual environment contains
+It excludes `.venv` deliberately — a virtual environment contains
 platform-specific compiled wheels and must be rebuilt on the target, not copied
-from macOS.
+from macOS. The pattern has no trailing slash so that it also leaves out a
+`.venv` that is a symbolic link, as in a git worktree that shares the main
+checkout's environment (`.venv/` matches directories only).
 
 If you would rather see the raw command, it is:
 
@@ -488,7 +490,7 @@ ssh -i ~/.ssh/sbfsem-lightsail ubuntu@SERVER_IP \
 
 rsync -az --delete --info=stats1,progress2 \
     -e "ssh -i ~/.ssh/sbfsem-lightsail" \
-    --exclude '.venv/' --exclude '__pycache__/' --exclude '*.pyc' \
+    --exclude '.venv' --exclude '__pycache__/' --exclude '*.pyc' \
     --exclude '.pytest_cache/' --exclude '.ruff_cache/' --exclude '.mypy_cache/' \
     --exclude '.git/' --exclude 'build/' --exclude '*.egg-info/' \
     --exclude '.DS_Store' --exclude '.coverage' --exclude '.claude/' \

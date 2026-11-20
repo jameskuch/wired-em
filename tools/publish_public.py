@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 REMOTE = "git@github.com:jameskuch/wired-em.git"
-CLONE_NAME = "wired-em-public"  # beside this repository
+CLONE_NAME = "wired-em-public"  # beside the main checkout of this repository
 MAX_FILE_BYTES = 50 * 1024 * 1024  # GitHub warns above 50 MB and refuses 100 MB
 
 # Shapes of credentials that must never be published, whatever the lists say.
@@ -210,11 +210,21 @@ def git(repo: Path, *args: str, check: bool = True) -> str:
     return done.stdout.strip()
 
 
+def default_clone(repo: Path) -> Path:
+    """The public clone's place: beside the main checkout, from a linked worktree too.
+
+    A worktree's own top level (``.claude/worktrees/<name>``) is not where the clone is, so
+    ``repo.parent`` from there cloned a second, unconfigured copy among the worktrees.  The
+    repository's common git directory is the main checkout's ``.git`` from either."""
+    common = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    return common.parent.parent / CLONE_NAME
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Publish the public copy of this repository.")
     ap.add_argument("--push", action="store_true", help="commit the copy in the public clone and push it")
     ap.add_argument("--public-dir", type=Path,
-                    help=f"the public repository's clone (default: ../{CLONE_NAME} beside this repository)")
+                    help=f"the public repository's clone (default: ../{CLONE_NAME} beside the main checkout)")
     ap.add_argument("--remote", default=REMOTE, help="where a missing clone is cloned from")
     ap.add_argument("--message", help="the public commit's message (default: HEAD's subject)")
     ap.add_argument("--out", type=Path, help="also keep the checked copy in this new directory")
@@ -223,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"{args.out} exists; --out wants a new directory")
 
     repo = Path(git(Path.cwd(), "rev-parse", "--show-toplevel"))
-    clone = (args.public_dir or repo.parent / CLONE_NAME).resolve()
+    clone = (args.public_dir or default_clone(repo)).resolve()
     if git(repo, "status", "--porcelain", "--untracked-files=no"):
         print("Note: uncommitted changes are not published; only HEAD is.")
 

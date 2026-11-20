@@ -144,3 +144,29 @@ def test_the_tool_publishes_only_the_committed_tree(tmp_path, monkeypatch, capsy
     capsys.readouterr()
     assert tool.main(["--push", "--public-dir", str(clone), "--remote", str(remote)]) == 0
     assert "nothing to publish" in capsys.readouterr().out
+
+
+def test_the_clone_is_found_beside_the_main_checkout_from_a_worktree_too(tmp_path, monkeypatch, capsys):
+    """From ``.claude/worktrees/<name>`` the tool looked for the clone among the worktrees and, with --push,
+    cloned a second, unconfigured copy there (2026-11-17)."""
+    if shutil.which("git") is None:
+        pytest.skip("needs git")
+    repo = make_tree(tmp_path / "repo")
+
+    def run(*args: str, cwd: Path = repo) -> None:
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+    run("init", "-q")
+    run("add", "-A")
+    run("-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "-m", "Release 1.0")
+    worktree = repo / ".claude" / "worktrees" / "jolly"
+    run("worktree", "add", "-q", "--detach", str(worktree))
+    beside = (tmp_path / tool.CLONE_NAME).resolve()
+
+    for where in (repo, worktree):
+        monkeypatch.chdir(where)
+        capsys.readouterr()
+        assert tool.main([]) == 0  # no --push: nothing is cloned or written
+        assert f"no public clone at {beside} yet" in capsys.readouterr().out, where
+    assert not beside.exists() and not (worktree.parent / tool.CLONE_NAME).exists()
+    assert tool.default_clone(repo) == tool.default_clone(worktree) == beside
