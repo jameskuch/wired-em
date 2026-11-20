@@ -5,8 +5,10 @@ under one directory (the default, ``~/.cache/sbfsem``, holds every volume's
 answers together) so a cache can be shipped alongside an offline dataset.
 
 An entry never expires unless it is asked for with an age limit
-(:meth:`DiskCache.get`'s ``max_age``, or the cache's own ``ttl``); the client
-asks for one only for the lists that grow.  Nothing bounds the cache's size:
+(:meth:`DiskCache.get`'s ``max_age``, or the cache's own ``ttl``).  The client
+asks its ``live`` questions every time and keeps their answers only for when
+Viking cannot be reached; a cell's own rows are kept and checked against Viking
+before use (``sbfsem.io.odata.QUERY_POLICIES``).  Nothing bounds the cache's size:
 it held 3.0 GB in 5,952 files on the development machine on 2026-10-16.
 """
 
@@ -66,6 +68,13 @@ class DiskCache:
         except (OSError, json.JSONDecodeError):
             return None
         return payload.get("data")
+
+    def stored_at(self, url: str) -> float | None:
+        """When the answer held for ``url`` was stored (POSIX seconds), or ``None``."""
+        try:
+            return self._path(url).stat().st_mtime
+        except OSError:
+            return None
 
     def set(self, url: str, data) -> None:
         if not self.enabled:

@@ -228,6 +228,17 @@ class NeuronSummaryDTO(BaseModel):
     #: while the service was down leaves the cell uncorrected under the same
     #: tag, so what is cached from the positions is keyed on this as well.
     positions: str | None = None
+    #: What the copy's surface was built from in Viking, as a short hash: its own
+    #: annotations as the freshness check names them and its LocationLinks.  ""
+    #: for data with no stamp.  The page keys its surfaces on it.
+    surface_token: str = ""
+    #: The same with the child structures (synapses: their rows, annotations and
+    #: links): changes whenever the server has fetched anything new of the cell.
+    #: The page keys everything it computes from the cell on it (2026-11-20:
+    #: ``data_stamp`` alone did not move for a synapse added or retagged, so the
+    #: Morphology card and GraphApp's synapses kept their numbers through an
+    #: Update).
+    viking_token: str = ""
 
 
 class NodeDTO(BaseModel):
@@ -305,8 +316,9 @@ class FreshnessDTO(BaseModel):
 
     ``loaded`` and ``live`` are UTC.  ``stale`` is either kind of change:
     ``surface_stale`` when the cell's own annotations differ (a newer edit or
-    a different count; its surface would change), ``children_stale`` when only
-    its child structures do (synapse markers).  The counts are the cell's own
+    a different count, or its LocationLinks; its surface would change),
+    ``children_stale`` when only its child structures do (synapses: added,
+    removed, moved or retagged).  The counts are the cell's own
     annotations, loaded and in Viking now.
     """
 
@@ -315,6 +327,9 @@ class FreshnessDTO(BaseModel):
     stale: bool = False
     surface_stale: bool = False
     children_stale: bool = False
+    #: Its LocationLinks differ (a link made or removed in Viking); part of
+    #: ``surface_stale``, named so the page can say what changed.
+    links_stale: bool = False
     loaded_count: int | None = None
     live_count: int | None = None
 
@@ -1319,6 +1334,17 @@ class LinkedNeuronsDTO(BaseModel):
     n_linked: int
     n_unlinked: int
     n_partners: int
+    #: When Viking was asked for the links and labels (UTC): every report asks
+    #: it again, so this is the moment the table is true of.
+    asked_at: datetime | None = None
+    #: Set when Viking could not answer and some links or labels are the answer
+    #: stored the last time it did (UTC, the oldest such): the table is not
+    #: current, and the page says so.
+    answered_from: datetime | None = None
+    #: The cell's synapses are those of the copy loaded; whether Viking has
+    #: changed the cell (its synapses included) since, asked with the report.
+    #: ``None`` when Viking could not be asked.
+    freshness: FreshnessDTO | None = None
 
 
 # -- connectivity (Graffinity) ----------------------------------------------

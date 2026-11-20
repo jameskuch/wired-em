@@ -79,6 +79,69 @@ def test_a_vessel_added_since_the_overlay_was_built_is_found(monkeypatch):
         svc.close()
 
 
+def test_a_vessel_traced_further_in_viking_is_drawn_again(monkeypatch):
+    """The vessels' annotations were read from the disk for good and the mesh
+    memoized by their IDs alone: a vessel traced further was never drawn so.
+    The memo is keyed on what Viking says of each vessel now, and a changed one
+    is read past the disk (2026-11-20)."""
+    import contextlib
+    from datetime import UTC, datetime
+
+    import sbfsem.io.structure_group as groups
+    import sbfsem.service.facade as facade
+    from sbfsem.geometry.mesh import Mesh
+
+    log = {"loads": []}
+    viking = {"stamp": datetime(2026, 11, 1, tzinfo=UTC), "count": 40, "fresh": False}
+
+    class Client:
+        source = "NeitzInferiorMonkey"
+
+        def structure_freshness(self, ids, *, depth=0):
+            return {int(i): (viking["stamp"], viking["count"]) for i in ids}
+
+        def location_link_signature(self, structure_id):
+            return viking["count"] - 1, viking["stamp"]
+
+        @contextlib.contextmanager
+        def fresh(self):
+            viking["fresh"] = True
+            try:
+                yield
+            finally:
+                viking["fresh"] = False
+
+    class StubVasculature:
+        def __init__(self, source, *, client=None):
+            self.ids = np.empty(0, dtype=np.int64)
+
+        def pull(self):
+            self.ids = np.array([10], dtype=np.int64)
+
+        def load_vessels(self):
+            log["loads"].append("fresh" if viking["fresh"] else "disk")
+            return {10: type("Vessel", (), {"id": 10})()}
+
+    def render(vessel, **kwargs):
+        return Mesh(vertices=np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=float),
+                    faces=np.array([[0, 1, 2]]))
+
+    monkeypatch.setattr(groups, "Vasculature", StubVasculature)
+    monkeypatch.setattr(facade, "cylinder_render", render)
+    svc = SbfsemService(offline=True)
+    svc.offline = False                       # Viking is the stub above
+    svc.client = lambda source: Client()
+    try:
+        svc.vessel_mesh("i", reduce_fraction=1.0)
+        svc.vessel_mesh("i", reduce_fraction=1.0)
+        assert log["loads"] == ["fresh"], "built once, past the disk; unchanged: kept"
+        viking["count"], viking["stamp"] = 41, datetime(2026, 11, 20, tzinfo=UTC)   # traced further
+        svc.vessel_mesh("i", reduce_fraction=1.0)
+        assert log["loads"] == ["fresh", "fresh"]
+    finally:
+        svc.close()
+
+
 def test_backend_never_imports_a_gui_toolkit():
     """An import-linter style contract, enforced as a test."""
     root = Path(__file__).resolve().parents[2] / "src" / "sbfsem"

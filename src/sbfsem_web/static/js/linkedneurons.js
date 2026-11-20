@@ -113,12 +113,39 @@ export function sortableHead(columns, sort, redraw) {
   return { head, mark };
 }
 
+/** `iso` (UTC) as the reader's local date and time, to the second. */
+function localTime(iso) {
+  const when = new Date(iso);
+  return Number.isNaN(when.getTime()) ? String(iso) : when.toLocaleString();
+}
+
+/**
+ * What changed in Viking since the cell was loaded, as a phrase, from the
+ * report's freshness answer; '' when nothing did (or Viking was not asked).
+ */
+export function staleWhat(freshness) {
+  if (!freshness?.stale) return '';
+  const parts = [];
+  // The annotations themselves: a newer edit (beyond one SQL tick) or another count.
+  const newer = freshness.live && freshness.loaded
+    && new Date(freshness.live) - new Date(freshness.loaded) > 4;
+  const annotations = freshness.surface_stale
+    && (!freshness.links_stale || newer || freshness.live_count !== freshness.loaded_count);
+  if (annotations) parts.push('its annotations');
+  if (freshness.links_stale) parts.push('the links between its annotations');
+  if (freshness.children_stale) parts.push('its synapses');
+  return parts.length ? parts.join(' and ') : 'the cell';
+}
+
 /**
  * Fill `card` (an element whose first child is its heading) with the report
  * for `record`. `pick(source, id)` puts a partner in the Structure ID box.
+ * `updateCell()` fetches the cell itself again from Viking (the row's Update)
+ * and resolves to the record it now is; ↻ Viking runs it before asking for the
+ * report, so the synapses are Viking's now too, not only their partners.
  */
 export async function fillLinkedNeuronsCard(card, record, {
-  api, pick, volumeName, vikingOf = null, order = 'neuron', refresh = false,
+  api, pick, volumeName, vikingOf = null, order = 'neuron', refresh = false, updateCell = null,
 }) {
   const heading = card.firstElementChild;
   card.replaceChildren(heading);
@@ -133,6 +160,23 @@ export async function fillLinkedNeuronsCard(card, record, {
     return;
   }
   note.remove();
+  const again = (options) => fillLinkedNeuronsCard(card, record, {
+    api, pick, volumeName, vikingOf, updateCell, order: options.order ?? report.order, refresh: !!options.refresh,
+  });
+
+  // Viking could not be asked: the links and labels are the last answer it gave.
+  if (report.answered_from) {
+    card.append(el('p', 'error',
+      `Viking could not be reached: the partners and labels below are as of ${localTime(report.answered_from)}, `
+      + 'not now. ↻ Viking asks again.'));
+  }
+  // The synapses are the loaded copy's: say when Viking has changed the cell since.
+  const changed = staleWhat(report.freshness);
+  if (changed) {
+    card.append(el('p', 'error',
+      `Viking has changed ${changed} of c${record.id} since it was loaded: `
+      + '↻ Viking loads the cell again and then this table.'));
+  }
 
   const rows = report.rows.map((r) => ({
     ...r,
@@ -148,6 +192,10 @@ export async function fillLinkedNeuronsCard(card, record, {
   const partners = `${report.n_partners} partner neuron${report.n_partners === 1 ? '' : 's'}`;
   summary.textContent = `${report.n_synapses} synapses · ${report.n_linked} linked to ${partners}`
     + (report.n_unlinked ? ` · ${report.n_unlinked} not linked to anything in Viking` : '');
+  if (report.asked_at && !report.answered_from) {
+    summary.title = `Links and labels asked of Viking at ${localTime(report.asked_at)}; `
+      + 'every view of this table asks again.';
+  }
   tools.append(summary);
 
   // Postsynapses whose Viking tags do not say what they are, counted once each.
@@ -176,9 +224,7 @@ export async function fillLinkedNeuronsCard(card, record, {
     orderSelect.append(option);
   }
   orderSelect.value = report.order;
-  orderSelect.addEventListener('change', () => {
-    fillLinkedNeuronsCard(card, record, { api, pick, volumeName, vikingOf, order: orderSelect.value });
-  });
+  orderSelect.addEventListener('change', () => again({ order: orderSelect.value }));
   orderField.append(orderSelect);
   tools.append(orderField);
 
@@ -191,10 +237,26 @@ export async function fillLinkedNeuronsCard(card, record, {
 
   const refreshBtn = el('button', '', '↻ Viking');
   refreshBtn.type = 'button';
-  refreshBtn.title = 'Resolve the partners again from Viking (links are cached with the cell)';
-  refreshBtn.addEventListener('click', () => {
-    fillLinkedNeuronsCard(card, record, {
-      api, pick, volumeName, vikingOf, order: orderSelect.value, refresh: true,
+  refreshBtn.title = updateCell
+    ? `Load c${record.id} again from Viking (its synapses, as the row's Update does), then ask for every `
+      + 'partner and label again'
+    : 'Ask Viking again for every partner and label';
+  refreshBtn.addEventListener('click', async () => {
+    refreshBtn.disabled = true;
+    let current = record;
+    if (updateCell) {
+      try {
+        current = (await updateCell()) || record;
+      } catch (error) {
+        refreshBtn.disabled = false;
+        card.append(el('p', 'error', `c${record.id} not loaded again: ${error?.detail || error?.message || error}`));
+        return;
+      }
+    }
+    // Updating redraws the Analyses tab when the cell changed; this card is then gone.
+    if (!card.isConnected) return;
+    fillLinkedNeuronsCard(card, current, {
+      api, pick, volumeName, vikingOf, updateCell, order: orderSelect.value, refresh: true,
     });
   });
   tools.append(refreshBtn);

@@ -630,6 +630,26 @@ def create_app() -> FastAPI:
         )
 
     @app.middleware("http")
+    async def api_answers_are_not_stored(request: Request, call_next):
+        """Every ``/api/`` answer is ``Cache-Control: no-cache`` unless the route set its own.
+
+        What the API answers is Viking's now, and every request asks again; a
+        browser or a proxy must not answer one from an earlier response
+        without asking the server.  None did (no API answer carried a date or
+        a lifetime, and nginx keeps no proxy cache), but only by omission: a
+        ``Last-Modified`` added to a route, or a ``proxy_cache`` added to
+        nginx, would have let them (audit of 2026-11-20).  Not ``no-store``:
+        under it Chrome reported the finished binary surface download as
+        aborted once the page let go of it (``check_app.py --only download``
+        failed 3 of 4 runs with it, passed 3 of 3 without it and 3 of 3 with
+        ``no-cache``), and ``no-cache`` already forbids a reuse unasked.
+        """
+        response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers.setdefault("Cache-Control", "no-cache")
+        return response
+
+    @app.middleware("http")
     async def cap_saved_documents(request: Request, call_next):
         """Refuse a saved document over the size limit before it is read.
 

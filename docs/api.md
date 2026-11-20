@@ -20,7 +20,7 @@ geometry logic lives in the web layer.
 | GET | `/api/volumes` | every volume the caller may open (see below): `name`, `display_name`, its capabilities, `viking_name`, `has_transforms` (whether the volume's current section transforms are read here, so its cells can be drawn where Viking draws them now; the viewer offers that switch, and the Position shift pairs that need it, only where it is true), `lab` (`Neitz`, `Marc`; null for the demo), and what a load that names neither gets: `default_registration` (the current section transforms) and `default_correction` (`off` or `neighbor`; the web app's is `neighbor`, the residual field, on every volume since 2.42.0; `all` on the Neitz lab's volumes and `curvefit` on the others before), and `display_defaults`, the Display settings the viewer starts the volume with until they are set by hand on it (`{"flip_z": true}` for RC2, whose GCL lies on the +Z side of its INL; `false` elsewhere) |
 | GET | `/api/volumes/{source}` | one volume's scale and capabilities |
 | GET | `/api/volumes/{source}/facts` | what Viking says of a volume beyond `/api/volumes/{source}` (since 2.45.0, for the Settings tab's Volumes card): `scale_nm` (nm/pixel X, Y, nm/section Z) as a load reads it and `scale_from` (`viking`, its OData `Scale`; `stored`, the volume's override (Nasal); `fallback`, Viking did not answer), and the damaged sections the set its section correction uses lists (`volume_name`, `stos_group`, `built_utc`, `damaged_listed`, `damaged_z`, and `damaged_note` saying why when none are listed). The scale is cached on disk once read, the sets for ten minutes |
-| GET | `/api/volumes/{source}/search?label=&exact=` | structures matching a label (`type_id` is always null: the query does not select it); a label's `&`, `#`, `%`, `+` and `;` reach Viking's filter percent-encoded, so they match as written; the answer is kept for an hour |
+| GET | `/api/volumes/{source}/search?label=&exact=` | structures matching a label (`type_id` is always null: the query does not select it); a label's `&`, `#`, `%`, `+` and `;` reach Viking's filter percent-encoded, so they match as written; asked of Viking every time (kept for an hour until 2026-11-20) |
 | GET | `/api/volumes/{source}/locations/{location_id}` | where one Viking annotation is: `{id, parent_id, structure_id, xyz_um, viking, radius_um, loaded}`. A loaded cell of the volume that holds it answers (from the copy named by `?copy=`, else the one loaded last; `loaded: true`, in that cell's micron frame), otherwise Viking is asked (`loaded: false`). 404 when neither knows it (offline, only the loaded cells can), 502 when Viking cannot be asked. Location IDs are numbered per volume |
 | GET | `/api/viking/session` | who Viking says the caller is, the volumes it shared with them, and the ones it shared that this tool cannot render; reports `enabled: false` when Viking sign-in is off |
 | POST | `/api/volumes/{source}/resolve-structures` | parse a structure specification (`{"text": "..."}` — IDs, ranges, and label terms in the Viking export portal's grammar) and resolve the labels to IDs |
@@ -102,7 +102,7 @@ measures with its `copy_tag` as `?copy=`, reads its `/nodes` and
 | PUT | `/api/neurons/{source}/{id}/render-prefs` | attach a render option set to this cell; validated like the mesh endpoint's options, returned with defaults filled. It keeps the view's own options with the geometry (`clip_ipl`, `keep_above`, `color_by_strata`, `clip_z`; a cut that is off is left out of the stored document). `ipl_method` is taken and never stored: how depth is measured is the page's setting, not a cell's. `{id}` is a 32-bit structure ID (422 otherwise); the server holds at most 5,000 attached renders (507 past that, for a cell that has none yet) |
 | DELETE | `/api/neurons/{source}/{id}/render-prefs` | remove the attached render |
 | GET | `/api/neurons/{source}/{id}/last-modified` | the cell's newest annotation as Viking has it now (asked live, never answered from the disk cache, which has no expiry): `{id, last_modified, username, xyz_um}`; `last_modified` is the UTC instant, written with a `Z` (Viking labels UTC wall-clock time Pacific, which read 7 h late), `xyz_um` is the annotation's place in the loaded cell, `null` for a synapse annotation of a child structure. 404 when the cell has no annotations; 502 when Viking cannot be asked |
-| GET | `/api/neurons/{source}/{id}/freshness` | `{loaded, live, stale, surface_stale, children_stale, loaded_count, live_count}`: the cell's own annotations as the loaded data has them and as Viking's `StructureFreshness` reports them now (never from the cache), dates in UTC; `surface_stale` when the newest edit is later or the count differs (so a deletion counts), `children_stale` when only its child structures' annotation count does |
+| GET | `/api/neurons/{source}/{id}/freshness` | `{loaded, live, stale, surface_stale, children_stale, links_stale, loaded_count, live_count}`: the cell's own annotations as the loaded data has them and as Viking's `StructureFreshness` reports them now (never from the cache), dates in UTC. `surface_stale` when the newest edit is later, the count differs (so a deletion counts) or its LocationLinks differ (`links_stale`: their count, or a newer newest link, since a link made or removed between existing annotations moves no stamp). `children_stale` when only its child structures differ, by count or, since 2026-11-20, by their newest edit (a synapse retagged or moved) |
 | POST | `/api/neurons/freshness` | the same for many cells at once, one Viking request per volume: `{"cells": [{source, id, copy?}]}`; a cell that cannot be answered has `freshness: null` and its `error` |
 | POST | `/api/neurons` with `check_fresh: false` | load without the freshness check (the viewer asks for a whole batch afterward) |
 | GET | `/api/neurons/{source}/{id}/synapses/{type}/mesh?radius_um=&shape=circle` | a marker per synapse of the type: `shape=circle` (the default) a sphere of `radius_um`, as MATLAB's `synapseSphere` drew them; `shape=oval` an ellipsoid aligned to the annotation's own `LINESTRING` axis, which shows which way each synapse was drawn |
@@ -208,7 +208,18 @@ ID, type, label, direction, position in µm), `partners` (synapse counts per
 partner and type) and the totals. `order=neuron` is the MATLAB function's
 ordering, `order=type` the lab's `getAllLinkedNeurons_sorted` ordering. The
 `.csv` and `.xlsx` forms are downloads named `c{id}-{source}-linked-neurons`.
-Links are cached with the neuron; `refresh=true` asks Viking again. Each row
+Every request asks Viking for the links and labels; until 2026-11-20 they were
+kept with the neuron and on disk, and `refresh=true` re-read those. `refresh`
+is accepted and changes nothing. The answer adds three fields:
+
+- `asked_at` (UTC): when Viking was asked.
+- `answered_from`: set when Viking could not be reached and some links or
+  labels are the last answer it gave (UTC, the oldest one).
+- `freshness`: whether Viking has changed the cell, its synapses included,
+  since it was loaded, as `GET .../freshness` answers it; `null` when that
+  could not be asked.
+
+Each row
 also carries the synapse's Viking `tags`, its `tag_status` (`tagged`,
 `inferred`, `untagged` or `assumed` for a postsynapse; blank where the Viking
 type alone decides), the `suggested_tag` an inferred one is missing, and a
@@ -321,8 +332,12 @@ child structure IDs of each synapse), `matrix` (rows, cols and the path
 indices per cell), `node_table` (one row per intermediate neuron with path
 indices per `"length:position"` column), and the search's bookkeeping:
 `n_paths`, `truncated`, `frontier_capped`, `expanded`, `unexpanded`,
-`seconds`, and the size of the volume's cached link graph. Each hop costs
-two batched Viking requests; a bad pattern is a 400, a Viking failure a 502.
+`seconds`, and the size of the link graph the query fetched. Every query
+starts its own graph and asks Viking for all of it: a link made or a cell
+labeled in Viking is in the next query. Until 2026-11-20 a volume's graph was
+kept from query to query and only `refresh` started it again. `refresh` is
+still accepted and changes nothing. Each hop costs two batched Viking
+requests; a bad pattern is a 400, a Viking failure a 502.
 
 ## Network and export
 

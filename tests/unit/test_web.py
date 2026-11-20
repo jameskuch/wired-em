@@ -1422,6 +1422,20 @@ class _FakeViking:
         return [{"ID": 943, "Label": "GC", "TypeID": 1},
                 {"ID": 555, "Label": "ON parasol", "TypeID": 1}]
 
+    # The report asks whether the cell changed since it was loaded: a Viking
+    # without the freshness action, whose per-cell fallback cannot answer either.
+    def structure_freshness(self, ids, *, depth=0):
+        from sbfsem.io.odata import ODataError
+        raise ODataError("no such action")
+
+    @contextlib.contextmanager
+    def fresh(self):
+        yield
+
+    def get_last_annotations(self, structure_id, n=1):
+        from sbfsem.io.odata import ODataError
+        raise ODataError("not answered")
+
 
 @pytest.fixture
 def faked_viking(client):
@@ -1454,6 +1468,9 @@ def test_linked_neurons_report(client, faked_viking):
                         "suggested_tag", "location_id", "synapse_shift_um"}
     assert row["synapse_shift_um"] is None  # no section correction on this cell
     assert body["partners"][0]["count"] >= 1
+    # When Viking was asked (every request), that it answered, and that whether
+    # the cell changed since its load could not be told here.
+    assert body["asked_at"] and body["answered_from"] is None and body["freshness"] is None
     # The sorted-script ordering is a query away.
     typed = client.get("/api/neurons/i/943/linked-neurons?order=type").json()
     assert typed["order"] == "type"
@@ -1494,10 +1511,12 @@ def test_connectivity_query_endpoint(client, faked_viking):
     assert body["expanded"] == 2 and faked_viking.calls == [[943], [555]]
     assert body["graph_nodes"] == 3 and body["graph_synapses"] == 2
 
-    # The graph is kept: the same query fetches nothing more.
+    # Every query asks Viking for all it needs (2026-11-20): a link made since
+    # is in the next one.  The graph was kept from query to query until then.
     again = client.post("/api/connectivity/query", json={
         "source": "i", "hops": 2, "start_ids": [943]}).json()
-    assert again["expanded"] == 0 and again["n_paths"] == 1
+    assert again["expanded"] == 2 and again["n_paths"] == 1
+    assert faked_viking.calls == [[943], [555], [943], [555]]
     size = client.get("/api/connectivity/i/graph").json()
     assert size == {"nodes": 3, "edges": 2, "expanded": 2, "synapses": 2}
 
@@ -1506,7 +1525,7 @@ def test_connectivity_query_endpoint(client, faked_viking):
         "source": "i", "hops": 1, "direction": "upstream", "start_pattern": "ON.*"}).json()
     assert up["anchors"] == [555] and up["paths"][0][0::2] == [943, 555]
 
-    # Refresh forgets the cached graph first.
+    # Refresh, as an older page sends it, changes nothing: every query is one.
     fresh = client.post("/api/connectivity/query", json={
         "source": "i", "hops": 1, "start_ids": [943], "refresh": True}).json()
     assert fresh["expanded"] == 1
@@ -1579,3 +1598,10 @@ def test_a_load_with_manual_moves_names_its_copy_and_a_bad_move_is_a_400(client)
     # Back to the plain copy for the tests that follow.
     body.pop("manual_moves")
     assert client.post("/api/neurons", json=body).json()["summary"]["copy_tag"] == "off.0"
+
+
+def test_api_answers_are_never_stored_by_a_browser_or_a_proxy(client):
+    """Every request asks Viking again; nothing between may answer it from before
+    (2026-11-20).  A route that names its own policy keeps it."""
+    assert client.get("/api/volumes").headers["cache-control"] == "no-cache"
+    assert client.get("/api/neurons/i/943/linked-neurons.txt").headers["cache-control"] == "no-cache"

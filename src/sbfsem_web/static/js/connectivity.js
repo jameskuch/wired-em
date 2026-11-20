@@ -350,7 +350,6 @@ export class ConnectivityView {
       max_paths: Number($('cx-max-paths').value) || 20000,
       max_frontier: Number($('cx-max-frontier').value) || 300,
       allow_repeats: $('cx-repeats').checked,
-      refresh: $('cx-refresh').checked,
     };
     if ($('cx-anchor-mode').value === 'loaded') {
       body.start_ids = this.anchorRecords().map((r) => r.id);
@@ -425,7 +424,6 @@ export class ConnectivityView {
     try {
       const result = await this.api.connectivity(body);
       this.setResult(result);
-      $('cx-refresh').checked = false;
     } catch (error) {
       status.textContent = error?.detail || error?.message || String(error);
       status.className = 'muted error';

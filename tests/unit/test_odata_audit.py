@@ -153,19 +153,16 @@ def test_annotation_info_is_the_utc_instant_whatever_label_the_row_wears(tmp_pat
     assert [row["Username"] for row in info] == ["sara", "sara"]
 
 
-# -- lists that expire --------------------------------------------------------
-def test_the_label_lists_are_asked_again_after_an_hour(tmp_path):
-    """A cache entry never expired: a vessel added or a cell labeled after the
-    first search was not found until someone cleared the disk."""
+# -- lists that grow: asked every time (2026-11-20) -----------------------------
+def test_the_label_lists_are_asked_every_time(tmp_path):
+    """A cache entry never expired, then expired after an hour (2026-10): a cell
+    labeled in Viking was not found for up to an hour.  The lists are live now."""
     client, cache, calls = _counting_client(
         tmp_path, [{"value": [{"ID": 1, "Label": "a"}]},
                    {"value": [{"ID": 1, "Label": "a"}, {"ID": 2, "Label": "ab"}]}])
     assert [r["ID"] for r in client.ids_by_label("a", exact_match=False)] == [1]
-    assert [r["ID"] for r in client.ids_by_label("a", exact_match=False)] == [1]
-    assert len(calls) == 1                        # young: from the disk
-    _age(cache, None, client.LIST_MAX_AGE + 60)
     assert [r["ID"] for r in client.ids_by_label("a", exact_match=False)] == [1, 2]
-    assert len(calls) == 2                        # old: asked again
+    assert len(calls) == 2                        # asked again at once
 
 
 @pytest.mark.parametrize("call", [
@@ -174,12 +171,9 @@ def test_the_label_lists_are_asked_again_after_an_hour(tmp_path):
     lambda c: c.query_labels(),
     lambda c: c.structures_by_type(3),
 ])
-def test_every_list_that_grows_expires(tmp_path, call):
+def test_every_list_that_grows_is_asked_every_time(tmp_path, call):
     client, cache, calls = _counting_client(tmp_path, [{"value": [{"ID": 1}]}])
     call(client)
-    call(client)
-    assert len(calls) == 1
-    _age(cache, None, client.LIST_MAX_AGE + 60)
     call(client)
     assert len(calls) == 2
 
@@ -192,18 +186,24 @@ def test_a_cell_s_own_rows_are_still_cached_for_good(tmp_path):
     assert len(calls) == 1
 
 
-def test_an_expired_list_is_kept_when_viking_cannot_be_reached(tmp_path):
+def test_a_list_is_kept_when_viking_cannot_be_reached_and_says_so(tmp_path):
     """Better the old answer than none: a service that is down must not take
-    Find with it."""
+    Find with it.  But the caller hears that it is the old one."""
     client, cache, calls = _counting_client(
         tmp_path, [{"value": [{"ID": 1, "Label": "a"}]}, 503])
     client.ids_by_label("a")
-    _age(cache, None, client.LIST_MAX_AGE + 60)
-    assert [r["ID"] for r in client.ids_by_label("a")] == [1]
+    stored = time.time() - 600
+    _age(cache, None, 600)
+    with client.answers_from_before() as old:
+        assert [r["ID"] for r in client.ids_by_label("a")] == [1]
     assert len(calls) == 2                        # it did try
-    # An offline client answers from what it holds, however old.
+    assert len(old) == 1 and "Label eq 'a'" in unquote(old[0].url)
+    assert old[0].stored_at == pytest.approx(stored, abs=2)
+    # An offline client answers from what it holds, however old, and says so too.
     offline = ODataClient("i", cache=cache, offline=True)
-    assert [r["ID"] for r in offline.ids_by_label("a")] == [1]
+    with offline.answers_from_before() as old:
+        assert [r["ID"] for r in offline.ids_by_label("a")] == [1]
+    assert len(old) == 1
 
 
 def test_a_list_is_not_assembled_from_two_moments(tmp_path):

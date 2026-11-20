@@ -34,7 +34,10 @@ export function meshCacheKey(record, signature) {
 function copyPrefix(record) {
   const summary = record.summary || {};
   const positions = String(summary.positions ?? '').replaceAll('|', '+');
-  return `${record.key}|${summary.copy_tag ?? ''}|${summary.data_stamp ?? ''}|${positions}|`;
+  // surface_token: the annotations' count and LocationLinks too, which the stamp
+  // does not see (a deletion, a link made in Viking), as the server's disk key does.
+  return `${record.key}|${summary.copy_tag ?? ''}|${summary.data_stamp ?? ''}`
+    + `+${summary.surface_token ?? ''}|${positions}|`;
 }
 
 /** Remove from `cache` (a Map, or a MeshCache) every key that starts with `prefix`. */
@@ -231,8 +234,9 @@ export function sharedRequest(pending, key, gen, send) {
 export function extrasKey(record, name) {
   const summary = record?.summary;
   if (!summary?.data_stamp) return null;
+  // viking_token: the synapses and links as well (GraphApp's synapse points are kept here).
   return [record.key, name, summary.data_stamp, summary.last_modified ?? '', summary.n_nodes ?? '',
-    summary.positions ?? ''].join('|');
+    summary.viking_token ?? '', summary.positions ?? ''].join('|');
 }
 
 /**

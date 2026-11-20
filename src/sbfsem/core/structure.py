@@ -111,6 +111,16 @@ class Structure:
         #: their annotations can only be compared with Viking's if they were
         #: fetched at all.
         self.children_loaded = False
+        #: ``(how many, the newest Created)`` of the structure's LocationLinks as
+        #: loaded: what Viking's freshness stamp leaves out (a link made or
+        #: removed between existing annotations touches no Location), compared
+        #: with ``ODataClient.location_link_signature``.  ``None``: not known.
+        self.link_signature: tuple[int, datetime | None] | None = None
+        #: The newest ``LastModified`` among the child structures' rows (those
+        #: Viking keeps without annotations too) and their Locations, as loaded:
+        #: with the cell's own stamp, what Viking's depth-1 freshness reports.
+        #: ``None``: children not loaded, or no stamps.
+        self.children_stamp: datetime | None = None
         #: Viking's section correction, when one was applied
         #: (:func:`sbfsem.io.corrections.apply_offsets`): the set, its build
         #: time and how far the annotations moved.  ``None`` = Viking's own

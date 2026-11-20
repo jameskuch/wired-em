@@ -37,11 +37,12 @@ from ..core.types import (
     postsynapse_kind,
 )
 from ..core.volumes import Volumes
-from .odata import ODataClient, parse_datetime
+from .odata import ODataClient, odata_utc, parse_datetime
 from .tags import parse_tags
 from .wkt import rings_in_volume_frame
 
-__all__ = ["NeuronLoader", "load_neuron", "load_structure", "InvalidStructureError"]
+__all__ = ["NeuronLoader", "load_neuron", "load_structure", "InvalidStructureError",
+           "link_signature", "newest_stamp"]
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +52,23 @@ class InvalidStructureError(ValueError):
 
     Ports the ``SBFSEM:NeuronOData:invalidTypeID`` error.
     """
+
+
+def link_signature(rows) -> tuple[int, datetime | None]:
+    """``(how many, the newest Created)`` of LocationLinks rows, in UTC: what
+    :meth:`~sbfsem.io.odata.ODataClient.location_link_signature` asks Viking."""
+    links = [r for r in rows or () if isinstance(r, dict) and "A" in r and "B" in r]
+    created = [odata_utc(r.get("Created")) for r in links]
+    stamps = [c for c in created if c is not None]
+    return len(links), (max(stamps) if stamps else None)
+
+
+def newest_utc(rows) -> datetime | None:
+    """The latest ``LastModified`` among OData rows as the UTC instant
+    (:func:`~sbfsem.io.odata.odata_utc`, whatever time label each row wears)."""
+    stamps = [odata_utc(r.get("LastModified")) for r in rows or () if isinstance(r, dict)]
+    found = [t for t in stamps if t is not None]
+    return max(found) if found else None
 
 
 def newest_stamp(rows) -> datetime | None:
@@ -70,6 +88,8 @@ class NeuronLoader:
         self.volume = Volumes.from_str(source)
         self.source = self.volume.source
         self.client = client or ODataClient(self.volume, **client_kwargs)
+        #: Set by :meth:`fetch_synapses` (see there).
+        self.children_stamp: datetime | None = None
 
     # -- pieces ------------------------------------------------------------
     def fetch_viking(self, structure_id: int) -> dict:
@@ -83,8 +103,12 @@ class NeuronLoader:
         return data
 
     def fetch_edges(self, structure_id: int) -> pd.DataFrame:
+        return self.fetch_edges_signed(structure_id)[0]
+
+    def fetch_edges_signed(self, structure_id: int) -> tuple[pd.DataFrame, tuple[int, datetime | None]]:
+        """The structure's LocationLinks as an edge table, and their :func:`link_signature`."""
         rows = self.client.fetch_location_links(structure_id)
-        return edges_from_odata(rows, structure_id)
+        return edges_from_odata(rows, structure_id), link_signature(rows)
 
     def fetch_geometries(self, structure_id: int, volume_scale,
                          locations: list[dict] | None = None) -> pd.DataFrame | None:
@@ -133,11 +157,16 @@ class NeuronLoader:
     def fetch_synapses(self, structure_id: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """Child structures with their annotations and links.
 
-        Returns ``(synapses, child_nodes, child_edges)``.
+        Returns ``(synapses, child_nodes, child_edges)``;
+        :attr:`children_stamp` is then the newest ``LastModified`` among the
+        child structures' rows (the ones dropped below included: Viking's
+        depth-1 freshness counts them) and their Locations.
         """
+        self.children_stamp = None
         children = self.client.fetch_children(structure_id)
         if not children:
             return _empty_synapses(), nodes_from_odata([]), empty_edges()
+        child_rows_stamp = newest_utc(children)
 
         synapses = pd.DataFrame(children)
         for name, dtype in SYNAPSE_COLUMNS.items():
@@ -157,6 +186,8 @@ class NeuronLoader:
 
         node_rows = self.client.fetch_locations_by_parents(child_ids)
         child_nodes = nodes_from_odata(node_rows)
+        stamps = [t for t in (child_rows_stamp, newest_utc(node_rows)) if t is not None]
+        self.children_stamp = max(stamps) if stamps else None
 
         # Viking keeps deleted synapses in the database with a structure ID and
         # links but no locations; drop them.
@@ -232,7 +263,7 @@ class NeuronLoader:
         if not rows:
             log.info("No locations for structure %u", structure_id)
         nodes = nodes_from_odata(rows)
-        edges = self.fetch_edges(structure_id)
+        edges, links_signed = self.fetch_edges_signed(structure_id)
 
         neuron = Neuron(
             structure_id,
@@ -247,6 +278,7 @@ class NeuronLoader:
             untagged_psd=untagged_psd,
         )
 
+        neuron.link_signature = links_signed
         if include_geometries and neuron.has_closed_curves:
             neuron.geometries = self.fetch_geometries(structure_id, volume_scale, rows)
 
@@ -255,6 +287,7 @@ class NeuronLoader:
             if untagged_psd == "infer":
                 neuron.psd_partners = self.fetch_psd_partners(synapses)
             neuron.merge_child_data(synapses, child_nodes, child_edges)
+            neuron.children_stamp = self.children_stamp
         return neuron
 
     def load_structure(self, structure_id: int, **kwargs) -> Structure:

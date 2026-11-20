@@ -3786,9 +3786,15 @@ as `getAllLinkedNeurons_sorted` (2025) wrote it. Click a column heading to
 sort by it; the filter box keeps rows whose partner, label, type or synapse
 ID contain what you type. **.csv** and **.xlsx** download the table in the
 chosen order, named with the cell and its volume
-(`c1178-NeitzInferiorMonkey-linked-neurons.xlsx`). **↻ Viking** resolves the
-partners again — links are cached with the cell, so an edit in Viking is not
-seen until then. **Synapses per partner** below collapses the table to one
+(`c1178-NeitzInferiorMonkey-linked-neurons.xlsx`). The partners and their
+labels are asked of Viking every time the table is shown, so a link made or
+a cell labeled in Viking is in the next view. The count line's tooltip gives
+the time Viking was asked. If Viking cannot be reached, a red line says the
+table is the last answer it gave, and from when. The synapses are those of the
+cell as loaded. When Viking has changed the cell since (its annotations, the
+links between them, or its synapses), a red line says so. **↻ Viking** loads
+the cell again from Viking, as the row's ↻ does, then shows the table.
+**Synapses per partner** below collapses the table to one
 row per partner and type. A partner ID is a button that puts it, with its
 volume, in the Structure ID box.
 

@@ -350,9 +350,11 @@ def test_a_failed_label_lookup_is_logged_and_marked_on_the_table(caplog):
     assert "labels_missing" not in ok.attrs and ok["NeuronLabel"].tolist() == ["B"]
 
 
-def test_the_service_does_not_keep_a_link_table_that_lacks_its_labels(i943_path, monkeypatch):
+def test_the_service_asks_viking_for_the_link_table_every_time(i943_path, monkeypatch):
     """A failed label lookup was swallowed and the blank-labeled table kept on the
-    cell until someone refreshed."""
+    cell until someone refreshed (W11 F10).  Then a whole table was kept, and a
+    label or link added in Viking after it was never seen (Inferior c51578,
+    2026-11-20): every call asks again now."""
     from sbfsem.io.legacy_json import read_legacy_json
     from sbfsem.service import facade
     from sbfsem.service.facade import SbfsemService
@@ -374,7 +376,7 @@ def test_the_service_does_not_keep_a_link_table_that_lacks_its_labels(i943_path,
         assert svc.links(neuron.id, neuron.source)["NeuronLabel"].tolist() == [""]
         assert svc.links(neuron.id, neuron.source)["NeuronLabel"].tolist() == ["B"]
         assert svc.links(neuron.id, neuron.source)["NeuronLabel"].tolist() == ["B"]
-        assert len(calls) == 2                       # kept once it was whole
+        assert len(calls) == 3                       # asked every time
     finally:
         svc.close()
 
@@ -397,3 +399,80 @@ def test_the_diameter_bins_are_bounded():
     for bad in (0.0, -1.0, 1e-9):
         with pytest.raises(ValueError):
             D.dendrite_diameter_by_soma_distance(neuron, bin_width=bad)
+
+
+# -- 2026-11-20: links and labels are Viking's now, every time ---------------------------------------
+def test_a_link_and_a_label_made_in_viking_are_in_the_next_report(tmp_path):
+    """Inferior c51578: synapse 211401 was linked and partner c211534 labeled in
+    Viking after the report was first built; the StructureLinks and label answers
+    were kept on disk for good, so the report showed them unlinked and unlabeled
+    for a day, through reloads and its own refresh."""
+    import httpx
+
+    from sbfsem.io.cache import DiskCache
+    from sbfsem.io.odata import ODataClient
+
+    viking = {"links": [], "labels": {211534: ""}, "down": False}
+
+    def handler(request):
+        if viking["down"]:
+            return httpx.Response(503)
+        query = request.url.params.get("$filter", "")
+        if "StructureLinks" in request.url.path:
+            rows = [r for r in viking["links"]
+                    if ("TargetID" in query and str(r["TargetID"]) in query)
+                    or ("SourceID" in query and str(r["SourceID"]) in query)]
+            return httpx.Response(200, json={"value": rows})
+        return httpx.Response(200, json={"value": [
+            {"ID": i, "Label": label} for i, label in viking["labels"].items()]})
+
+    client = ODataClient("i", client=httpx.Client(transport=httpx.MockTransport(handler)),
+                         cache=DiskCache(tmp_path))
+    cell = FakeCell(51578, "ConvPost", 211401)
+
+    first = all_linked_neurons(cell, client)
+    assert first["NeuronID"].isna().all(), "not linked yet"
+
+    viking["links"] = [{"SourceID": 211403, "TargetID": 211401,
+                        "Source": {"ParentID": 211534}, "Target": {"ParentID": 51578}}]
+    viking["labels"] = {211534: "AC"}
+    second = all_linked_neurons(cell, client)
+    assert second["NeuronID"].tolist() == [211534]
+    assert second["NeuronLabel"].tolist() == ["AC"]
+    assert "old_answers" not in second.attrs
+
+    # Viking down: the last answer, and the table says it is the last answer.
+    viking["down"] = True
+    third = all_linked_neurons(cell, client)
+    assert third["NeuronLabel"].tolist() == ["AC"]
+    assert third.attrs["old_answers"], "the caller can tell it is not current"
+
+
+def test_the_report_says_when_its_links_are_viking_s_last_answer(i943_path, monkeypatch):
+    """Viking down: the table is the stored answer, and the report names its age."""
+    from datetime import UTC, datetime
+
+    from sbfsem.io.legacy_json import read_legacy_json
+    from sbfsem.io.odata import OldAnswer
+    from sbfsem.service import facade
+    from sbfsem.service.facade import SbfsemService
+
+    stored = datetime(2026, 11, 19, 21, 30, tzinfo=UTC).timestamp()
+
+    def fake(neuron, client):
+        table = pd.DataFrame({"NeuronID": [2.0], "SynapseID": [int(neuron.synapses["ID"].iloc[0])],
+                              "SynapseType": ["ConvPost"], "NeuronLabel": [""], "Direction": ["post"],
+                              "PartnerSynapseID": [None]})
+        table.attrs["old_answers"] = [OldAnswer("u1", stored + 60), OldAnswer("u2", stored)]
+        return table
+
+    monkeypatch.setattr(facade, "all_linked_neurons", fake)
+    neuron = read_legacy_json(i943_path)
+    svc = SbfsemService(offline=True)
+    try:
+        svc.add_neuron(neuron)
+        report = svc.linked_neurons_report(neuron.id, neuron.source)
+        assert report.answered_from == datetime(2026, 11, 19, 21, 30, tzinfo=UTC), "the oldest"
+        assert report.asked_at is not None and report.freshness is None   # offline: not asked
+    finally:
+        svc.close()

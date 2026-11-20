@@ -8234,8 +8234,14 @@ function graphMenuItems(record, context, item) {
   if (renderer.selection) item('Deselect', () => renderer.clearSelection()).title = 'Also Esc';
 }
 
-/** A synapse picked in GraphApp: the readout says which, and what it links to (asked once per cell). */
-const linkedPartners = new Map();   // key@dataKey -> Map(synapse ID -> partner cell ID or null)
+/**
+ * A synapse picked in GraphApp: the readout says which, and what it links to.
+ * The partners are asked of Viking for the cell at most every LINKED_PARTNERS_MS:
+ * a link made in Viking changes nothing in the cell, so it was not seen until the
+ * page was reloaded while they were kept for good (2026-11-20).
+ */
+const LINKED_PARTNERS_MS = 20_000;
+const linkedPartners = new Map();   // key@dataKey -> { at, partners: Map(synapse ID -> partner ID or null) }
 async function showSynapsePick(record, synapse, locationId) {
   const text = $('pick-text');
   const said = `synapse ${synapse.id} ${synapse.type}`;
@@ -8246,12 +8252,16 @@ async function showSynapsePick(record, synapse, locationId) {
     lastPick.locationSource = record.source;
   }
   const cacheKey = `${record.key}@${dataKey(record)}`;
-  let partners = linkedPartners.get(cacheKey);
+  const kept = linkedPartners.get(cacheKey);
+  let partners = kept && Date.now() - kept.at < LINKED_PARTNERS_MS ? kept.partners : null;
   if (!partners) {
     try {
       const report = await api.linkedNeurons(record.source, record.id);
       partners = new Map(report.rows.map((row) => [row.synapse_id, row.neuron_id ?? null]));
-      linkedPartners.set(cacheKey, partners);
+      for (const key of [...linkedPartners.keys()]) {
+        if (key.startsWith(`${record.key}@`)) linkedPartners.delete(key);   // an earlier load's
+      }
+      linkedPartners.set(cacheKey, { at: Date.now(), partners });
     } catch {
       return;
     }
@@ -9066,6 +9076,11 @@ async function renderAnalyses() {
   await fillLinkedNeuronsCard(links, record, {
     api, pick: pickStructure, volumeName,
     vikingOf: ([x, y, z]) => vikingFromUm({ x, y, z }, pickScale(record)),
+    // ↻ Viking is the row's Update first: the synapses as Viking has them now.
+    updateCell: async () => {
+      await refetchCell(record);
+      return state.neurons.get(record.key) ?? record;
+    },
   });
 }
 

@@ -1295,10 +1295,15 @@ shown without a word:
   fetched with the synapses the call asks for and with the transform it names;
   a cell handed to `add_neuron` (a file) is taken as it is.  A copy it holds, or
   one the disk cache gives it, is checked against Viking first
-  (`_viking_newer`: `StructureFreshnessBatch` at depth 0, compared as the
-  freshness route compares, at most every `FRESH_CHECK_S` = 30 s per copy) and
-  fetched again past the cache when Viking is newer; an offline service, unstamped
-  data and an unanswered question keep the copy.
+  (`_viking_newer`, at most every `FRESH_CHECK_S` = 5 s per copy) and fetched
+  again past the cache when Viking has changed anything the copy was built from.
+  The check asks `StructureFreshnessBatch` at depth 0 for its annotations and the
+  LocationLinks signature for its links, since a link made or removed between
+  existing annotations moves no stamp. For a copy loaded with children it also
+  asks depth 1, for the children's newest edit and count. All of it is compared
+  as the freshness route compares. Until 2026-11-20 only depth 0 was asked, and
+  for 30 s. An offline service, unstamped data and an unanswered question keep
+  the copy.
 - `locate` answers from the copy named by the request (`requested_copy`), else
   the one loaded last.
 - A build process killed from outside (the kernel's out-of-memory killer) fails
@@ -1325,19 +1330,49 @@ An uncached URL then raises `ODataError` instead of reaching the network.
 
 ### What the disk cache keeps, and for how long
 
-A cell's own rows (its locations, links, children, closed curves) are kept for
-good: they are asked again only for a refresh (`client.fresh()`, "update this
-cell from Viking"). The lists that grow are not: `ids_by_label` (which also serves
-the cone lists, `ConeMosaic.cone_ids`), `resolve_label`, `query_labels` (which the
-Graffinity start set reads) and `structures_by_type` (a structure group's list:
-the vessels and their adjacencies, and the boundary layers' structures) are asked
-again after `ODataClient.LIST_MAX_AGE` (one hour). When Viking cannot be reached
-the older answer is returned, and an `offline` client answers from whatever it
+Every query method of `ODataClient` has a policy, in `QUERY_POLICIES`, which
+`tests/unit/test_odata_policies.py` enforces. The reasons, measured case by
+case, are in
+[docs/context/viking-freshness-audit-2026-11-20.md](context/viking-freshness-audit-2026-11-20.md).
+
+**live** queries are asked of Viking every time (`max_age=LIVE`). They are:
+
+- StructureLinks (the linked-neurons table, the network, Graffinity);
+- other structures' labels and types;
+- the lists that grow: `ids_by_label`, `resolve_label`, `query_labels`,
+  `structures_by_type`;
+- provenance, "the last ...", counts;
+- one Location (`get_location`);
+- a cell's LocationLinks signature (`location_link_signature`).
+
+Until 2026-11-20 the links and labels were kept for good and the lists for an
+hour. A link made or a cell labeled in Viking was then not seen through
+reloads or refreshes, because nothing Viking reports shows that such an answer
+has aged. When Viking cannot answer, the stored answer is returned, and
+`client.answers_from_before()` names each one, with when it was stored, so a
+report can say it is not current. An `offline` client answers from whatever it
 holds, however old. A list of several pages is one moment or the other, never
 both: its pages are stored together once the whole list is in, and if a page
-cannot be had after the one before it was asked again (or the reverse), the older
-list is returned whole, from entries nothing has overwritten (a page with no
-older answer fails the call, and nothing of it is kept).
+cannot be had after the one before it was asked again (or the reverse), the
+older list is returned whole, from entries nothing has overwritten (a page
+with no older answer fails the call, and nothing of it is kept).
+
+**checked** queries are a cell's own rows: its locations, links, children and
+their locations and links, and closed curves. These are kept, and the web
+service checks every copy it loads against Viking, re-asking inside
+`client.fresh()` when the copy is stale (see *The service* above). The check
+covers:
+
+- the newest edit and count of its annotations;
+- its LocationLinks signature;
+- for a copy loaded with children, the children's newest edit and count.
+
+A library script that loads a cell twice gets the first answer back unless it
+asks inside `fresh()`.
+
+The batches of one query (`IN_BATCH_SIZE` IDs each) are asked side by side,
+`BATCH_WORKERS` = 4 at a time. A `fresh()` and a collector of old answers reach
+the threads that ask them.
 `DiskCache.get(url, max_age=)` is the primitive; the cache's
 own `ttl` is the default limit and the product sets none. Nothing bounds the
 cache's size (3.0 GB in 5,952 files on the development machine, 2026-10-16), and

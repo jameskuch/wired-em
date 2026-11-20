@@ -148,6 +148,13 @@ test('dataKey is the same for the same load and tolerates a missing summary', ()
   assert.notEqual(S.dataKey({ summary: { data_stamp: 's' } }), S.dataKey({ summary }));
 });
 
+test('a synapse added or retagged, or a link made, in Viking is another dataKey (2026-11-20)', () => {
+  // The stamp is the newest of the cell's own annotations: none of these moves it.
+  const k = (viking_token) => S.dataKey({ summary: { data_stamp: 's', copy_tag: 'neighbor.1', viking_token } });
+  assert.notEqual(k('3f1c0a9b2d11'), k('77aa01c2e9f0'), 'what an Update fetched is named');
+  assert.equal(k('3f1c0a9b2d11'), k('3f1c0a9b2d11'));
+});
+
 // -- annotation depth ----------------------------------------------------------------
 test('a display saved before "flat" was its own setting, Depth 0, takes the least height (2026-10-27)', () => {
   // Every display saved before then has discDepth 0 and no discFlat: 0 was the default.

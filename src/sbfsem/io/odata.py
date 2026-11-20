@@ -21,6 +21,24 @@ Deviations from the MATLAB original (see DEVIATIONS.md):
 * ``getUsernames``/``getContributions`` concatenated variable-length char rows
   (F030); Python returns a list of trimmed strings.
 
+**Which answers may be reused** (2026-11-20; the audit is
+``docs/context/viking-freshness-audit-2026-11-20.md``).  Every query method
+has one of two policies, named in :data:`QUERY_POLICIES` and checked by
+``tests/unit/test_odata_policies.py``:
+
+* ``live``: asked of Viking every time (``max_age=``:data:`LIVE`).  Links
+  between structures, other structures' labels and types, lists that grow,
+  provenance, "the last ...".  Nothing Viking can report proves an earlier
+  answer still holds: a StructureLink touches neither structure's row, and a
+  label belongs to a cell nobody loaded.  The disk copy is used only when Viking
+  cannot answer, and :meth:`ODataClient.answers_from_before` lets a caller say
+  so.  Inferior c51578's partners stayed unlabeled and five of its synapses
+  "unlinked" for a day because these were read once and kept (2026-11-20).
+* ``checked``: a cell's own rows (its Locations, LocationLinks, child
+  structures and their Locations and links, its closed curves).  Kept on disk;
+  a caller that serves them checks them against Viking first (the web service's
+  freshness check), or asks again inside :meth:`ODataClient.fresh`.
+
 Ports kept for the library and reached only from tests (audit 2026-10-15,
 W10 F23): ``get_url``, ``count_cells_in_volume``, ``count_locations_in_volume``,
 ``annotations_by_section``, ``get_linked_ids``, ``get_usernames``,
@@ -40,19 +58,61 @@ import re
 import threading
 import urllib.parse
 from collections.abc import Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
 from ..core.volumes import Volumes
 from .cache import DiskCache
 
-__all__ = ["ODataClient", "ODataError", "odata_url", "odata_utc", "parse_datetime"]
+__all__ = ["LIVE", "QUERY_POLICIES", "ODataClient", "ODataError", "OldAnswer", "odata_url",
+           "odata_utc", "parse_datetime"]
 
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 120.0
+
+#: ``max_age`` of a question asked every time: no stored answer is young enough.
+LIVE = 0.0
+
+#: Every query method of :class:`ODataClient` and whether its answer may be
+#: reused (see the module docstring).  ``fixed`` is the volume's scale, which
+#: Viking does not change.  A method missing here fails
+#: ``tests/unit/test_odata_policies.py``.
+QUERY_POLICIES: dict[str, str] = {
+    # live: asked every time; the disk copy only when Viking cannot answer
+    "ids_by_label": "live", "resolve_label": "live", "query_labels": "live",
+    "structures_by_type": "live", "annotations_by_section": "live",
+    "get_label": "live", "get_labels": "live", "get_structures_brief": "live",
+    "get_linked_ids": "live", "get_location": "live", "get_usernames": "live",
+    "get_annotation_info": "live", "get_last_annotations": "live",
+    "get_last_modified_annotation": "live", "get_user_last_annotations": "live",
+    "get_user_last_structures": "live", "get_geometry_types": "live",
+    "fetch_location_provenance": "live", "fetch_location_provenance_by_parents": "live",
+    "fetch_child_provenance": "live", "get_contributions": "live",
+    "fetch_structure_links": "live", "fetch_links_by_parent_structures": "live",
+    "location_link_signature": "live", "count_rewrites": "live",
+    "structure_freshness": "live", "count": "live", "count_cells_in_volume": "live",
+    "count_locations_in_volume": "live",
+    # checked: a cell's own rows, kept and checked against Viking before use
+    "get_structure": "checked", "fetch_locations": "checked",
+    "fetch_location_links": "checked", "fetch_children": "checked",
+    "fetch_closed_curves": "checked", "fetch_locations_by_parents": "checked",
+    "fetch_links_by_parents": "checked",
+    # fixed: does not change
+    "get_scale": "fixed", "scale_answer": "fixed",
+}
+
+
+class OldAnswer(NamedTuple):
+    """A live question answered from the disk because Viking could not be asked:
+    the URL, and when that answer was fetched (POSIX seconds; ``None`` if unknown).
+    A named tuple, so a table's ``attrs`` that carry it copy as pandas copies them."""
+
+    url: str
+    stored_at: float | None
 
 
 class ODataError(RuntimeError):
@@ -160,11 +220,13 @@ def odata_url(structure_id: int | None, source, url_type: str = "") -> str:
     if url_type == "location":
         return f"{base}Structures({structure_id})/Locations/"
     if url_type == "link":
-        return f"{base}Structures({structure_id})/LocationLinks/?$select=A,B"
+        # Created (2026-11-20): what the link signature of the copy is read from.
+        return f"{base}Structures({structure_id})/LocationLinks/?$select=A,B,Created"
     if url_type == "child":
         return (
             f"{base}Structures({structure_id})/Children"
-            "?$select=ID,TypeID,Tags,ParentID,Label"
+            # LastModified (2026-11-20): a synapse retagged in Viking is seen.
+            "?$select=ID,TypeID,Tags,ParentID,Label,LastModified"
         )
     if url_type == "scale":
         return f"{base}Scale"
@@ -213,6 +275,57 @@ class ODataClient:
     def bypassing_cache(self) -> bool:
         return bool(getattr(self._local, "fresh", False))
 
+    def _ask(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """One request to Viking, asked once more on a fresh connection when the
+        connection fails (not when it times out, and not for an HTTP status).
+
+        Every query here only reads, so asking again changes nothing in Viking.
+        A pooled keep-alive connection the server has closed while it sat idle
+        fails on its next use: on production, the first report after a deploy's
+        restore lost both its StructureLinks requests to ``[SSL:
+        UNEXPECTED_EOF_WHILE_READING]`` and was answered from the disk
+        (2026-11-20).  Such failures went unseen while those answers were read
+        from the disk for good.  The broken connection leaves the pool, so the
+        second try opens a new one.
+        """
+        for attempt in (1, 2):
+            try:
+                # .get / .post, as before: a client given in is held to those two.
+                response = getattr(self.client, method.lower())(url, **kwargs)
+                response.raise_for_status()
+                return response
+            except httpx.TimeoutException:
+                raise
+            except httpx.TransportError as exc:
+                if attempt == 2:
+                    raise
+                log.info("%s %s: %s; asked again on a new connection", method, url, exc)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    @contextlib.contextmanager
+    def answers_from_before(self) -> Iterator[list[OldAnswer]]:
+        """Collect the live questions inside that were answered from the disk.
+
+        A ``live`` query (:data:`QUERY_POLICIES`) falls back on the answer it
+        stored last time when Viking cannot be asked; the list this yields
+        names each one (:class:`OldAnswer`), so a report built from them can
+        say it is not current instead of passing for it.  Per thread, nested
+        collectors each see their own.
+        """
+        stack = getattr(self._local, "old", None)
+        if stack is None:
+            stack = self._local.old = []
+        found: list[OldAnswer] = []
+        stack.append(found)
+        try:
+            yield found
+        finally:
+            stack.pop()
+
+    def _note_old(self, url: str) -> None:
+        for found in getattr(self._local, "old", None) or ():
+            found.append(OldAnswer(url, self.cache.stored_at(url)))
+
     # -- lifecycle ---------------------------------------------------------
     @property
     def base_url(self) -> str:
@@ -244,19 +357,20 @@ class ODataClient:
         self.close()
 
     # -- primitives --------------------------------------------------------
-    #: How long a cached answer to a question about a *list* that grows (the
-    #: structures that carry a label, the vessels, the cones) is trusted, in
-    #: seconds.  A structure's own rows are cached forever (``fresh()`` asks
-    #: again); a list is wrong the day someone adds a vessel or labels a cell.
-    LIST_MAX_AGE = 3600.0
+    # The lists that grow (the structures that carry a label, the vessels, the
+    # cones) were trusted for an hour (``LIST_MAX_AGE``, 2026-10 to 2026-11-20):
+    # a cell labeled in Viking was not found for up to an hour.  They are
+    # ``live`` now (:data:`QUERY_POLICIES`); the whole labeled list of a volume
+    # is 85 KB and 0.13 s (Inferior, 2026-11-20).
 
     def get(self, url: str, *, use_cache: bool = True,
             max_age: float | None = None) -> dict[str, Any]:
         """GET one OData document, honouring the disk cache.
 
         ``max_age`` (seconds) distrusts a cached answer older than that and
-        asks Viking again.  If Viking cannot be reached the old answer is
-        returned rather than nothing, and an offline client always answers
+        asks Viking again; :data:`LIVE` (0) asks every time.  If Viking cannot
+        be reached the old answer is returned rather than nothing (and named
+        to :meth:`answers_from_before`), and an offline client always answers
         from what it holds.
         """
         return self._get(url, use_cache, max_age, False)[0]
@@ -272,7 +386,8 @@ class ODataClient:
         """
         old = None
         if use_cache and not self.bypassing_cache:
-            if not refresh:
+            # A live question (max_age 0) never takes a stored answer as young enough.
+            if not refresh and not (max_age is not None and max_age <= 0):
                 hit = self.cache.get(url, max_age=max_age)
                 if hit is not None:
                     return hit, "cache"
@@ -280,20 +395,22 @@ class ODataClient:
                 old = self.cache.get(url)  # whatever age it is
         if self.offline:
             if old is not None:
+                self._note_old(url)
                 return old, "old"
             raise ODataError(f"Offline mode: {url} is not cached")
         try:
-            response = self.client.get(url)
-            response.raise_for_status()
+            response = self._ask("GET", url)
             data = response.json()
         except httpx.HTTPError as exc:
             if old is not None:
                 log.warning("%s not refreshed (%s); using the older answer", url, exc)
+                self._note_old(url)
                 return old, "old"
             raise _failed(url, exc) from exc
         except ValueError as exc:
             if old is not None:
                 log.warning("%s not refreshed (not JSON); using the older answer", url)
+                self._note_old(url)
                 return old, "old"
             raise ODataError(f"OData response was not JSON: {url}") from exc
         if use_cache and store:
@@ -320,6 +437,7 @@ class ODataClient:
             rows, staged = self._collect(url, use_cache, max_age, store=False, one_moment=True)
         except _TwoMoments as why:
             log.warning("%s: %s; using the older answer whole", url, why)
+            self._note_old(url)
             return self._collect(url, use_cache, None, store=False)[0]
         for page_url, payload in staged:
             self.cache.set(page_url, payload)
@@ -372,8 +490,7 @@ class ODataClient:
         if self.offline:
             raise ODataError(f"Offline mode: {url} is not cached")
         try:
-            response = self.client.get(url)
-            response.raise_for_status()
+            response = self._ask("GET", url)
             return int(response.text.lstrip("\ufeff").strip())
         except httpx.HTTPError as exc:
             raise _failed(url, exc) from exc
@@ -408,8 +525,7 @@ class ODataClient:
         for start in range(0, len(ids), self.FRESHNESS_CHUNK):
             chunk = ids[start:start + self.FRESHNESS_CHUNK]
             try:
-                response = self.client.post(url, json={"IDs": chunk, "Depth": int(depth)})
-                response.raise_for_status()
+                response = self._ask("POST", url, json={"IDs": chunk, "Depth": int(depth)})
                 rows = response.json().get("value", [])
             except httpx.HTTPError as exc:
                 raise _failed(url, exc) from exc
@@ -424,7 +540,7 @@ class ODataClient:
     def count(self, url: str) -> int:
         """Ports ``util/import/countOData.m``."""
         joiner = "&" if "?" in url else "?"
-        payload = self.get(f"{url}{joiner}$count=true")
+        payload = self.get(f"{url}{joiner}$count=true", max_age=LIVE)
         for key in ("@odata.count", "odata.count"):
             if key in payload:
                 return int(payload[key])
@@ -484,7 +600,7 @@ class ODataClient:
                 f"{self.base_url}Structures?$filter=contains(Label,'{_quote(label)}')"
                 "&$select=ID,Label"
             )
-        return self.get_collection(url, max_age=self.LIST_MAX_AGE)
+        return self.get_collection(url, max_age=LIVE)
 
     def resolve_label(self, term: str) -> list[dict[str, Any]]:
         """Parent structures whose label contains ``term``, case-insensitively.
@@ -501,7 +617,7 @@ class ODataClient:
             f"?$filter=contains(tolower(Label),'{_quote(term.lower())}')"
             " and ParentID eq null&$select=ID,Label&$orderby=ID"
         )
-        return self.get_collection(url, max_age=self.LIST_MAX_AGE)
+        return self.get_collection(url, max_age=LIVE)
 
     def query_labels(self, search: str | None = None) -> list[dict[str, Any]]:
         """Every labeled structure in the volume.
@@ -510,7 +626,7 @@ class ODataClient:
         options instead of the OData JSON decoder (F067).
         """
         url = f"{self.base_url}Structures?$select=ID,Label,TypeID&$filter=Label ne null"
-        rows = self.get_collection(url, max_age=self.LIST_MAX_AGE)
+        rows = self.get_collection(url, max_age=LIVE)
         if search:
             needle = search.lower()
             rows = [r for r in rows if needle in str(r.get("Label", "")).lower()]
@@ -522,10 +638,10 @@ class ODataClient:
             f"{self.base_url}Locations?$filter=Z le {max(z)} and Z ge {min(z)}"
             " and TypeCode eq 1&$select=ID,ParentID,X,Y,Z,Radius"
         )
-        return self.get_collection(url)
+        return self.get_collection(url, max_age=LIVE)
 
     def get_label(self, structure_id: int) -> str:
-        data = self.get(f"{self.base_url}Structures({structure_id})?$select=Label")
+        data = self.get(f"{self.base_url}Structures({structure_id})?$select=Label", max_age=LIVE)
         return str(data.get("Label") or "").strip()
 
     def get_labels(self, structure_ids: Iterable[int]) -> dict[int, str]:
@@ -538,6 +654,7 @@ class ODataClient:
             "{base}Structures?$filter={filter}&$select=ID,Label",
             structure_ids,
             field="ID",
+            max_age=LIVE,
         )
         return {
             int(r["ID"]): str(r.get("Label") or "").strip()
@@ -556,12 +673,48 @@ class ODataClient:
         required, producing a malformed URL (F028).
         """
         url = f"{self.base_url}Locations({location_id})?$expand=LocationLinksA,LocationLinksB"
-        return self.get_collection(url)
+        return self.get_collection(url, max_age=LIVE)
+
+    def get_location(self, location_id: int) -> dict[str, Any]:
+        """One Location row as Viking holds it now (where Goto Location goes)."""
+        return self.get(f"{self.base_url}Locations({int(location_id)})", max_age=LIVE)
+
+    def location_link_signature(self, structure_id: int) -> tuple[int, datetime | None]:
+        """``(how many LocationLinks, the newest one's Created)`` of one structure.
+
+        What Viking's ``StructureFreshness`` cannot see: a link made or removed
+        between two annotations that already exist touches no Location, so
+        neither the newest edit nor the count moves (Inferior c51578: 369 of 571
+        links are newer than both their annotations; c211402's newest link is
+        3 ms newer than the stamp Viking gives, measured 2026-11-20).  The
+        count sees a link removed, the newest date one made, so the pair sees
+        any change.  One request, 0.12 s.  A link joins two annotations of one
+        structure, so its ``A`` end names the structure.
+        """
+        url = (
+            f"{self.base_url}LocationLinks?$filter=LocationA/ParentID eq {int(structure_id)}"
+            "&$orderby=Created desc&$top=1&$count=true&$select=A,B,Created"
+        )
+        if self.offline:
+            raise ODataError(f"Offline mode: {url} is never cached")
+        try:
+            response = self._ask("GET", url)
+            payload = response.json()
+        except httpx.HTTPError as exc:
+            raise _failed(url, exc) from exc
+        except ValueError as exc:
+            raise ODataError(f"OData response was not JSON: {url}") from exc
+        count = payload.get("@odata.count", payload.get("odata.count"))
+        if count is None:
+            raise ODataError(f"OData answered no count: {url}")
+        rows = payload.get("value") or []
+        newest = odata_utc(rows[0].get("Created")) if rows else None
+        return int(count), newest
 
     def get_usernames(self, structure_id: int) -> tuple[list[str], list[int]]:
         """Annotating usernames and their location IDs for a structure."""
         url = f"{self.base_url}Structures({structure_id})/Locations?$select=Username,ID"
-        rows = self.get_collection(url)
+        rows = self.get_collection(url, max_age=LIVE)
         return (
             [str(r.get("Username") or "").strip() for r in rows],
             [int(r["ID"]) for r in rows],
@@ -572,7 +725,7 @@ class ODataClient:
         out = []
         for sid in ids:
             data = self.get(
-                f"{self.base_url}Structures({sid})?$select=Username,LastModified"
+                f"{self.base_url}Structures({sid})?$select=Username,LastModified", max_age=LIVE
             )
             out.append(
                 {
@@ -588,7 +741,7 @@ class ODataClient:
             f"{self.base_url}Structures({structure_id})/Locations"
             f"?$orderby=LastModified desc&$top={int(n)}"
         )
-        return self.get_collection(url)
+        return self.get_collection(url, max_age=LIVE)
 
     def get_last_modified_annotation(self, structure_id: int) -> dict[str, Any] | None:
         """Ports ``util/import/getLastModifiedAnnotation.m`` (F068: its
@@ -602,7 +755,7 @@ class ODataClient:
             f"&$orderby=LastModified desc&$select=LastModified,ID,ParentID,TypeCode"
             f"&$top={int(n)}"
         )
-        return self.get_collection(url)
+        return self.get_collection(url, max_age=LIVE)
 
     def get_user_last_structures(
         self, username: str, n: int | None = None
@@ -613,7 +766,7 @@ class ODataClient:
         )
         if n is not None:
             url += f"&$top={int(n)}"
-        return self.get_collection(url)
+        return self.get_collection(url, max_age=LIVE)
 
     def get_geometry_types(self, structure_id: int) -> list[int]:
         """Distinct ``TypeCode`` values used by a structure's annotations.
@@ -623,7 +776,8 @@ class ODataClient:
         volume's URL alias (F066).
         """
         rows = self.get_collection(
-            f"{self.base_url}Structures({structure_id})/Locations?$select=TypeCode"
+            f"{self.base_url}Structures({structure_id})/Locations?$select=TypeCode",
+            max_age=LIVE,
         )
         return sorted({int(r["TypeCode"]) for r in rows if r.get("TypeCode") is not None})
 
@@ -637,7 +791,8 @@ class ODataClient:
         """Who wrote each of one structure's annotations, and when."""
         return self.get_collection(
             f"{self.base_url}Structures({int(structure_id)})/Locations"
-            f"?$select={self.PROVENANCE_SELECT}"
+            f"?$select={self.PROVENANCE_SELECT}",
+            max_age=LIVE,
         )
 
     def fetch_location_provenance_by_parents(
@@ -653,6 +808,7 @@ class ODataClient:
             "{base}Locations?$filter={filter}&$select=" + self.PROVENANCE_SELECT,
             parent_ids,
             batch_size=batch_size,
+            max_age=LIVE,
         )
 
     def fetch_child_provenance(self, structure_id: int) -> list[dict[str, Any]]:
@@ -665,7 +821,8 @@ class ODataClient:
         return self.get_collection(
             f"{self.base_url}Structures"
             f"?$filter=ParentID eq {int(structure_id)}"
-            "&$select=ID,TypeID,Label,Username,Created,LastModified"
+            "&$select=ID,TypeID,Label,Username,Created,LastModified",
+            max_age=LIVE,
         )
 
     def get_contributions(self, structure_ids: Iterable[int]) -> dict[str, int]:
@@ -680,7 +837,7 @@ class ODataClient:
     def structures_by_type(self, type_id: int) -> list[dict[str, Any]]:
         """Every structure of one Viking type.  Ports ``StructureGroup.queryByTypeID``."""
         url = f"{self.base_url}Structures?$filter=TypeID eq {int(type_id)}&$select=ID,ParentID"
-        return self.get_collection(url, max_age=self.LIST_MAX_AGE)
+        return self.get_collection(url, max_age=LIVE)
 
     # -- structure-level queries ------------------------------------------
     def fetch_locations(self, structure_id: int) -> list[dict[str, Any]]:
@@ -707,9 +864,37 @@ class ODataClient:
     IN_BATCH_SIZE = 100
     OR_BATCH_SIZE = 20
 
+    #: Batches of one query asked of Viking at once.  c51578's link report (208
+    #: synapses) took 2.1 s one request after another from the server
+    #: (2026-11-20); every answer is live now, so the waits are worth sharing.
+    BATCH_WORKERS = 4
+
+    def _carry(self, fn):
+        """``fn`` as it would run on this thread: inside :meth:`fresh` if this
+        thread is, and naming its old answers to this thread's collectors."""
+        fresh = self.bypassing_cache
+        collectors = list(getattr(self._local, "old", None) or ())
+
+        def run(*args, **kwargs):
+            before = (getattr(self._local, "fresh", False), getattr(self._local, "old", None))
+            self._local.fresh, self._local.old = fresh, collectors
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                self._local.fresh, self._local.old = before
+
+        return run
+
+    def _in_parallel(self, fn, items: list) -> list:
+        """``[fn(item) for item in items]``, up to :attr:`BATCH_WORKERS` at once, in order."""
+        if len(items) <= 1 or self.BATCH_WORKERS <= 1:
+            return [fn(item) for item in items]
+        with ThreadPoolExecutor(max_workers=min(self.BATCH_WORKERS, len(items))) as pool:
+            return list(pool.map(self._carry(fn), items))
+
     def _id_filter_query(
         self, template: str, ids: Iterable[int], *, field: str = "ParentID",
-        batch_size: int | None = None,
+        batch_size: int | None = None, max_age: float | None = None,
     ) -> list[dict[str, Any]]:
         """Run ``template`` once per batch of IDs, shrinking the batch on refusal.
 
@@ -717,19 +902,24 @@ class ODataClient:
         first attempt uses OData's ``in`` operator; if the server rejects it the
         query falls back to an ``or`` chain, and finally to one request per ID,
         so a deployment that supports none of the compact forms still works.
+        The batches are asked side by side (:attr:`BATCH_WORKERS`); ``max_age``
+        is :meth:`get`'s.
         """
         ids = [int(i) for i in ids]
         if not ids:
             return []
+        chunks = list(_chunks(ids, batch_size or self.IN_BATCH_SIZE))
         rows: list[dict[str, Any]] = []
-        for chunk in _chunks(ids, batch_size or self.IN_BATCH_SIZE):
-            rows.extend(self._filter_chunk(template, field, chunk))
+        for part in self._in_parallel(
+                lambda chunk: self._filter_chunk(template, field, chunk, max_age), chunks):
+            rows.extend(part)
         return rows
 
-    def _filter_chunk(self, template: str, field: str, chunk: list[int]) -> list[dict[str, Any]]:
+    def _filter_chunk(self, template: str, field: str, chunk: list[int],
+                      max_age: float | None = None) -> list[dict[str, Any]]:
         clause = f"{field} in ({','.join(str(i) for i in chunk)})"
         try:
-            return self.get_collection(self._build(template, clause))
+            return self.get_collection(self._build(template, clause), max_age=max_age)
         except ODataError:
             log.debug("`in` filter refused for %u ids; falling back to `or`", len(chunk))
 
@@ -737,14 +927,15 @@ class ODataClient:
         for group in _chunks(chunk, self.OR_BATCH_SIZE):
             clause = " or ".join(f"{field} eq {i}" for i in group)
             try:
-                rows.extend(self.get_collection(self._build(template, clause)))
+                rows.extend(self.get_collection(self._build(template, clause), max_age=max_age))
                 continue
             except ODataError:
                 log.debug("`or` filter refused for %u ids; falling back to one query per id",
                           len(group))
             for single in group:
                 rows.extend(
-                    self.get_collection(self._build(template, f"{field} eq {single}"))
+                    self.get_collection(self._build(template, f"{field} eq {single}"),
+                                        max_age=max_age)
                 )
         return rows
 
@@ -803,19 +994,13 @@ class ODataClient:
         ids = [int(i) for i in structure_ids]
         if not ids:
             return []
-        rows: list[dict[str, Any]] = []
-        seen: set[tuple] = set()
-        for field in ("SourceID", "TargetID"):
-            for row in self._id_filter_query(
+        return _unique_links(self._in_parallel(
+            lambda field: self._id_filter_query(
                 "{base}StructureLinks?$filter={filter}" + expand,
-                ids, field=field, batch_size=batch_size,
-            ):
-                key = (row.get("SourceID"), row.get("TargetID"))
-                if key in seen:
-                    continue
-                seen.add(key)
-                rows.append(row)
-        return rows
+                ids, field=field, batch_size=batch_size, max_age=LIVE,
+            ),
+            ["SourceID", "TargetID"],
+        ))
 
     def fetch_links_by_parent_structures(
         self, parent_ids: Iterable[int], batch_size: int | None = None
@@ -838,19 +1023,13 @@ class ODataClient:
         ids = [int(i) for i in parent_ids]
         if not ids:
             return []
-        rows: list[dict[str, Any]] = []
-        seen: set[tuple] = set()
-        for field in ("Source/ParentID", "Target/ParentID"):
-            for row in self._id_filter_query(
+        return _unique_links(self._in_parallel(
+            lambda field: self._id_filter_query(
                 "{base}StructureLinks?$filter={filter}" + expand,
-                ids, field=field, batch_size=batch_size,
-            ):
-                key = (row.get("SourceID"), row.get("TargetID"))
-                if key in seen:
-                    continue
-                seen.add(key)
-                rows.append(row)
-        return rows
+                ids, field=field, batch_size=batch_size, max_age=LIVE,
+            ),
+            ["Source/ParentID", "Target/ParentID"],
+        ))
 
     def get_structures_brief(self, structure_ids: Iterable[int]) -> dict[int, dict[str, Any]]:
         """``{ID: {"label", "type_id", "parent_id"}}`` for many structures, batched."""
@@ -858,6 +1037,7 @@ class ODataClient:
             "{base}Structures?$filter={filter}&$select=ID,Label,TypeID,ParentID",
             structure_ids,
             field="ID",
+            max_age=LIVE,
         )
         out: dict[int, dict[str, Any]] = {}
         for r in rows:
@@ -869,6 +1049,19 @@ class ODataClient:
                 "parent_id": int(r["ParentID"]) if r.get("ParentID") is not None else None,
             }
         return out
+
+
+def _unique_links(parts: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """The StructureLinks of both ends' queries, each once, in the order first seen."""
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple] = set()
+    for part in parts:
+        for row in part:
+            key = (row.get("SourceID"), row.get("TargetID"))
+            if key not in seen:
+                seen.add(key)
+                rows.append(row)
+    return rows
 
 
 def _chunks(items: list, size: int) -> Iterator[list]:

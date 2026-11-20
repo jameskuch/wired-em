@@ -2175,7 +2175,8 @@ def connectivity_query(request: Request, body: ConnectivityQueryBody):
 
 @router.get("/connectivity/{source}/graph")
 def connectivity_graph_size(request: Request, source: str):
-    """How much of the volume's link graph this server has fetched so far."""
+    """How much of the volume's link graph the last query fetched (each query
+    starts its own and asks Viking for all of it)."""
     return service(request).link_graph_size(_source(source))
 
 

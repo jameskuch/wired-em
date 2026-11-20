@@ -28,7 +28,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, NamedTuple, TypeVar
 
@@ -1302,18 +1302,24 @@ class SbfsemService:
 
     #: Seconds a copy's answer from Viking holds (:meth:`_viking_newer`): the
     #: loads of one cell in a burst (a session restored, a Registration switched)
-    #: ask once.
-    FRESH_CHECK_S = 30.0
+    #: ask once.  30 s until 2026-11-20: a reload within half a minute of an
+    #: edit in Viking was served the copy from before it.
+    FRESH_CHECK_S = 5.0
 
     def _viking_newer(self, neuron: Neuron) -> bool:
-        """Whether Viking holds a newer version of this copy's own annotations.
+        """Whether Viking holds a newer version of anything this copy was loaded with.
 
-        One ``StructureFreshnessBatch`` request (depth 0: about 30 ms from the
-        server, 170 to 300 ms for a volume's first), compared as the freshness
-        route compares (:func:`_compare_freshness`), at most every
-        :attr:`FRESH_CHECK_S` per copy.  An offline service, unstamped data and
-        a question Viking does not answer are never newer: the copy is used,
-        and the page's own freshness check says what it can.
+        Its own annotations (``StructureFreshnessBatch`` at depth 0), its
+        LocationLinks (:meth:`~sbfsem.io.odata.ODataClient.location_link_signature`:
+        a link made or removed between existing annotations moves no stamp) and,
+        for a copy loaded with them, its child structures (depth 1: a synapse
+        added, removed, moved or retagged) -- about 30 ms each from the server,
+        compared as the freshness route compares (:func:`_compare_freshness`),
+        at most every :attr:`FRESH_CHECK_S` per copy.  Until 2026-11-20 only the
+        first was asked, so a reload kept a copy whose links or synapses had
+        changed.  An offline service, unstamped data and a question Viking does
+        not answer are never newer: the copy is used, and the page's own
+        freshness check says what it can.
         """
         if self.offline or getattr(neuron, "data_stamp", None) is None:
             return False
@@ -1321,9 +1327,14 @@ class SbfsemService:
         checked = getattr(neuron, "fresh_checked_at", None)
         if checked is not None and now - checked < self.FRESH_CHECK_S:
             return False
+        client = self.client(neuron.source)
         try:
-            own = self.client(neuron.source).structure_freshness([int(neuron.id)], depth=0)
-            answer = _compare_freshness(neuron, own.get(int(neuron.id)), None)
+            own = client.structure_freshness([int(neuron.id)], depth=0)
+            family = (client.structure_freshness([int(neuron.id)], depth=1)
+                      if getattr(neuron, "children_loaded", False) else {})
+            links = self._link_signatures(client, {int(neuron.id)})
+            answer = _compare_freshness(neuron, own.get(int(neuron.id)), family.get(int(neuron.id)),
+                                        links.get(int(neuron.id)))
         except ODataError as exc:
             try:
                 answer = self._freshness_by_locations(neuron)
@@ -1332,11 +1343,13 @@ class SbfsemService:
                          "used as it is", neuron.id, neuron.source, exc)
                 return False
         neuron.fresh_checked_at = now
-        if answer.surface_stale:
-            log.info("c%s %s: Viking has newer annotations than the copy held (%s, %s annotations; "
-                     "now %s, %s): fetched again", neuron.id, neuron.source, answer.loaded,
-                     answer.loaded_count, answer.live, answer.live_count)
-        return bool(answer.surface_stale)
+        if answer.stale:
+            log.info("c%s %s: Viking has changed the cell since the copy held was fetched "
+                     "(annotations %s, %s; now %s, %s; links %s; children %s): fetched again",
+                     neuron.id, neuron.source, answer.loaded, answer.loaded_count, answer.live,
+                     answer.live_count, "changed" if answer.links_stale else "same",
+                     "changed" if answer.children_stale else "same")
+        return bool(answer.stale)
 
     #: Copies made with manual moves held per cell at most (each is a whole
     #: node table): a person nudging annotations makes a new set at each step.
@@ -1631,8 +1644,10 @@ class SbfsemService:
                     except ODataError as error:
                         out[index] = error
                 return
+            links = self._link_signatures(client, {int(n.id) for _, n in entries})
             for index, neuron in entries:
-                out[index] = _compare_freshness(neuron, own.get(neuron.id), family.get(neuron.id))
+                out[index] = _compare_freshness(neuron, own.get(neuron.id), family.get(neuron.id),
+                                                links.get(int(neuron.id)))
 
         # Volumes side by side: a mixed session (12 cells over 7 volumes) took
         # 0.65 s one volume after another, two requests each.
@@ -1644,6 +1659,27 @@ class SbfsemService:
             for volume, entries in by_volume.items():
                 ask(volume, entries)
         return [a if a is not None else ODataError("no answer") for a in out]
+
+    #: LocationLinks signatures asked at once (one request per cell).
+    LINK_SIGNATURE_WORKERS = 8
+
+    def _link_signatures(self, client, ids) -> dict[int, tuple[int, datetime | None]]:
+        """Each cell's LocationLinks signature, asked side by side; a cell Viking
+        does not answer for is left out (its links count as unchanged)."""
+        def one(structure_id: int):
+            try:
+                return structure_id, client.location_link_signature(structure_id)
+            except ODataError as exc:
+                log.info("c%s %s: LocationLinks signature not answered (%s)",
+                         structure_id, getattr(client, "source", ""), exc)
+                return structure_id, None
+        ids = sorted(ids)
+        if len(ids) == 1:
+            pairs = [one(ids[0])]
+        else:
+            with ThreadPoolExecutor(max_workers=min(self.LINK_SIGNATURE_WORKERS, len(ids) or 1)) as pool:
+                pairs = list(pool.map(one, ids))
+        return {i: sig for i, sig in pairs if sig is not None}
 
     def _freshness_by_locations(self, neuron: Neuron) -> FreshnessDTO:
         """The per-cell check from before ``StructureFreshnessBatch``: the newest
@@ -2152,6 +2188,7 @@ class SbfsemService:
             manual_moves=_manual_dto(getattr(neuron, "manual_moves", None)),
             copy_tag=getattr(neuron, "copy_tag", None),
             positions=positions_token(neuron),
+            **viking_tokens(neuron),
         )
 
     @staticmethod
@@ -2308,7 +2345,7 @@ class SbfsemService:
             )
         client = self.client(volume)
         try:
-            data = client.get(f"{client.base_url}Locations({int(location_id)})")
+            data = client.get_location(int(location_id))
         except (ODataError, OSError, RuntimeError, KeyError, ValueError) as exc:
             raise ValueError(
                 f"Location {location_id} is not known to {volume.display_name}: {exc}"
@@ -2797,21 +2834,21 @@ class SbfsemService:
         stamp, count = cell_freshness(neuron)
         disk_key: tuple = (*key[:-1], stamp.isoformat() if stamp else "unstamped", count,
                            GEOMETRY_VERSION)
-        # The key before 2026-10-15: the newest Location as labeled, and the
-        # cell's nodes with its children's.  Read once more on a miss and
-        # stored again under the new key, so the deploy does not rebuild every
-        # surface on disk.  REMOVE this read (the ``legacy`` key built below
-        # and its fallback after the disk-cache miss) in the commit that next
-        # bumps GEOMETRY_VERSION: the legacy key carries it, so from then on
-        # nothing on disk matches it.  Waiting for the entries to age out would
-        # wait for ever: the disk budget is 64 GB in production, and they are
-        # not pruned before it is reached.
-        legacy = neuron.data_stamp.isoformat() if neuron.data_stamp else "unstamped"
-        legacy_key: tuple = (*key[:-1], legacy, int(len(neuron.nodes)), GEOMETRY_VERSION)
+        # And its LocationLinks (2026-11-20): a link made or removed between two
+        # annotations that already exist moves neither the stamp nor the count,
+        # so a cell refreshed after its missing link was added in Viking (what
+        # the user guide tells an annotator to do about a slit) was served the
+        # surface from before.  Data with no signature (a JSON import) keeps the
+        # key it had.  The keys before this -- the one above alone, and the
+        # pre-2026-10-15 legacy key read once more on a miss -- are not read
+        # any more: nothing in them says which links a surface was built from,
+        # so a surface under them may be one a refresh is meant to replace.
+        links = _link_key(getattr(neuron, "link_signature", None))
+        if links is not None:
+            disk_key = (*disk_key, links)
         # An uncorrected cell keeps the key it always had.
         if token:
             disk_key = (*disk_key, token)
-            legacy_key = (*legacy_key, token)
         # Which mesh this is, for a client that holds it and wants numbers
         # attached to it: the disk key names the geometry's every input.
         mesh_id = hashlib.sha1(repr(disk_key).encode("utf-8")).hexdigest()[:12]
@@ -2831,10 +2868,6 @@ class SbfsemService:
                 raise flight[2]
             if self._disk_meshes is not None:
                 mesh = self._disk_meshes.get(disk_key)
-                if mesh is None and legacy_key != disk_key:
-                    mesh = self._disk_meshes.get(legacy_key)
-                    if mesh is not None:
-                        self._disk_meshes.put(disk_key, mesh)
                 if mesh is not None:
                     self._name_mesh(mesh, mesh_id)
                     self._cache_mesh(memo, mesh)
@@ -3936,15 +3969,19 @@ class SbfsemService:
         from ..io.structure_group import Vasculature
 
         volume = Volumes.from_str(source)
-        group = Vasculature(volume.source, client=self.client(volume))
-        # The vessel list first: through the disk cache that is a read, and it is
-        # asked of Viking again after ODataClient.LIST_MAX_AGE, so a vessel added
-        # since is found.  The memoized mesh is keyed on the vessels it holds; a
-        # key without them served the first build for as long as the process lived
-        # and never reached the expiry.
+        client = self.client(volume)
+        group = Vasculature(volume.source, client=client)
+        # The vessel list first, asked of Viking every time (0.1 s), so a vessel
+        # added since is found.  The memoized mesh is keyed on the vessels it
+        # holds -- a key without them served the first build for as long as the
+        # process lived -- and on what Viking says of each now (its annotations'
+        # newest edit and count, its LocationLinks), so a vessel traced further
+        # is drawn again; it was read from the disk for good until 2026-11-20.
         group.pull()
+        ids = sorted(int(i) for i in group.ids)
+        versions = self._vessel_versions(client, ids)
         key = ("vessels", volume.source, method, int(smooth_iterations),
-               round(float(reduce_fraction), 4), tuple(sorted(int(i) for i in group.ids)))
+               round(float(reduce_fraction), 4), tuple(ids), versions)
         with self._lock:
             cached = self._meshes.get(key)
             if cached is not None:
@@ -3955,7 +3992,11 @@ class SbfsemService:
             return self._context_dto(f"{volume.source}-vessels", EMPTY_MESH, volume.source,
                                      ipl_flatten, ipl_method)
         parts = []
-        for vessel in group.load_vessels().values():
+        # A miss is a vessel Viking has changed (or a first build): read past the
+        # disk.  When Viking did not answer, the disk is all there is.
+        with client.fresh() if versions is not None and not self.offline else contextlib.nullcontext():
+            vessels = group.load_vessels()
+        for vessel in vessels.values():
             try:
                 parts.append(cylinder_render(
                     vessel, method=2 if method in ("curvemesh", "tube") else 1,
@@ -3971,6 +4012,24 @@ class SbfsemService:
             mesh = mesh.decimate(float(reduce_fraction))
         self._cache_mesh(key, mesh)
         return self._context_dto(f"{volume.source}-vessels", mesh, volume.source, ipl_flatten, ipl_method)
+
+    def _vessel_versions(self, client, ids: list[int]) -> tuple | None:
+        """What Viking says of each vessel now, for the vessel mesh's memo key:
+        ``((id, newest edit, count, links), ...)``; ``None`` when it cannot be
+        asked (offline, or no answer), and then every build reads Viking anew."""
+        if self.offline or not ids:
+            return () if not ids else None
+        try:
+            own = client.structure_freshness(ids, depth=0)
+        except ODataError as exc:
+            log.info("%s vessels: freshness not answered (%s)", client.source, exc)
+            return None
+        links = self._link_signatures(client, set(ids))
+        return tuple(
+            (i, own[i][0].isoformat() if i in own else None, own[i][1] if i in own else None,
+             _link_key(links.get(i)))
+            for i in ids
+        )
 
     def closed_curves(self, neuron_id: int, source, *, z_section: int | None = None,
                       spline_points: int | None = None) -> list[ClosedCurveDTO]:
@@ -4412,12 +4471,20 @@ class SbfsemService:
             with self._lock:
                 loaded = self._copies.get(key, {}).get(copy_tag(want, live))
                 usable = loaded is not None and not refresh and self._satisfies(key, want, live)
-            if usable:
+            # A copy held, or the disk's, is checked against Viking first, as a
+            # load is (:meth:`_viking_newer`): a cell not open in the page went
+            # into the archive as first fetched, for good, until 2026-11-20.
+            if usable and loaded is not None and not self._viking_newer(loaded):
                 return loaded
-            bypass = client.fresh() if refresh else contextlib.nullcontext()
-            with bypass:
-                neuron = NeuronLoader(volume, client=client).load(
-                    int(structure_id), include_synapses=False, untagged_psd=self.untagged_psd)
+
+            def fetch(fresh: bool):
+                with client.fresh() if fresh else contextlib.nullcontext():
+                    return NeuronLoader(volume, client=client).load(
+                        int(structure_id), include_synapses=False, untagged_psd=self.untagged_psd)
+
+            neuron = fetch(refresh or usable)
+            if not (refresh or usable) and self._viking_newer(neuron):
+                neuron = fetch(True)
             if live:
                 neuron.registration_status = self._register(neuron, force=refresh)
             if want != "off":
@@ -4487,9 +4554,19 @@ class SbfsemService:
 
     # -- network -----------------------------------------------------------
     def links(self, neuron_id: int, source, *, refresh: bool = False) -> pd.DataFrame:
+        """The cell's synapses and who is on the other side, as Viking has them now.
+
+        Built anew on every call: Viking's links and its partners' labels
+        change without the cell changing, and no answer Viking gives says an
+        earlier table still holds.  The table was kept with the cell (and its
+        queries on disk for good) until 2026-11-20, when Inferior c51578 showed
+        four partners unlabeled and five synapses unlinked for a day, through
+        reloads and the report's refresh.  ``refresh`` is kept for callers
+        that pass it; every call is one.
+        """
+        del refresh
         neuron = self.neuron(neuron_id, source)
-        if refresh or neuron.links is None or neuron.links.attrs.get("labels_missing"):
-            neuron.links = all_linked_neurons(neuron, self.client(neuron.source))
+        neuron.links = all_linked_neurons(neuron, self.client(neuron.source))
         return neuron.links
 
     def linked_neurons_table(self, neuron_id: int, source, *, order: str = "neuron",
@@ -4500,9 +4577,26 @@ class SbfsemService:
 
     def linked_neurons_report(self, neuron_id: int, source, *, order: str = "neuron",
                               refresh: bool = False) -> LinkedNeuronsDTO:
-        """Andrea's report: every synapse, its partner and label, with counts."""
+        """Andrea's report: every synapse, its partner and label, with counts.
+
+        The links and labels are Viking's now (:meth:`links`); the synapses are
+        the loaded copy's, and the answer says whether Viking has changed the
+        cell since (``freshness``) and, when Viking could not be asked, how old
+        the links and labels shown are (``answered_from``).
+        """
         neuron = self.neuron(neuron_id, source)
-        table = self.linked_neurons_table(neuron_id, source, order=order, refresh=refresh)
+        asked_at = datetime.now(UTC)
+        links = self.links(neuron_id, source, refresh=refresh)
+        table = link_report(neuron, links, order)
+        old = [a.stored_at for a in links.attrs.get("old_answers", ())]
+        answered_from = (datetime.fromtimestamp(min(t for t in old if t is not None), UTC)
+                         if any(t is not None for t in old) else (asked_at if old else None))
+        try:
+            freshness = self.freshness(neuron_id, source)
+        except (ODataError, NeuronNotLoadedError, ValueError) as exc:
+            log.info("c%s %s: linked neurons served without a freshness answer (%s)",
+                     neuron_id, neuron.source, exc)
+            freshness = None
         # A section correction moved the synapse annotations; say by how much,
         # so what is copied for Viking can name Viking's own position.
         moved = neuron.nodes.drop_duplicates("ID").set_index("ID") \
@@ -4538,6 +4632,7 @@ class SbfsemService:
             rows=rows, partners=partners,
             n_synapses=len(rows), n_linked=len(linked), n_unlinked=len(rows) - len(linked),
             n_partners=len({r.neuron_id for r in linked}),
+            asked_at=asked_at, answered_from=answered_from, freshness=freshness,
         )
 
     # -- connectivity (Graffinity) ----------------------------------------
@@ -4570,11 +4665,19 @@ class SbfsemService:
         position still applies to them.  Each hop fetches the frontier's links and the labels of the
         neurons they reach in two batched requests, so a two-hop query over a
         few loaded cells costs a handful of round trips however many partners
-        they have.  ``refresh`` discards the volume's cached graph first.
+        they have.
+
+        Every query starts a graph of its own and asks Viking for all it needs:
+        a link made or a cell labeled in Viking is in the next query.  The
+        volume's graph was kept from query to query (and its queries on disk
+        for good) until 2026-11-20, and only a "Re-fetch links" box, unticked
+        after each run, started it again -- from the same disk answers.
+        ``refresh`` is kept for callers that send it; every query is one.
         """
+        del refresh
         volume = Volumes.from_str(source)
         client = self.client(source)
-        graph, lock = self._link_graph(source, refresh=refresh)
+        graph, lock = self._link_graph(source, refresh=True)
         started = time.perf_counter()
 
         patterns = list(node_patterns or [])
@@ -4615,8 +4718,8 @@ class SbfsemService:
                                        type_id=info["type_id"] if info else None)
                 query.start_ids = starts
             else:
-                # Every labeled parent structure in the volume, cached on disk
-                # by the client; the pattern picks the starts from it.
+                # Every labeled parent structure in the volume, asked now (85 KB
+                # for Inferior); the pattern picks the starts from it.
                 cells = client.query_labels()
                 for row in cells:
                     if row.get("ID") is None:
@@ -5146,27 +5249,82 @@ def _later(live: datetime, loaded: datetime) -> bool:
     return live - loaded > _SAME_EDIT
 
 
-def _compare_freshness(neuron, own, family) -> FreshnessDTO:
-    """One cell's loaded copy against Viking's ``(LastModified, count)`` answers."""
+def viking_tokens(neuron) -> dict[str, str]:
+    """``surface_token`` and ``viking_token`` of a copy (``NeuronSummaryDTO``):
+    short hashes of what it was built from in Viking, "" for unstamped data."""
+    stamp, count = cell_freshness(neuron)
+    if stamp is None:
+        return {"surface_token": "", "viking_token": ""}
+    surface = (stamp.isoformat(), count, _link_key(getattr(neuron, "link_signature", None)))
+    kids = odata_utc(getattr(neuron, "children_stamp", None))
+    everything = (*surface, bool(getattr(neuron, "children_loaded", False)),
+                  kids.isoformat() if kids else None, int(len(neuron.nodes)),
+                  int(len(neuron.edges)), int(len(getattr(neuron, "synapses", ()))))
+
+    def digest(value) -> str:
+        return hashlib.sha1(repr(value).encode("utf-8")).hexdigest()[:12]
+
+    return {"surface_token": digest(surface), "viking_token": digest(everything)}
+
+
+def _link_key(signature) -> tuple | None:
+    """A LocationLinks signature as it enters a mesh's disk key, or ``None``."""
+    if signature is None:
+        return None
+    newest = odata_utc(signature[1])
+    return ("links", int(signature[0]), newest.isoformat() if newest else None)
+
+
+def _links_differ(loaded, live) -> bool:
+    """Whether Viking's LocationLinks of a cell differ from the copy's:
+    ``(count, newest Created)`` each (:func:`~sbfsem.io.loader.link_signature`).
+    A different count is a link removed (or one more made); a newer newest
+    link is one made, whatever else was removed.  Either unknown: no."""
+    if loaded is None or live is None:
+        return False
+    if int(loaded[0]) != int(live[0]):
+        return True
+    newest_live, newest_loaded = odata_utc(live[1]), odata_utc(loaded[1])
+    if newest_live is None:
+        return False
+    return newest_loaded is None or _later(newest_live, newest_loaded)
+
+
+def _compare_freshness(neuron, own, family, links=None) -> FreshnessDTO:
+    """One cell's loaded copy against Viking's answers.
+
+    ``own`` and ``family`` are ``StructureFreshnessBatch``'s ``(LastModified,
+    count)`` at depth 0 and 1; ``links`` is the cell's LocationLinks signature
+    (:meth:`~sbfsem.io.odata.ODataClient.location_link_signature`), which the
+    stamp cannot see.  Any of them ``None``: not asked, or not answered.
+    """
     loaded, loaded_count = cell_freshness(neuron)
     if loaded is None or own is None:
         # Unstamped data is never stale; a structure Viking no longer knows has
         # nothing newer to offer.
         return FreshnessDTO(loaded=loaded, live=own[0] if own else None,
                             loaded_count=loaded_count, live_count=own[1] if own else None)
-    surface = _later(own[0], loaded) or own[1] != loaded_count
-    # The children by count only: added or removed synapse annotations.  Their
-    # newest edit cannot be compared -- Viking's depth-1 date also covers the
-    # child structure rows, which are not fetched, and the rows of deleted
-    # synapses Viking keeps with no annotations; Temporal c108, just
-    # fetched, read 28 min "newer" than its own annotations (2026-10-15).
-    children = bool(family is not None and getattr(neuron, "children_loaded", False)
-                    and family[1] != len(neuron.nodes))
+    links_stale = _links_differ(getattr(neuron, "link_signature", None), links)
+    surface = _later(own[0], loaded) or own[1] != loaded_count or links_stale
+    # The children: Viking's depth-1 answer is the cell's own rows and its child
+    # structures' rows and Locations together.  By count (a synapse annotation
+    # added or removed) and, since the copy keeps its children's newest edit
+    # (2026-11-20), by date: a synapse retagged or moved.  Until then the date
+    # could not be compared -- the child structure rows were not fetched (Temporal
+    # c108 read 28 min "newer" than its own annotations, 2026-10-15) -- so a
+    # retagged PSD never showed as a change.
+    children = False
+    if family is not None and getattr(neuron, "children_loaded", False):
+        children = family[1] != len(neuron.nodes)
+        kids = odata_utc(getattr(neuron, "children_stamp", None))
+        if kids is not None:
+            children = children or _later(family[0], max(loaded, kids))
     live = own[0]
     return FreshnessDTO(
         loaded=loaded, live=live, stale=surface or children,
         loaded_count=loaded_count, live_count=own[1],
         surface_stale=surface, children_stale=children and not surface,
+        links_stale=links_stale,
     )
 
 

@@ -19,7 +19,7 @@ def test_odata_urls_include_the_volume():
     assert odata_url(127, "i", "location").endswith(
         "NeitzInferiorMonkey/OData/Structures(127)/Locations/"
     )
-    assert odata_url(127, "i", "link").endswith("LocationLinks/?$select=A,B")
+    assert odata_url(127, "i", "link").endswith("LocationLinks/?$select=A,B,Created")
     assert "NeitzNM" in odata_url(127, "n", "child")
     assert odata_url(None, "i", "scale").endswith("/Scale")
     assert odata_url(None, "i", "").endswith("/OData/")

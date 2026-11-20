@@ -240,12 +240,16 @@ let loadCounter = 0;
  * copy is what was asked for, not what was done (a correction the service could
  * not make leaves `neighbor.1` uncorrected), so anything computed from the cell's
  * positions -- the Morphology numbers, the Skeleton check -- is cached on this
- * and goes stale when the choice or the moves change.
+ * and goes stale when the choice or the moves change.  `viking_token` names all
+ * the copy was built from in Viking, its synapses and links included: the stamp
+ * did not move for a synapse added or retagged, or a link made, so an Update that
+ * fetched them left the Morphology card, the Analyses tab and GraphApp's
+ * synapses as they were (2026-11-20).
  */
 export function dataKey(record) {
   const summary = record?.summary;
   const stamp = summary?.data_stamp || summary?.last_modified || '';
-  return `${stamp}|${summary?.copy_tag ?? ''}|${summary?.positions ?? ''}`;
+  return `${stamp}|${summary?.viking_token ?? ''}|${summary?.copy_tag ?? ''}|${summary?.positions ?? ''}`;
 }
 
 /**

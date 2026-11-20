@@ -9,7 +9,6 @@ import httpx
 import pytest
 
 from sbfsem.core.transforms import Transforms
-from sbfsem.geometry.mesh import Mesh
 from sbfsem.io.legacy_json import read_legacy_json
 from sbfsem.io.odata import ODataClient, ODataError, odata_utc, parse_datetime
 from sbfsem.service.facade import SbfsemService, cell_freshness
@@ -24,19 +23,30 @@ class FakeViking:
     """Viking answering both the batch action and the per-cell query alike."""
 
     def __init__(self, newest: str, own_count: int, family_count: int | None = None,
-                 *, batch: bool = True):
+                 *, batch: bool = True, links=None, family_newest: str | None = None):
         self.newest = newest
         self.own_count = own_count
         self.family_count = family_count
+        self.family_newest = family_newest
         self.batch = batch
+        #: ``(count, newest Created)`` of the LocationLinks; ``None``: not answered.
+        self.links = links
         self.calls: list[tuple] = []
+        self.link_calls: list[int] = []
 
     def structure_freshness(self, ids, *, depth=0):
         self.calls.append(("batch", tuple(sorted(set(ids))), depth))
         if not self.batch:
             raise ODataError("no such action")
         count = self.own_count if depth == 0 else self.family_count
-        return {int(i): (odata_utc(self.newest), count) for i in ids}
+        newest = self.newest if depth == 0 else (self.family_newest or self.newest)
+        return {int(i): (odata_utc(newest), count) for i in ids}
+
+    def location_link_signature(self, structure_id):
+        self.link_calls.append(int(structure_id))
+        if self.links is None:
+            raise ODataError("not answered")
+        return self.links
 
     @contextlib.contextmanager
     def fresh(self):
@@ -119,6 +129,47 @@ def test_children_are_compared_by_count_and_never_move_the_surface(service):
     assert not _ask(svc, FakeViking(LIVE, own_count=190, family_count=500)).stale
 
 
+# -- what the stamp cannot see (2026-11-20) -------------------------------------
+LINKED = datetime(2026, 10, 28, 21, 25, 41, 333333, tzinfo=UTC)
+
+
+def test_a_link_made_or_removed_between_existing_annotations_is_seen(service):
+    """Viking's stamp is the newest Location and the count: a LocationLink made or
+    removed between two annotations that exist touches neither (Inferior c51578:
+    369 of 571 links are newer than both their annotations)."""
+    svc, neuron = service
+    neuron.link_signature = (188, LINKED)
+    same = _ask(svc, FakeViking(LIVE, own_count=190, links=(188, LINKED)))
+    assert not same.stale and not same.links_stale
+    removed = _ask(svc, FakeViking(LIVE, own_count=190, links=(187, LINKED)))
+    assert removed.stale and removed.surface_stale and removed.links_stale
+    made = _ask(svc, FakeViking(LIVE, own_count=190,
+                                links=(188, datetime(2026, 11, 19, 22, 2, 38, tzinfo=UTC))))
+    assert made.stale and made.surface_stale and made.links_stale, "one removed, one made: newer"
+    # Viking not answering about links, or a copy with no signature: not a change.
+    assert not _ask(svc, FakeViking(LIVE, own_count=190, links=None)).stale
+    neuron.link_signature = None
+    assert not _ask(svc, FakeViking(LIVE, own_count=190, links=(1, LINKED))).stale
+
+
+def test_a_synapse_retagged_or_moved_is_seen_by_its_date(service):
+    """Children were compared by count alone, so a retagged PSD (the report's own
+    "Untagged PSDs" worklist asks for those) never showed as a change."""
+    svc, neuron = service
+    neuron.children_loaded = True
+    neuron.children_stamp = parse_datetime("2026-11-19T22:50:05.367Z")
+    kids = "2026-11-19T22:50:05.367Z"
+    same = _ask(svc, FakeViking(LIVE, own_count=190, family_count=199, family_newest=kids))
+    assert not same.stale
+    retagged = _ask(svc, FakeViking(LIVE, own_count=190, family_count=199,
+                                    family_newest="2026-11-20T09:00:00Z"))
+    assert retagged.stale and retagged.children_stale and not retagged.surface_stale
+    # Within one SQL tick (Viking answers milliseconds, the rows a third of one).
+    tick = _ask(svc, FakeViking(LIVE, own_count=190, family_count=199,
+                                family_newest="2026-11-19T22:50:05.370Z"))
+    assert not tick.stale
+
+
 def test_one_request_per_volume_for_many_cells(service):
     svc, neuron = service
     neuron.children_loaded = True
@@ -152,6 +203,7 @@ class _Loads:
     def __init__(self, i943_path, viking):
         self.path, self.viking = i943_path, viking
         self.stamp = CACHED
+        self.links = (188, LINKED)
         self.calls: list[str] = []
 
     def __call__(self, volume, client=None):
@@ -164,6 +216,7 @@ class _Loads:
                 neuron = read_legacy_json(loads.path)
                 neuron.transform = Transforms.from_str(transform)
                 neuron.data_stamp = parse_datetime(loads.stamp)
+                neuron.link_signature = loads.links
                 return neuron
 
         return Loader()
@@ -200,10 +253,11 @@ def test_a_load_checks_the_copy_against_viking_and_fetches_a_newer_one(i943_path
     """A load answered from the copy the server held, or from the disk cache,
     drew a cell as it was when first fetched: Temporal c162392, being traced,
     was drawn from its 1 annotation an hour after it had 153, and the build came
-    back empty (2026-10-21).  A load now asks Viking first, once per 30 s per copy."""
+    back empty (2026-10-21).  A load now asks Viking first, once per 5 s per copy
+    (30 s until 2026-11-20)."""
     import sbfsem.service.facade as facade_mod
 
-    viking = _Viking(LIVE, own_count=190)
+    viking = _Viking(LIVE, own_count=190, links=(188, LINKED))
     loads = _Loads(i943_path, viking)
     monkeypatch.setattr(facade_mod, "NeuronLoader", loads)
     svc = SbfsemService(offline=True)
@@ -235,6 +289,14 @@ def test_a_load_checks_the_copy_against_viking_and_fetches_a_newer_one(i943_path
         loads.stamp = CACHED
         load()
         assert loads.calls == ["cached", "fresh", "cached", "fresh"]
+
+        # A link made in Viking between annotations that exist: the stamp and
+        # count are as they were, and the copy is fetched again all the same.
+        viking.links = (189, datetime(2026, 11, 19, 22, 2, 38, tzinfo=UTC))
+        before = list(loads.calls)
+        load()
+        assert loads.calls == before + ["fresh"], "the link signature differs"
+        loads.links = viking.links
 
         # An explicit refresh asks nothing first.
         asked = len(viking.calls)
@@ -307,30 +369,76 @@ def test_mesh_key_is_the_cells_own_freshness(service):
 
 
 class FakeDisk:
-    """A disk cache holding one surface, under the key used before 2026-10-15:
-    the newest Location as labeled (``-07:00``) and every node, children too."""
+    """A disk cache of surfaces by key, remembering what was asked and stored."""
 
-    def __init__(self, mesh: Mesh):
-        self.mesh = mesh
+    def __init__(self, held: dict | None = None):
+        self.held = dict(held or {})
+        self.gets: list[tuple] = []
         self.puts: list[tuple] = []
 
     def get(self, key):
-        return self.mesh if "-07:00" in repr(key) and ", 199, " in repr(key) else None
+        self.gets.append(key)
+        return self.held.get(key)
 
     def put(self, key, mesh):
         self.puts.append(key)
+        self.held[key] = mesh
 
 
-def test_a_surface_under_the_old_key_is_served_and_stored_again(service, c943):
-    svc, _ = service
-    disk = FakeDisk(svc.build_mesh(c943, method="cylinder"))
+def test_the_disk_key_names_the_links_and_no_older_key_is_read(service, c943):
+    """A link made or removed between annotations that exist moves neither the
+    stamp nor the count, so a cell refreshed after its missing link was added in
+    Viking -- what the user guide tells an annotator to do about a slit -- was
+    served its surface from before.  The keys used before (without the links, and
+    the one before 2026-10-15) say nothing of the links: never read again."""
+    svc, neuron = service
+    neuron.link_signature = (188, LINKED)
+    disk = FakeDisk()
     svc._disk_meshes = disk
+    first = svc.render_mesh(943, "i", method="cylinder")
+    (stored,) = disk.puts
+    assert ("links", 188, LINKED.isoformat()) in stored
+    assert all("-07:00" not in repr(k) for k in disk.gets), "the legacy key is not asked for"
+    assert len(disk.gets) == 1
+
+    # The same links on another load: the surface on disk.
+    svc._meshes.clear()
     svc._build_mesh = lambda *a, **k: (_ for _ in ()).throw(AssertionError("rebuilt"))
-    dto = svc.render_mesh(943, "i", method="cylinder")
-    assert dto.n_faces == len(disk.mesh.faces)
-    assert len(disk.puts) == 1
-    new_key = repr(disk.puts[0])
-    assert "+00:00" in new_key and "-07:00" not in new_key and ", 190, " in new_key
+    assert svc.render_mesh(943, "i", method="cylinder").n_faces == first.n_faces
+
+    # A link made in Viking: another key, so the surface is built again.
+    del svc._build_mesh
+    svc._meshes.clear()
+    neuron.load_serial = "after-the-link"
+    neuron.link_signature = (189, datetime(2026, 11, 19, 22, 2, 38, tzinfo=UTC))
+    svc.render_mesh(943, "i", method="cylinder")
+    assert len(disk.puts) == 2 and ("links", 189, "2026-11-19T22:02:38+00:00") in disk.puts[1]
+
+
+def test_the_summary_tokens_follow_what_the_copy_was_built_from(service):
+    """The page keys its surfaces on ``surface_token`` and all it computes from the
+    cell on ``viking_token``: the stamp did not move for a synapse added or retagged
+    or a link made, and an Update left the Morphology card as it was."""
+    svc, neuron = service
+    neuron.link_signature = (188, LINKED)
+    neuron.children_loaded = True
+    neuron.children_stamp = parse_datetime("2026-11-19T22:50:05.367Z")
+    first = svc.neuron_detail(943, "i").summary
+    assert len(first.surface_token) == len(first.viking_token) == 12
+
+    neuron.children_stamp = parse_datetime("2026-11-20T09:00:00Z")      # a synapse retagged
+    retagged = svc.neuron_detail(943, "i").summary
+    assert retagged.surface_token == first.surface_token, "a synapse is not the surface"
+    assert retagged.viking_token != first.viking_token
+
+    neuron.link_signature = (189, LINKED)                                   # a link made
+    linked = svc.neuron_detail(943, "i").summary
+    assert linked.surface_token != first.surface_token
+    assert linked.viking_token != retagged.viking_token
+
+    neuron.data_stamp = None                                                # a file import
+    bare = svc.neuron_detail(943, "i").summary
+    assert bare.surface_token == bare.viking_token == ""
 
 
 class FakeLastModified:
@@ -373,3 +481,26 @@ def test_show_last_modified_asks_viking_and_reads_the_time_as_utc(service):
     assert svc.last_modified_annotation(943, "i")["last_modified"] == answer["last_modified"]
     viking.row = None
     assert svc.last_modified_annotation(943, "i") is None
+
+
+def test_the_bulk_swc_archive_checks_each_cell_against_viking(i943_path, monkeypatch):
+    """A cell not open in the page went into the archive as first fetched, for
+    good: the loader read the disk with no check (2026-11-20)."""
+    import sbfsem.service.facade as facade_mod
+
+    viking = _Viking(LIVE, own_count=190, links=(188, LINKED))
+    loads = _Loads(i943_path, viking)
+    monkeypatch.setattr(facade_mod, "NeuronLoader", loads)
+    svc = SbfsemService(offline=True)
+    svc.offline = False                      # Viking is the fake
+    svc.client = lambda source: viking
+    try:
+        archive = lambda: svc.swc_archive([943], "i", section_corrections="off",  # noqa: E731
+                                          live_registration=False)
+        archive()
+        assert loads.calls == ["cached"], "the disk's copy, current in Viking"
+        viking.links = (189, datetime(2026, 11, 19, 22, 2, 38, tzinfo=UTC))   # a link made
+        archive()
+        assert loads.calls[-2:] == ["cached", "fresh"], "checked, and fetched again"
+    finally:
+        svc.close()

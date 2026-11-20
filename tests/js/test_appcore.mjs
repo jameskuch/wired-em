@@ -40,6 +40,8 @@ test('a surface is keyed on the cell, its copy, its stamp and the options', () =
   assert.notEqual(base, meshCacheKey(cell(1178, { copy_tag: 'off.0' }), 'pathway=voxel2'),
     'another copy of the cell (its correction mode / transforms) is another surface');
   assert.notEqual(base, meshCacheKey(cell(1179), 'pathway=voxel2'), 'cell');
+  assert.notEqual(base, meshCacheKey(cell(1178, { surface_token: '0c41aa9e2b7d' }), 'pathway=voxel2'),
+    'an annotation deleted or a link made in Viking: the stamp stays, the surface does not (2026-11-20)');
   assert.equal(base, meshCacheKey(cell(1178), 'pathway=voxel2'), 'same inputs, same key');
 });
 
@@ -584,6 +586,8 @@ test('a kept extra is keyed on the cell, its annotations and their positions, no
   assert.notEqual(base, extrasKey(loaded({ n_nodes: 2486 }), 'outlines'),
     'an annotation deleted: the newest stamp can stay as it was, the count cannot');
   assert.notEqual(base, extrasKey(loaded({ last_modified: '2026-10-20T18:00:00Z' }), 'outlines'), 'the structure row edited');
+  assert.notEqual(base, extrasKey(loaded({ viking_token: '77aa01c2e9f0' }), 'outlines'),
+    'a synapse added or retagged, or a link made: the stamp does not move (2026-11-20)');
   assert.equal(extrasKey(loaded({ data_stamp: null }), 'outlines'), null, 'a file import is never kept');
   assert.equal(extrasKey(null, 'outlines'), null);
 });
