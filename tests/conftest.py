@@ -51,6 +51,34 @@ def _private_dirs(tmp_path_factory):
     patch.undo()
 
 
+_UNSET = object()
+
+
+@pytest.fixture
+def swap_state():
+    """``swap_state(app.state, name, value)``: set an attribute of a Starlette
+    ``State`` for one test and put the one it replaced back afterward.
+
+    Not ``monkeypatch.setattr``: since pytest 9.2.0 its undo deletes an attribute
+    that is not in the object's ``__dict__``, and ``State`` keeps every attribute
+    in a dict of its own, so a test that swapped ``cell_renders`` on the
+    module-wide app took it away from the tests after it (CI on the public copy,
+    2026-10-28 to 2026-11-20).
+    """
+    swapped: list[tuple[object, str, object]] = []
+
+    def swap(state: object, name: str, value: object) -> None:
+        swapped.append((state, name, getattr(state, name, _UNSET)))
+        setattr(state, name, value)
+
+    yield swap
+    for state, name, old in reversed(swapped):
+        if old is _UNSET:
+            delattr(state, name)
+        else:
+            setattr(state, name, old)
+
+
 @pytest.fixture(scope="session")
 def i943_path() -> Path:
     return FIXTURES / "i943.json"

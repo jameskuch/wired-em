@@ -1256,14 +1256,12 @@ def test_saves_writing_to_a_missing_folder_is_a_clean_error(save_client):
     assert "folder" in r.json()["detail"].lower()
 
 
-def test_render_prefs_roundtrip(client, tmp_path, monkeypatch):
+def test_render_prefs_roundtrip(client, tmp_path, swap_state):
     """A render attached to a cell persists on the server and comes back with
     the cell's detail, so every future load starts from it."""
     from sbfsem_web.saves import CellRenderStore
 
-    app = client.app
-    monkeypatch.setattr(app.state, "cell_renders",
-                        CellRenderStore(tmp_path / "cell-renders"), raising=False)
+    swap_state(client.app.state, "cell_renders", CellRenderStore(tmp_path / "cell-renders"))
 
     assert client.get("/api/neurons/i/943/render-prefs").json() == {"render": None}
     put = client.put("/api/neurons/i/943/render-prefs",
@@ -1286,13 +1284,12 @@ def test_render_prefs_roundtrip(client, tmp_path, monkeypatch):
                       json={"pathway": "bogus"}).status_code == 422
 
 
-def test_an_attached_render_keeps_the_cut_and_the_strata_coloring(client, tmp_path, monkeypatch):
+def test_an_attached_render_keeps_the_cut_and_the_strata_coloring(client, tmp_path, swap_state):
     """The viewer sends its whole render; the body used to be the diff's, which
     leaves the view's own options out, so a Clip IPL came back as no clip."""
     from sbfsem_web.saves import CellRenderStore
 
-    monkeypatch.setattr(client.app.state, "cell_renders",
-                        CellRenderStore(tmp_path / "cell-renders"), raising=False)
+    swap_state(client.app.state, "cell_renders", CellRenderStore(tmp_path / "cell-renders"))
     sent = {"pathway": "voxel", "clip_ipl": 0.4, "keep_above": False, "color_by_strata": True,
             "clip_z": 12.5}
     stored = client.put("/api/neurons/i/943/render-prefs", json=sent).json()["render"]
@@ -1308,12 +1305,12 @@ def test_an_attached_render_keeps_the_cut_and_the_strata_coloring(client, tmp_pa
                       json={"smooth_iterations": 51}).status_code == 422
 
 
-def test_an_attached_render_needs_a_structure_id_and_a_bounded_number_of_them(client, tmp_path, monkeypatch):
+def test_an_attached_render_needs_a_structure_id_and_a_bounded_number_of_them(
+        client, tmp_path, monkeypatch, swap_state):
     from sbfsem_web import saves
     from sbfsem_web.saves import CellRenderStore
 
-    monkeypatch.setattr(client.app.state, "cell_renders",
-                        CellRenderStore(tmp_path / "cell-renders"), raising=False)
+    swap_state(client.app.state, "cell_renders", CellRenderStore(tmp_path / "cell-renders"))
     for bad in ("0", "-5", str(2**31)):
         for method in ("get", "put", "delete"):
             kwargs = {"json": {}} if method == "put" else {}
@@ -1356,14 +1353,12 @@ def test_locate_finds_a_loaded_annotation_and_404s_an_unknown_one(client):
     assert client.get("/api/volumes/i/locations/987654321").status_code == 404
 
 
-def test_voxel2_pathway_is_accepted_everywhere(client, tmp_path, monkeypatch):
+def test_voxel2_pathway_is_accepted_everywhere(client, tmp_path, swap_state):
     """The fifth pathway passes the same validation as the others: the mesh
     endpoint, attached renders and the diff body."""
     from sbfsem_web.saves import CellRenderStore
 
-    app = client.app
-    monkeypatch.setattr(app.state, "cell_renders",
-                        CellRenderStore(tmp_path / "cell-renders"), raising=False)
+    swap_state(client.app.state, "cell_renders", CellRenderStore(tmp_path / "cell-renders"))
     put = client.put("/api/neurons/i/943/render-prefs",
                      json={"pathway": "voxel2", "voxel2_um": 0.1, "voxel2_faces": 0})
     assert put.status_code == 200

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### The public copy's CI passes under pytest 9.2.0 (2026-11-20)
+
+- **GitHub's CI on the public copy had failed since 2.43.0 (2026-10-28), the same two tests on all four jobs, and the app was not at fault.** That run was the first to install pytest 9.2.0; this Mac's venv still has 9.1.1, so the deploy gate stayed green. 9.2.0 undoes a `monkeypatch.setattr` by deleting an attribute that is not in the object's `__dict__`, and Starlette's `app.state` keeps its attributes in a dict of its own. Four tests in `test_web.py` that swapped in a temporary `cell_renders` so took it away from the module's shared app, and the next two that read a cell's detail (`test_each_tab_is_answered_from_its_own_copy_of_a_cell`, `test_a_load_with_manual_moves_names_its_copy_and_a_bad_move_is_a_400`) failed. Those four, and the library test that swaps `libraries`, now use a `swap_state` fixture (`tests/conftest.py`) that puts the old value back. `test_web.py` and `test_library_and_cache.py` under pytest 9.2.0: 2 failed before, 139 of 139 after; under 9.1.1, 139 of 139.
+- The workflow uses `actions/checkout@v7` and `actions/setup-python@v7`, which run on Node 24; v4 and v5 drew a Node 20 deprecation warning on every job.
+
 ### Running, testing, deploying and publishing from a git worktree (2026-11-20)
 
 - **A worktree's `.venv` is a link to the main checkout's, whose editable install imports the main checkout's `src`.** Shipping 2.47.0's toolbar check from a worktree ran into this four ways; each is fixed, with a test that fails on the old file (4 of 4).

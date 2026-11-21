@@ -131,12 +131,11 @@ def test_validate_gradient_orders_and_pins_the_ends():
         validate_library_doc("nothing", {})
 
 
-def test_library_routes(client, tmp_path, monkeypatch):
-    app = client.app
-    monkeypatch.setattr(app.state, "libraries", {
+def test_library_routes(client, tmp_path, swap_state):
+    swap_state(client.app.state, "libraries", {
         "materials": LibraryStore(tmp_path / "materials"),
         "gradients": LibraryStore(tmp_path / "gradients"),
-    }, raising=False)
+    })
     assert client.get("/api/library/materials").json() == {"kind": "materials", "entries": []}
     put = client.put("/api/library/materials/Velvet 2", json={"sheen": 1, "roughness": 1})
     assert put.status_code == 200, put.text
